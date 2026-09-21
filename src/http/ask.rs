@@ -156,6 +156,9 @@ pub async fn stream(
             }
         };
 
+        // The streaming path bypasses ProgressSink::track, so without this the
+        // generate stage never appears in timings at all — on the product path.
+        let gen_started = std::time::Instant::now();
         let mut answer = String::new();
         while let Some(item) = stream.next().await {
             match item {
@@ -177,6 +180,17 @@ pub async fn stream(
                 }
             }
         }
+
+        let gen_ms = gen_started.elapsed().as_millis() as u64;
+        tracing::info!(
+            stage = "generate", ms = gen_ms, ask_id = %ask.ask_id,
+            chars = answer.len(), "stage ok"
+        );
+        ask.stages.push(crate::types::StageRecord {
+            stage: Stage::Generate,
+            ms: gen_ms,
+            ok: true,
+        });
 
         ask.answer = Some(answer);
         yield sse(done_event(&ask));

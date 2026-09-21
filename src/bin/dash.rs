@@ -3,8 +3,8 @@
 //! Reads what the service already emits instead of adding an endpoint or a metrics
 //! channel: every number here comes from existing `tracing` events.
 //!
-//!   LOG_FORMAT=json ./recall 2>&1 | recall-dash
-//!   tail -f /tmp/recall.log | recall-dash
+//!   recall-dash /tmp/recall.jsonl          # preferred: follow the dev.sh log file
+//!   LOG_FORMAT=json ./recall 2>&1 | recall-dash   # pipe mode (macOS needs use-dev-tty)
 //!
 //! q / Esc / Ctrl-C to quit.
 
@@ -56,13 +56,26 @@ impl Stage {
     }
 }
 
+struct CandidateRow {
+    statement: String,
+    noul: f64,
+    origin: String,
+    admitted: bool,
+}
+
 struct Ask {
     id: String,
+    question: String,
+    brain_id: String,
+    personal: u64,
+    granted: u64,
     admitted: u64,
     candidates: u64,
     top_noul: f64,
     empty: bool,
     total_ms: u64,
+    ranked: Vec<CandidateRow>,
+    complete: bool,
 }
 
 #[derive(Default)]
@@ -77,11 +90,33 @@ struct App {
     threshold: f64,
     calibrated: bool,
     started: Option<Instant>,
+    /// Index into `asks` (0 = oldest). j/k moves selection.
+    selected: Option<usize>,
 }
 
 impl App {
     fn stage(&mut self, name: &str) -> &mut Stage {
         self.stages.entry(name.to_string()).or_default()
+    }
+
+    fn ensure_ask(&mut self, id: &str) -> &mut Ask {
+        if let Some(i) = self
+            .asks
+            .iter()
+            .position(|a| a.id == id || a.id.starts_with(id) || id.starts_with(&a.id))
+        {
+            return &mut self.asks[i];
+        }
+        self.asks.push_back(Ask {
+            id: id.to_string(),
+            ..Default::default()
+        });
+        if self.asks.len() > 200 {
+            self.asks.pop_front();
+            self.selected = self.selected.map(|s| s.saturating_sub(1));
+        }
+        self.selected = Some(self.asks.len().saturating_sub(1));
+        self.asks.back_mut().unwrap()
     }
 
     fn ingest(&mut self, line: &str) {
@@ -91,6 +126,24 @@ impl App {
         let text = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
 
         match msg {
+            "ask started" => {
+                let id = text("ask_id").unwrap_or_default();
+                if id.is_empty() {
+                    return;
+                }
+                let ask = self.ensure_ask(&id);
+                ask.question = text("question").unwrap_or_default();
+                ask.brain_id = text("brain_id").unwrap_or_default();
+            }
+            "retrieved from nexus" => {
+                let id = text("ask_id").unwrap_or_default();
+                if id.is_empty() {
+                    return;
+                }
+                let ask = self.ensure_ask(&id);
+                ask.personal = num("personal").unwrap_or(0.0) as u64;
+                ask.granted = num("granted").unwrap_or(0.0) as u64;
+            }
             "stage ok" | "stage failed" => {
                 let (Some(stage), Some(ms)) = (text("stage"), num("ms")) else { return };
                 let ok = msg == "stage ok";
@@ -115,20 +168,61 @@ impl App {
                     .and_then(Value::as_bool)
                     .unwrap_or(self.calibrated);
                 let total_ms = self.inflight.remove(&id).unwrap_or(0);
-                self.total_asks += 1;
-                if admitted == 0 {
-                    self.empty_admits += 1;
+                let question = text("question").unwrap_or_default();
+                let ranked = parse_ranked(v.get("ranked"));
+                let idx = if id.is_empty() {
+                    self.asks.push_back(Ask::default());
+                    self.asks.len() - 1
+                } else if let Some(i) = self
+                    .asks
+                    .iter()
+                    .position(|a| a.id == id || a.id.starts_with(&id) || id.starts_with(&a.id))
+                {
+                    i
+                } else {
+                    self.asks.push_back(Ask {
+                        id: id.clone(),
+                        ..Default::default()
+                    });
+                    self.asks.len() - 1
+                };
+                let ask = &mut self.asks[idx];
+                if !ask.complete {
+                    self.total_asks += 1;
+                    if admitted == 0 {
+                        self.empty_admits += 1;
+                    }
                 }
-                self.asks.push_back(Ask {
-                    id: id.chars().take(8).collect(),
-                    admitted,
-                    candidates: num("candidates").unwrap_or(0.0) as u64,
-                    top_noul: num("top_noul").unwrap_or(0.0),
-                    empty: admitted == 0,
-                    total_ms,
-                });
+                if ask.question.is_empty() {
+                    ask.question = question;
+                }
+                ask.admitted = admitted;
+                ask.candidates = num("candidates").unwrap_or(0.0) as u64;
+                ask.top_noul = num("top_noul").unwrap_or(0.0);
+                ask.empty = admitted == 0;
+                ask.total_ms = total_ms;
+                ask.ranked = ranked;
+                ask.complete = true;
+                self.selected = Some(idx);
                 if self.asks.len() > 200 {
                     self.asks.pop_front();
+                    self.selected = self.selected.map(|s| s.saturating_sub(1));
+                }
+            }
+            // Emitted separately from "admission complete" because it carries the
+            // question and memory text, so it is debug-only.
+            "ask detail" => {
+                let id = text("ask_id").unwrap_or_default();
+                if id.is_empty() {
+                    return;
+                }
+                let (q, ranked) = (text("question"), parse_ranked(v.get("ranked")));
+                let ask = self.ensure_ask(&id);
+                if let Some(q) = q {
+                    ask.question = q;
+                }
+                if !ranked.is_empty() {
+                    ask.ranked = ranked;
                 }
             }
             "withheld secret-sensitivity rows" => self
@@ -147,20 +241,113 @@ impl App {
             self.events.pop_front();
         }
     }
+
+    fn move_selection(&mut self, delta: i32) {
+        if self.asks.is_empty() {
+            return;
+        }
+        let n = self.asks.len();
+        let cur = self.selected.unwrap_or(n.saturating_sub(1));
+        let next = (cur as i32 + delta).clamp(0, n as i32 - 1) as usize;
+        self.selected = Some(next);
+    }
 }
 
-fn main() -> io::Result<()> {
-    let (tx, rx) = mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        use std::io::BufRead;
-        for line in io::stdin().lock().lines().map_while(Result::ok) {
-            if tx.send(line).is_err() {
-                break;
+impl Default for Ask {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            question: String::new(),
+            brain_id: String::new(),
+            personal: 0,
+            granted: 0,
+            admitted: 0,
+            candidates: 0,
+            top_noul: 0.0,
+            empty: false,
+            total_ms: 0,
+            ranked: Vec::new(),
+            complete: false,
+        }
+    }
+}
+
+fn parse_ranked(v: Option<&Value>) -> Vec<CandidateRow> {
+    let arr = match v {
+        Some(Value::String(s)) => serde_json::from_str(s).ok(),
+        Some(Value::Array(a)) => Some(a.clone()),
+        _ => None,
+    };
+    let Some(arr) = arr else { return Vec::new() };
+    arr.iter()
+        .filter_map(|row| {
+            Some(CandidateRow {
+                statement: row.get("statement")?.as_str()?.to_string(),
+                noul: row.get("noul")?.as_f64()?,
+                origin: row.get("origin")?.as_str().unwrap_or("?").to_string(),
+                admitted: row.get("admitted")?.as_bool()?,
+            })
+        })
+        .collect()
+}
+
+enum LogSource {
+    Stdin,
+    FollowFile(String),
+}
+
+fn spawn_log_reader(tx: mpsc::Sender<String>, source: LogSource) {
+    std::thread::spawn(move || match source {
+        LogSource::Stdin => {
+            use std::io::BufRead;
+            for line in io::stdin().lock().lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        }
+        LogSource::FollowFile(path) => {
+            use std::fs::File;
+            use std::io::{BufRead, BufReader};
+            let Ok(file) = File::open(&path) else {
+                eprintln!("recall-dash: cannot open {path}");
+                return;
+            };
+            let mut reader = BufReader::new(file);
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => std::thread::sleep(Duration::from_millis(200)),
+                    Ok(_) => {
+                        if tx.send(line.trim_end_matches('\n').to_string()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
             }
         }
     });
+}
 
-    enable_raw_mode()?;
+fn main() -> io::Result<()> {
+    let source = match std::env::args().nth(1) {
+        Some(path) => LogSource::FollowFile(path),
+        None => LogSource::Stdin,
+    };
+
+    let (tx, rx) = mpsc::channel::<String>();
+    spawn_log_reader(tx, source);
+
+    enable_raw_mode().map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::NotConnected,
+            format!(
+                "{e}. Run recall-dash from an interactive terminal. \
+                 If dev.sh is already running, prefer: recall-dash /tmp/recall.jsonl"
+            ),
+        )
+    })?;
     let mut out = io::stdout();
     execute!(out, EnterAlternateScreen)?;
     let mut term = Terminal::new(CrosstermBackend::new(out))?;
@@ -179,10 +366,12 @@ fn main() -> io::Result<()> {
         }
         if event::poll(Duration::from_millis(120))? {
             if let Event::Key(k) = event::read()? {
-                let quit = matches!(k.code, KeyCode::Char('q') | KeyCode::Esc)
-                    || (k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL));
-                if quit {
-                    break Ok(());
+                match k.code {
+                    KeyCode::Char('q') | KeyCode::Esc => break Ok(()),
+                    KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => break Ok(()),
+                    KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
+                    KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
+                    _ => {}
                 }
             }
         }
@@ -217,8 +406,9 @@ fn draw(f: &mut Frame, app: &App) {
     let rows = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(10),
-        Constraint::Min(6),
-        Constraint::Length(8),
+        Constraint::Length(7),
+        Constraint::Min(8),
+        Constraint::Length(6),
     ])
     .split(f.area());
 
@@ -229,7 +419,8 @@ fn draw(f: &mut Frame, app: &App) {
     admission(f, mid[1], app);
 
     asks_table(f, rows[2], app);
-    events(f, rows[3], app);
+    ask_detail(f, rows[3], app);
+    events(f, rows[4], app);
 }
 
 fn header(f: &mut Frame, area: Rect, app: &App) {
@@ -350,24 +541,32 @@ fn admission(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn asks_table(f: &mut Frame, area: Rect, app: &App) {
+    let sel = app.selected.unwrap_or_else(|| app.asks.len().saturating_sub(1));
     let rows: Vec<Row> = app
         .asks
         .iter()
+        .enumerate()
         .rev()
         .take(area.height.saturating_sub(3) as usize)
-        .map(|a| {
-            let (verdict, c) = if a.empty {
+        .map(|(i, a)| {
+            let (verdict, c) = if !a.complete {
+                ("…", DIM)
+            } else if a.empty {
                 ("empty", WARN)
             } else {
                 ("answered", OK)
             };
+            let q = trunc_display(&a.question, 48);
+            let style = if Some(i) == app.selected {
+                Style::new().fg(FG).add_modifier(Modifier::REVERSED)
+            } else {
+                Style::new().fg(FG)
+            };
             Row::new(vec![
-                Cell::from(a.id.clone()).style(Style::new().fg(DIM)),
-                Cell::from(format!("{}/{}", a.admitted, a.candidates)),
-                Cell::from(format!("{:.3}", a.top_noul)).style(Style::new().fg(
-                    if a.top_noul >= app.threshold { OK } else { BAD },
-                )),
-                Cell::from(format!("{}ms", a.total_ms)),
+                Cell::from(a.id.chars().take(8).collect::<String>()).style(style),
+                Cell::from(q).style(style),
+                Cell::from(format!("{}/{}", a.admitted, a.candidates)).style(style),
+                Cell::from(format!("{:.3}", a.top_noul)).style(style),
                 Cell::from(verdict).style(Style::new().fg(c).add_modifier(Modifier::BOLD)),
             ])
         })
@@ -377,19 +576,101 @@ fn asks_table(f: &mut Frame, area: Rect, app: &App) {
         rows,
         [
             Constraint::Length(10),
+            Constraint::Min(20),
             Constraint::Length(10),
             Constraint::Length(10),
             Constraint::Length(10),
-            Constraint::Min(8),
         ],
     )
     .header(
-        Row::new(vec!["ask", "adm/cand", "top noul", "elapsed", "verdict"])
+        Row::new(vec!["ask", "question", "adm/cand", "top noul", "verdict"])
             .style(Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
     )
-    .block(block("recent asks"));
+    ;
+    let title = format!("recent asks  j/k select  sel={sel}");
+    let table = table.block(block(&title));
 
     f.render_widget(table, area);
+}
+
+fn ask_detail(f: &mut Frame, area: Rect, app: &App) {
+    let inner = block("ask detail");
+    let region = inner.inner(area);
+    f.render_widget(inner, area);
+
+    let Some(idx) = app.selected.or_else(|| app.asks.len().checked_sub(1)) else {
+        f.render_widget(
+            Paragraph::new("  no asks yet").style(Style::new().fg(DIM)),
+            region,
+        );
+        return;
+    };
+    let Some(ask) = app.asks.get(idx) else {
+        return;
+    };
+
+    let meta = Line::from(vec![
+        Span::styled(" brain ", Style::new().fg(DIM)),
+        Span::styled(trunc_display(&ask.brain_id, 36), Style::new().fg(FG)),
+        Span::styled("  │  retrieve ", Style::new().fg(DIM)),
+        Span::styled(format!("{} personal + {} granted", ask.personal, ask.granted), Style::new().fg(ACCENT)),
+        Span::styled("  │  ", Style::new().fg(DIM)),
+        Span::styled(format!("{}ms", ask.total_ms), Style::new().fg(DIM)),
+    ]);
+    let question = Paragraph::new(Line::from(vec![
+        Span::styled(" Q  ", Style::new().fg(MAUVE).add_modifier(Modifier::BOLD)),
+        Span::styled(ask.question.clone(), Style::new().fg(FG)),
+    ]));
+
+    let list_h = region.height.saturating_sub(4) as usize;
+    let cand_rows: Vec<Row> = ask
+        .ranked
+        .iter()
+        .take(list_h)
+        .map(|c| {
+            let mark = if c.admitted { "✓" } else { "·" };
+            let colour = if c.admitted {
+                OK
+            } else if c.noul >= app.threshold * 0.8 {
+                WARN
+            } else {
+                DIM
+            };
+            Row::new(vec![
+                Cell::from(mark).style(Style::new().fg(colour).add_modifier(Modifier::BOLD)),
+                Cell::from(format!("{:.3}", c.noul)).style(Style::new().fg(colour)),
+                Cell::from(c.origin.clone()).style(Style::new().fg(DIM)),
+                Cell::from(trunc_display(&c.statement, 72)).style(Style::new().fg(FG)),
+            ])
+        })
+        .collect();
+
+    let slots = Layout::vertical([Constraint::Length(1), Constraint::Length(2), Constraint::Min(3)]).split(region);
+    f.render_widget(meta, slots[0]);
+    f.render_widget(question, slots[1]);
+
+    let table = Table::new(
+        cand_rows,
+        [
+            Constraint::Length(2),
+            Constraint::Length(7),
+            Constraint::Length(10),
+            Constraint::Min(20),
+        ],
+    )
+    .header(
+        Row::new(vec!["", "noul", "origin", "candidate (ranked by noul)"])
+            .style(Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
+    );
+    f.render_widget(table, slots[2]);
+}
+
+fn trunc_display(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(max).collect::<String>())
+    }
 }
 
 fn events(f: &mut Frame, area: Rect, app: &App) {
@@ -422,10 +703,16 @@ mod tests {
     #[test]
     fn ingests_stage_and_admission_lines() {
         let mut app = App::default();
-        app.ingest(r#"{"message":"stage ok","stage":"embed","ms":42,"ask_id":"abc"}"#);
-        app.ingest(r#"{"message":"stage failed","stage":"admit","ms":900,"ask_id":"abc","error":"boom"}"#);
         app.ingest(
-            r#"{"message":"admission complete","ask_id":"abc","candidates":32,"admitted":0,"threshold":0.15,"top_noul":0.04}"#,
+            r#"{"message":"ask started","ask_id":"abc-def","brain_id":"brain-1","question":"When is Ana's birthday?"}"#,
+        );
+        app.ingest(
+            r#"{"message":"retrieved from nexus","ask_id":"abc-def","personal":20,"granted":12}"#,
+        );
+        app.ingest(r#"{"message":"stage ok","stage":"embed","ms":42,"ask_id":"abc-def"}"#);
+        app.ingest(r#"{"message":"stage failed","stage":"admit","ms":900,"ask_id":"abc-def","error":"boom"}"#);
+        app.ingest(
+            r#"{"message":"admission complete","ask_id":"abc-def","question":"When is Ana's birthday?","candidates":32,"admitted":0,"threshold":0.15,"top_noul":0.04,"ranked":"[{\"statement\":\"Ana born March 14\",\"noul\":0.04,\"origin\":\"personal\",\"admitted\":false}]"}"#,
         );
 
         assert_eq!(app.stages["embed"].last(), 42);
@@ -433,6 +720,10 @@ mod tests {
         assert_eq!(app.errors, 1);
         assert_eq!(app.total_asks, 1);
         assert_eq!(app.empty_admits, 1, "admitted=0 is an empty admit");
+        assert_eq!(app.asks[0].question, "When is Ana's birthday?");
+        assert_eq!(app.asks[0].personal, 20);
+        assert_eq!(app.asks[0].granted, 12);
+        assert_eq!(app.asks[0].ranked.len(), 1);
         // 42 + 900 accumulated before the ask completed.
         assert_eq!(app.asks[0].total_ms, 942);
         assert!(app.ingest_noop_on_garbage());

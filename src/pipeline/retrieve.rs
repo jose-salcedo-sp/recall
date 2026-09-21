@@ -26,6 +26,7 @@ use crate::types::{Candidate, Stage};
 /// and it is exercised identically in both environments.
 pub async fn run(
     ctx: &Arc<Ctx>,
+    ask_id: Uuid,
     brain_id: Uuid,
     embedding: &[f32],
     question: &str,
@@ -42,6 +43,7 @@ pub async fn run(
     )?;
 
     tracing::info!(
+        ask_id = %ask_id,
         personal = personal.len(),
         granted = granted.len(),
         k,

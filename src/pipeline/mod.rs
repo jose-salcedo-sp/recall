@@ -139,6 +139,24 @@ pub async fn run_until_admit(
     req.validate().map_err(|e| RecallError::BadRequest(e.into()))?;
     let mut ask = Ask::new(req);
 
+    // Debug, not info: the question is user content and should not land in
+    // production logs by default. `RUST_LOG=recall=debug` turns it on for the
+    // dashboard.
+    tracing::debug!(
+        ask_id = %ask.ask_id,
+        brain_id = %ask.brain_id,
+        question = %ask.question,
+        "ask started"
+    );
+
+    tracing::info!(
+        ask_id = %ask.ask_id,
+        brain_id = %ask.brain_id,
+        question = %trunc_log(&ask.question, 240),
+        as_of = ?ask.as_of,
+        "ask started"
+    );
+
     let embedding = stage!(sink, ask, Stage::Embed, embed::run(ctx, &ask.question));
     ask.embedding = Some(embedding);
 
@@ -148,6 +166,7 @@ pub async fn run_until_admit(
         Stage::Retrieve,
         retrieve::run(
             ctx,
+            ask.ask_id,
             ask.brain_id,
             ask.embedding.as_ref().expect("embedding set above"),
             &ask.question,
@@ -159,7 +178,13 @@ pub async fn run_until_admit(
         sink,
         ask,
         Stage::Admit,
-        admit::run(ctx, &ask.question, ask.as_of_or_now(), &ask.candidates)
+        admit::run(
+            ctx,
+            ask.ask_id,
+            &ask.question,
+            ask.as_of_or_now(),
+            &ask.candidates
+        )
     );
 
     // Write every score back, admitted or not, so the ask record carries the
@@ -196,5 +221,13 @@ pub async fn run(ctx: &Arc<Ctx>, req: AskRequest, sink: &ProgressSink) -> Result
             ask.answer = Some(text);
             Ok(ask)
         }
+    }
+}
+
+fn trunc_log(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(max_chars).collect::<String>())
     }
 }

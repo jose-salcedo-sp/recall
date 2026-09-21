@@ -3,14 +3,13 @@
 #
 #   scripts/dev.sh local           # local Compose corpus (postgres on :5433)
 #   scripts/dev.sh nexus           # Nexus Supabase, read-only
-#   scripts/dev.sh nexus | recall-dash
 #
 # .env holds Compose-internal hostnames (systemone, generator) and the Nexus
 # DATABASE_URL, neither of which is right for a host-side run, so the overrides
 # below exist rather than a second env file to keep in sync.
 #
-# Logs are JSON on stdout and tee'd to /tmp/recall.jsonl, so the dashboard can be
-# attached now (by piping) or later (tail -f /tmp/recall.jsonl | recall-dash).
+# Logs are JSON on stdout and tee'd to /tmp/recall.jsonl. In a second terminal:
+#   recall-dash /tmp/recall.jsonl
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

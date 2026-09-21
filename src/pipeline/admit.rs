@@ -30,6 +30,7 @@ pub struct Admission {
 
 pub async fn run(
     ctx: &Arc<Ctx>,
+    ask_id: uuid::Uuid,
     question: &str,
     as_of: DateTime<Utc>,
     candidates: &[Candidate],
@@ -77,12 +78,29 @@ pub async fn run(
         })
         .collect();
 
+    let ranked: Vec<serde_json::Value> = scored
+        .iter()
+        .take(12)
+        .map(|(c, noul)| {
+            serde_json::json!({
+                "statement": trunc_stmt(&c.statement, 100),
+                "noul": noul,
+                "origin": c.origin,
+                "admitted": *noul >= threshold,
+            })
+        })
+        .collect();
+    let ranked_json = serde_json::to_string(&ranked).unwrap_or_else(|_| "[]".into());
+
     tracing::info!(
+        ask_id = %ask_id,
+        question = %trunc_stmt(question, 240),
         candidates = candidates.len(),
         admitted = admitted.len(),
         threshold,
         calibrated = ctx.cfg.admit_threshold_is_calibrated,
         top_noul = scored.first().map(|(_, n)| *n),
+        ranked = ranked_json,
         "admission complete"
     );
 
@@ -99,6 +117,29 @@ pub async fn run(
         }
     }
 
+    // Every candidate with its score and verdict, for the dashboard's detail pane
+    // and for eyeballing why something was or was not admitted. Debug because it
+    // carries memory text.
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        let ranked: Vec<_> = scored
+            .iter()
+            .map(|(c, noul)| {
+                serde_json::json!({
+                    "statement": c.statement,
+                    "noul": noul,
+                    "origin": c.origin,
+                    "admitted": admitted.iter().any(|a| a.id == c.id),
+                })
+            })
+            .collect();
+        tracing::debug!(
+            ask_id = %ask_id,
+            question = %question,
+            ranked = %serde_json::Value::Array(ranked),
+            "ask detail"
+        );
+    }
+
     Ok(Admission {
         admitted,
         scores: candidates
@@ -106,6 +147,14 @@ pub async fn run(
             .map(|c| (c.id, scores.get(&c.id.to_string()).copied().unwrap_or(0.0)))
             .collect(),
     })
+}
+
+fn trunc_stmt(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(max_chars).collect::<String>())
+    }
 }
 
 #[cfg(test)]
