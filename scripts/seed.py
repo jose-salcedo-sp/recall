@@ -14,7 +14,7 @@ Env:
     DATABASE_URL   default postgresql://recall:recall@localhost:5432/recall
     EMBEDDER_URL   default https://api.openai.com
     OPENAI_API_KEY / EMBEDDER_API_KEY   required by that provider
-    NEXUS_EMBEDDING_MODEL   default text-embedding-3-small
+    NEXUS_EMBEDDING_MODEL   default openai/text-embedding-3-small
 
 Embeds `statement + " " + text` via POST {EMBEDDER_URL}/v1/embeddings
 (OpenAI-compatible). Upserts into brain_id 00000000-0000-0000-0000-000000000001.
@@ -33,7 +33,7 @@ EXPECTED_DIM = 1536
 # The local corpus is embedded with the same model Nexus indexed with. There is no
 # local substitute: a different model at the same dimension would pass every check
 # and return meaningless neighbours, which is worse than an error.
-MODEL = os.environ.get("NEXUS_EMBEDDING_MODEL", "text-embedding-3-small")
+MODEL = os.environ.get("NEXUS_EMBEDDING_MODEL", "openai/text-embedding-3-small")
 API_KEY = os.environ.get("EMBEDDER_API_KEY") or os.environ.get("OPENAI_API_KEY")
 BATCH = 32
 

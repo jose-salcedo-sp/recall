@@ -30,7 +30,7 @@ PROBES = {
 
 def post(path, body):
     req = urllib.request.Request(
-        f"{BASE}{path}", json.dumps(body).encode(), {"Content-Type": "application/json"}
+        f"{BASE}{path}", json.dumps(body).encode(), {"Content-Type": "application/json", "Authorization": "Bearer " + os.environ.get("RECALL_SERVICE_TOKEN","")}
     )
     return json.load(urllib.request.urlopen(req, timeout=600))
 
@@ -52,7 +52,7 @@ def main():
     fails = 0
     for question, expect in PROBES.items():
         r = post("/v1/ask/sync", {"question": question, "brain_id": BRAIN})
-        audit = json.load(urllib.request.urlopen(f"{BASE}/v1/asks/{r['ask_id']}", timeout=60))
+        audit = json.load(urllib.request.urlopen(urllib.request.Request(f"{BASE}/v1/asks/{r['ask_id']}", headers={"Authorization": "Bearer " + os.environ.get("RECALL_SERVICE_TOKEN","")}), timeout=60))
         cands = audit["candidates"]
         names = statements([c["id"] for c in cands])
         ranked = sorted(cands, key=lambda c: -(c["noul"] or 0))

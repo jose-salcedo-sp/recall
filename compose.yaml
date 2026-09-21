@@ -71,9 +71,9 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgres://recall:recall@postgres:5432/recall}
       # Embeddings must come from the model Nexus indexed with; there is no
       # local substitute, so this points at the real provider in every environment.
-      EMBEDDER_URL: ${EMBEDDER_URL:-https://api.openai.com}
+      EMBEDDER_URL: ${EMBEDDER_URL:-https://ai-gateway.vercel.sh}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      NEXUS_EMBEDDING_MODEL: ${NEXUS_EMBEDDING_MODEL:-text-embedding-3-small}
+      NEXUS_EMBEDDING_MODEL: ${NEXUS_EMBEDDING_MODEL:-openai/text-embedding-3-small}
       EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
       SYSTEM_ONE_URL: ${SYSTEM_ONE_URL:-http://systemone:8082}
       GENERATOR_URL: ${GENERATOR_URL:-http://generator:8080}
