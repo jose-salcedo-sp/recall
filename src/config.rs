@@ -52,11 +52,11 @@ impl Config {
 
             retrieve_k: env_or("RETRIEVE_K", 32),
             admit_batch_size: env_or("ADMIT_BATCH_SIZE", 32),
-            // Provisional, and measured rather than fitted. On raw Laya output the
-            // top score for a question the corpus can answer ranged from 0.22 to
-            // 0.69 across three probes, so architecture.md's 0.7 refuses answerable
-            // questions outright. 0.15 admits them, at a precision cost that is
-            // currently unquantified. Phase 4 replaces this with a fitted value.
+            // Provisional: measured on four probes, not fitted on a labeled set.
+            // Answerable questions topped out at 0.261-0.665 and an unanswerable one
+            // at 0.045, so anything in ~0.1-0.25 separates them; architecture.md's
+            // 0.7 would refuse all of them. Phase 4 replaces this with a fitted
+            // value and a precision/recall curve. See plan.md Finding 4.
             admit_threshold: env_or("ADMIT_THRESHOLD", 0.15),
             admit_threshold_is_calibrated: env_or("ADMIT_THRESHOLD_CALIBRATED", false),
             max_citations: env_or("MAX_CITATIONS", 4),

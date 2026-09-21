@@ -1,7 +1,8 @@
 # Multi-stage build for the Recall Rust service.
 # Arch-agnostic: builds for the container runtime's native platform (arm64 locally, amd64 on RunPod).
 
-FROM rust:1.88 AS builder
+# 1.94+ required: sqlx 0.9, pulled in by pgvector 0.4, sets that MSRV.
+FROM rust:1.98 AS builder
 WORKDIR /app
 
 # Cache dependency compilation separately from application source.

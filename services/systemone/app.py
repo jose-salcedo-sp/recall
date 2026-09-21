@@ -158,21 +158,28 @@ class LayaBackend:
     ) -> dict[str, float]:
         """Score each (question, candidate) pair against its OWN state.
 
-        This must be one state per candidate. In the System One protocol every typed
-        question is evaluated independently against the *same* shared state, so
-        putting all candidates in one state and asking N questions that carry
-        identical instructions gives every candidate an identical score — nothing in
-        the request binds question `mN` to candidate `mN`. That is not a subtle
-        quality problem, it is a classifier that does not discriminate at all.
+        One state per candidate, one `predict` per pair. This is the cross-encoder
+        shape: the question and exactly one passage are encoded jointly, which is
+        what produces a relevance judgement instead of a constant.
 
-        Pairing each candidate with its own state is the cross-encoder shape: the
-        question and the one passage are encoded jointly, which is what produces a
-        relevance judgement rather than a constant.
+        Two alternatives were tried and both are wrong, so they are recorded here:
 
-        `laya.Agent.predict` accepts a single state, so pairs are run in a bounded
-        thread pool rather than a true batch. Torch releases the GIL during the
-        forward pass, so this overlaps; the pool is bounded to avoid oversubscribing
-        the CPU that torch is already threading across.
+        1. All candidates in one shared state, N questions with identical
+           instructions. Laya's `system_one` calls `build_sequence(tok, state, q)`
+           per question and batches with `collate_items`, so the state is shared and
+           only `q` varies — identical instructions therefore produce identical
+           sequences. It returned 0.6649 for every candidate, including a wifi
+           password scored against a question about a birthday.
+        2. Candidate text moved into each question's `instructions`, keeping one
+           batched call. This looked excellent on a three-candidate synthetic probe
+           (0.83 / 0.41 / 0.16 in 0.33s) and was badly wrong on the real corpus: for
+           "When is my sister Ana's birthday?" it scored "Maya's work badge PIN is
+           3301." at 0.410 and the actual Ana birthday chunk at 0.135. `instructions`
+           is not where Laya expects content to be judged.
+
+        The cost of doing it correctly is latency: roughly 15s for 32 candidates on
+        CPU, versus 6s for the batched-but-wrong version. That is the single largest
+        cost in the ask path and the main thing a GPU deployment buys back.
         """
         by_id = {c["id"]: c for c in candidates}
         qids = list(questions.keys())
@@ -189,9 +196,10 @@ class LayaBackend:
                 state["as_of"] = as_of
 
             result = self.agent.predict(state, {qid: questions[qid]})
-            p = float(result["answers"][qid]["noul"])
-            return qid, logit_from_prob(p)
+            return qid, logit_from_prob(float(result["answers"][qid]["noul"]))
 
+        # Torch releases the GIL during the forward pass so these overlap, but it is
+        # already threading across cores internally; an unbounded pool thrashes.
         workers = max(1, min(len(qids), batch_size, (os.cpu_count() or 4) // 2))
         out: dict[str, float] = {}
         with ThreadPoolExecutor(max_workers=workers) as pool:

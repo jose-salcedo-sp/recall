@@ -18,9 +18,11 @@ export EMBEDDER_URL=${EMBEDDER_URL:-http://localhost:8081}
 export SYSTEM_ONE_URL=${SYSTEM_ONE_URL:-http://localhost:8082}
 export GENERATOR_URL=${GENERATOR_URL:-http://localhost:8080}
 export BIND_ADDR=${BIND_ADDR:-127.0.0.1:8000}
-export ADMIT_THRESHOLD=${ADMIT_THRESHOLD:-0.15}
-export ASK_TIMEOUT_MS=${ASK_TIMEOUT_MS:-180000}
-export ADMIT_TIMEOUT_MS=${ADMIT_TIMEOUT_MS:-150000}
+# Pinned, not inherited: these assertions are threshold-dependent, so picking up a
+# stray ADMIT_THRESHOLD from the caller's environment would silently invert them.
+export ADMIT_THRESHOLD=0.15
+export ASK_TIMEOUT_MS=${ASK_TIMEOUT_MS:-300000}
+export ADMIT_TIMEOUT_MS=${ADMIT_TIMEOUT_MS:-280000}
 export RUST_LOG=${RUST_LOG:-info,recall=debug}
 
 pkill -f "target/debug/recall" 2>/dev/null; sleep 1

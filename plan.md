@@ -112,30 +112,38 @@ calibrated as shipped:
 So `admit_threshold` is not a number we pick now. It is the **output of Phase 4**, fit on
 a labeled set, with a precision/recall curve checked in beside it.
 
-**Now confirmed on our own stack, with numbers.** Running the built service against the
-70-chunk seed corpus, the top noul for a question the corpus *can* answer:
+**Now measured on our own stack.** The built service against the 70-chunk seed corpus with
+`retrieve_k = 32`, scores joined to the chunk each belongs to (`scripts/rank_probe.py`):
 
-| Question | top noul | 2nd | 3rd | 4th |
-| --- | --- | --- | --- | --- |
-| "When is my sister Ana's birthday?" | **0.218** | 0.158 | 0.094 | 0.066 |
-| "What am I allergic to?" | **0.648** | 0.305 | 0.219 | 0.215 |
-| "What is the wifi password at the cabin?" | **0.688** | 0.667 | 0.501 | 0.412 |
+| Question | answerable? | top noul | answer chunk rank |
+| --- | --- | --- | --- |
+| "When is my sister Ana's birthday?" | yes | 0.261 | **1** |
+| "What am I allergic to?" | yes | 0.605 | **1** |
+| "What is the wifi password at the cabin?" | yes | 0.665 | 2 |
+| "What is the atomic mass of ruthenium?" | **no** | **0.045** | — |
 
-Two things follow. First, `architecture.md`'s 0.7 would refuse all three — including
-questions whose exact answer sits at rank 1. Second, and worse for the idea of a global
-cutoff, the *correct* answer to the first question scores lower than the *third-best*
-candidate for the third. Retrieval and ranking are fine: the right chunk ranks first every
-time and the generator answers correctly from it. The number itself is the problem.
+The classes separate cleanly here: answerable questions top out at 0.261–0.665 while the
+unanswerable one reaches only 0.045, so any cutoff in roughly 0.1–0.25 works. The default
+is `0.15`. That is still *measured, not fitted* — four probes is not an evaluation, and
+`architecture.md`'s 0.7 would refuse all four — but the earlier fear that no global
+threshold could work was an artefact of a broken scorer, not a property of the model.
 
-The working default is now `0.15`, which is measured, not fitted, and it has a visible
-precision cost: at that level "Maya's birthday is December 5" is admitted alongside Ana's.
-Laya's own loader says the same thing out loud at startup — *"this checkpoint ships
+The one miss is instructive rather than alarming: for the cabin wifi password, "Home wifi
+is Winterthorn-5G" scores 0.692 against the correct cabin chunk's 0.665. Both are wifi
+passwords; the model ranks them nearly tied. `max_citations = 4` means both are admitted
+and the generator sees the right one, but it is exactly the near-duplicate-cluster case
+Phase 4's labeled set needs to cover.
+
+Laya's loader still flags its own calibration at startup — *"this checkpoint ships
 temperatures outside [0.5, 5] which would distort confidence … treat confidence from the
-affected buckets as uncalibrated."*
+affected buckets as uncalibrated"* — so the fitted temperature is still owed.
 
-This strengthens the Phase 4 brief: temperature fitting alone may not be enough, and the
-fallback the literature points to is per-query normalisation — rank or margin within a
-single ask's candidate set rather than one global cutoff.
+**Validating a scorer by sorted scores alone does not work.** An intermediate
+implementation produced a plausible-looking distribution (top scores 0.24–0.71) while
+ranking "Maya's work badge PIN is 3301." above the actual birthday chunk for the birthday
+question. Only joining scores back to statements exposed it. `scripts/rank_probe.py` does
+that join and reports where the answer-bearing chunk actually landed; any future scorer
+change should be judged on rank, not on score distribution.
 
 One more thing the literature backs, and it is why the admission stage exists at all:
 semantic similarity is not the same as containing the answer. Retrieval reliably returns
