@@ -33,6 +33,9 @@ pub struct Candidate {
     pub text: String,
     pub origin: String,
     pub grantor_name: Option<String>,
+    /// Provenance carried through from the mounted rows, untouched.
+    pub source: Option<String>,
+    pub occurred_at: Option<DateTime<Utc>>,
     pub rrf_score: f64,
     /// Filled in by the admit stage.
     pub noul: Option<f64>,
@@ -46,6 +49,12 @@ pub struct Citation {
     pub noul: f64,
     pub origin: String,
     pub grantor_name: Option<String>,
+    /// Provenance from the mounted rows, passed through so the client can show where
+    /// a granted memory came from and when it happened.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub occurred_at: Option<DateTime<Utc>>,
     /// Not serialized to clients; the generator needs the full text to answer from.
     #[serde(skip)]
     pub text: String,

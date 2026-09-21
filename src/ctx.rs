@@ -13,8 +13,13 @@ use crate::config::Config;
 use crate::error::{RecallError, Result};
 use crate::types::Stage;
 
-/// Compiled in so the binary cannot drift from the checked-in SQL.
-pub const HYBRID_RETRIEVE_SQL: &str = include_str!("../sql/hybrid_retrieve.sql");
+// Compiled in so the binary cannot drift from the checked-in SQL.
+//
+// Recall reads the Nexus corpus only through these two functions; it has no table
+// privileges. `hybrid_retrieve.sql` is kept for the local Compose stack and is
+// deliberately not referenced on the Nexus path.
+pub const SQL_SEARCH_PERSONAL: &str = include_str!("../sql/search_personal.sql");
+pub const SQL_SEARCH_MOUNTED: &str = include_str!("../sql/search_mounted.sql");
 
 pub struct Ctx {
     pub cfg: Config,
@@ -44,7 +49,16 @@ impl Ctx {
         let inflight = Arc::new(Semaphore::new(cfg.max_inflight));
 
         Ok(Arc::new(Self {
-            embedder: EmbedderClient::new(http.clone(), cfg.embedder_url.clone()),
+            embedder: EmbedderClient::new(
+                http.clone(),
+                cfg.embedder_url.clone(),
+                cfg.embedding_model.clone(),
+                cfg.embedding_dim,
+                std::env::var("EMBEDDER_API_KEY")
+                    .or_else(|_| std::env::var("OPENAI_API_KEY"))
+                    .ok()
+                    .filter(|s| !s.trim().is_empty()),
+            ),
             system_one: SystemOneClient::new(http.clone(), cfg.system_one_url.clone()),
             generator: GeneratorClient::new(
                 http.clone(),

@@ -18,6 +18,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cfg = config::Config::from_env();
+    cfg.validate()?;
     cfg.warn_if_uncalibrated();
 
     tracing::info!(
@@ -34,11 +35,20 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("failed to build service context")?;
 
-    sqlx::migrate!("./migrations")
-        .run(&ctx.pg)
-        .await
-        .context("migrations failed")?;
-    tracing::info!("migrations applied");
+    // Migrations only where Recall owns the database. Against Nexus this would try
+    // to create the corpus tables in someone else's project, which is exactly the
+    // thing that must not happen — and `recall_search` could not do it anyway.
+    if ctx.cfg.index_writes_enabled {
+        sqlx::migrate!("./migrations")
+            .run(&ctx.pg)
+            .await
+            .context("migrations failed")?;
+        tracing::info!("migrations applied");
+    } else {
+        tracing::info!(
+            "read-only corpus: skipping migrations, index writes and ask persistence"
+        );
+    }
 
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await

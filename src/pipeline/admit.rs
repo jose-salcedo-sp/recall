@@ -71,6 +71,8 @@ pub async fn run(
             noul: *noul,
             origin: c.origin.clone(),
             grantor_name: c.grantor_name.clone(),
+            source: c.source.clone(),
+            occurred_at: c.occurred_at,
             text: c.text.clone(),
         })
         .collect();
@@ -118,6 +120,8 @@ mod tests {
             text: n.to_string(),
             origin: "personal".into(),
             grantor_name: None,
+            source: None,
+            occurred_at: None,
             rrf_score: 0.0,
             noul: None,
         }
@@ -138,6 +142,8 @@ mod tests {
                 noul: *noul,
                 origin: c.origin.clone(),
                 grantor_name: None,
+                source: None,
+                occurred_at: None,
                 text: c.text.clone(),
             })
             .collect()

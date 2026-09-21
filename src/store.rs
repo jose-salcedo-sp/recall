@@ -16,7 +16,21 @@ use crate::types::Ask;
 ///
 /// Never fails an ask. The answer has already been delivered by the time this runs, so
 /// a write failure is logged and swallowed rather than turned into a client error.
+///
+/// Off by default against Nexus: `recall_search` has no table privileges, so every
+/// call would fail and log. Recall must not create tables in the Nexus project to
+/// make this work — enable `PERSIST_ASKS` only where Recall owns its own database.
 pub async fn save_ask(ctx: &Arc<Ctx>, ask: &Ask, error: Option<&str>) {
+    if !ctx.cfg.persist_asks {
+        tracing::debug!(
+            ask_id = %ask.ask_id,
+            admitted = ask.admitted.len(),
+            candidates = ask.candidates.len(),
+            empty = ask.empty,
+            "ask record not persisted (PERSIST_ASKS off)"
+        );
+        return;
+    }
     let candidates = json!(ask
         .candidates
         .iter()

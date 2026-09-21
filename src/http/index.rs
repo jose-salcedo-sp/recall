@@ -8,7 +8,6 @@ use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::clients::embedder::EMBEDDING_DIM;
 use crate::ctx::Ctx;
 use crate::error::{RecallError, Result};
 use crate::store::AskAudit;
@@ -55,7 +54,7 @@ fn default_state() -> String {
 impl UpsertChunk {
     /// The mount invariants from architecture.md, enforced here rather than only by
     /// the DB check constraints so the caller gets a useful message.
-    fn validate(&self) -> Result<()> {
+    fn validate(&self, embedding_dim: usize) -> Result<()> {
         if self.sensitivity == "secret" {
             return Err(RecallError::BadRequest(
                 "sensitivity 'secret' is never indexed".into(),
@@ -89,9 +88,9 @@ impl UpsertChunk {
             ));
         }
         if let Some(e) = &self.embedding {
-            if e.len() != EMBEDDING_DIM {
+            if e.len() != embedding_dim {
                 return Err(RecallError::BadRequest(format!(
-                    "embedding must have {EMBEDDING_DIM} dimensions, got {}",
+                    "embedding must have {embedding_dim} dimensions, got {}",
                     e.len()
                 )));
             }
@@ -106,7 +105,7 @@ pub async fn put_chunk(
     Path(id): Path<Uuid>,
     Json(body): Json<UpsertChunk>,
 ) -> Result<(StatusCode, Json<serde_json::Value>)> {
-    body.validate()?;
+    body.validate(ctx.cfg.embedding_dim)?;
 
     let embedding = match body.embedding {
         Some(e) => e,
