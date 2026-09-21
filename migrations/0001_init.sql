@@ -8,7 +8,7 @@ CREATE TABLE chunks (
     brain_id uuid NOT NULL,
     text text NOT NULL,
     statement text NOT NULL,
-    embedding vector(768) NOT NULL,
+    embedding vector(1536) NOT NULL,
     origin text NOT NULL CHECK (origin IN ('personal', 'granted')),
     grantor_brain_id uuid NULL,
     grantor_name text NULL,

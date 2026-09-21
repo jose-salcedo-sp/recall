@@ -12,9 +12,9 @@
 --
 -- Signatures and column names mirror the deployed Nexus ones exactly, verified with
 -- scripts/introspect_nexus.sh, so sql/search_*.sql is correct against both. Two
--- deliberate differences: the embedding is vector(768) to match the local nomic
--- embedder (Nexus indexes at 1536), and columns the real functions expose but the
--- local corpus has no data for are returned as NULL.
+-- deliberate difference: columns the real functions expose but the local corpus has
+-- no data for are returned as NULL. The vector(1536) type and every column name match
+-- Nexus exactly, so sql/search_*.sql is correct against both with no dimension caveat.
 
 DROP FUNCTION IF EXISTS hybrid_search_brain(uuid, text, vector, timestamptz, int);
 DROP FUNCTION IF EXISTS search_mounted_for_brain(uuid, text, vector, timestamptz, int);
@@ -22,7 +22,7 @@ DROP FUNCTION IF EXISTS search_mounted_for_brain(uuid, text, vector, timestamptz
 CREATE FUNCTION hybrid_search_brain(
     p_brain_id      uuid,
     query_text      text,
-    query_embedding vector(768),
+    query_embedding vector(1536),
     as_of           timestamptz DEFAULT now(),
     match_limit     int         DEFAULT 12
 )
@@ -74,7 +74,7 @@ $$;
 CREATE FUNCTION search_mounted_for_brain(
     p_requester     uuid,
     query_text      text,
-    query_embedding vector(768),
+    query_embedding vector(1536),
     as_of           timestamptz DEFAULT now(),
     match_limit     int         DEFAULT 12
 )

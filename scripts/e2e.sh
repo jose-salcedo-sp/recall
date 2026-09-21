@@ -19,10 +19,10 @@ export DATABASE_URL=${DATABASE_URL:-postgresql://recall:recall@localhost:5433/re
 export ALLOW_INSECURE_DB=true
 export INDEX_WRITES_ENABLED=true
 export PERSIST_ASKS=true
-export EMBEDDING_DIM=768
-export NEXUS_EMBEDDING_MODEL=recall-embed
+export EMBEDDING_DIM=1536
+export NEXUS_EMBEDDING_MODEL=${NEXUS_EMBEDDING_MODEL:-text-embedding-3-small}
 export RECALL_SERVICE_TOKEN=e2e-service-token
-export EMBEDDER_URL=${EMBEDDER_URL:-http://localhost:8081}
+export EMBEDDER_URL=${EMBEDDER_URL:-https://api.openai.com}
 export SYSTEM_ONE_URL=${SYSTEM_ONE_URL:-http://localhost:8082}
 export GENERATOR_URL=${GENERATOR_URL:-http://localhost:8080}
 export BIND_ADDR=${BIND_ADDR:-127.0.0.1:8000}
@@ -32,6 +32,16 @@ export ADMIT_THRESHOLD=0.15
 export ASK_TIMEOUT_MS=${ASK_TIMEOUT_MS:-300000}
 export ADMIT_TIMEOUT_MS=${ADMIT_TIMEOUT_MS:-280000}
 export RUST_LOG=${RUST_LOG:-info,recall=debug}
+
+# There is no local embedder. Query and corpus vectors must come from the model
+# Nexus indexed with, so the suite needs a key — fail here with a clear reason
+# rather than 20 assertions down with an opaque embed error.
+if [ -z "${OPENAI_API_KEY:-}${EMBEDDER_API_KEY:-}" ]; then
+  echo "FATAL: no OPENAI_API_KEY / EMBEDDER_API_KEY." >&2
+  echo "  Embeddings come from ${NEXUS_EMBEDDING_MODEL} (closed weights, no local" >&2
+  echo "  substitute). Set the key in .env, then re-run." >&2
+  exit 2
+fi
 
 pkill -f "target/debug/recall" 2>/dev/null; sleep 1
 ./target/debug/recall > /tmp/recall-e2e.log 2>&1 &

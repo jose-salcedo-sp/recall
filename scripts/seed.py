@@ -12,7 +12,9 @@ Requires:
 
 Env:
     DATABASE_URL   default postgresql://recall:recall@localhost:5432/recall
-    EMBEDDER_URL   default http://localhost:8081
+    EMBEDDER_URL   default https://api.openai.com
+    OPENAI_API_KEY / EMBEDDER_API_KEY   required by that provider
+    NEXUS_EMBEDDING_MODEL   default text-embedding-3-small
 
 Embeds `statement + " " + text` via POST {EMBEDDER_URL}/v1/embeddings
 (OpenAI-compatible). Upserts into brain_id 00000000-0000-0000-0000-000000000001.
@@ -25,8 +27,14 @@ import sys
 import uuid
 
 BRAIN_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
-ZERO_VEC_SQL = "array_fill(0::real, ARRAY[768])::vector"
-EXPECTED_DIM = 768
+ZERO_VEC_SQL = "array_fill(0::real, ARRAY[1536])::vector"
+EXPECTED_DIM = 1536
+
+# The local corpus is embedded with the same model Nexus indexed with. There is no
+# local substitute: a different model at the same dimension would pass every check
+# and return meaningless neighbours, which is worse than an error.
+MODEL = os.environ.get("NEXUS_EMBEDDING_MODEL", "text-embedding-3-small")
+API_KEY = os.environ.get("EMBEDDER_API_KEY") or os.environ.get("OPENAI_API_KEY")
 BATCH = 32
 
 # grantor brains (stable, for granted rows)
@@ -277,7 +285,8 @@ def emit_sql() -> str:
 def embed_batch(client, url: str, texts: list[str]) -> list[list[float]]:
     r = client.post(
         f"{url.rstrip('/')}/v1/embeddings",
-        json={"input": texts, "model": "recall-embed"},
+        json={"input": texts, "model": MODEL},
+        headers={"Authorization": f"Bearer {API_KEY}"} if API_KEY else {},
         timeout=60.0,
     )
     r.raise_for_status()
@@ -304,7 +313,7 @@ def main() -> None:
     import psycopg
 
     db = os.environ.get("DATABASE_URL", "postgresql://recall:recall@localhost:5432/recall")
-    embedder = os.environ.get("EMBEDDER_URL", "http://localhost:8081")
+    embedder = os.environ.get("EMBEDDER_URL", "https://api.openai.com")
 
     texts = [f"{c['statement']} {c['text']}" for c in CHUNKS]
     vectors: list[list[float]] = []

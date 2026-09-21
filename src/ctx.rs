@@ -15,9 +15,9 @@ use crate::types::Stage;
 
 // Compiled in so the binary cannot drift from the checked-in SQL.
 //
-// Recall reads the Nexus corpus only through these two functions; it has no table
-// privileges. `hybrid_retrieve.sql` is kept for the local Compose stack and is
-// deliberately not referenced on the Nexus path.
+// Recall reads the corpus only through these two functions; against Nexus it has no
+// table privileges at all. The local Compose stack defines the same two functions
+// over its own corpus, so there is one retrieval path, not two.
 pub const SQL_SEARCH_PERSONAL: &str = include_str!("../sql/search_personal.sql");
 pub const SQL_SEARCH_MOUNTED: &str = include_str!("../sql/search_mounted.sql");
 

@@ -19,8 +19,11 @@ use crate::types::{Candidate, Stage};
 ///
 /// Grant semantics, rank fusion and slice rules all live behind those functions.
 /// Reimplementing any of them here would mean two definitions of who may see what,
-/// and the copy in Recall would be the one that drifts. `sql/hybrid_retrieve.sql` is
-/// retained only for the local Compose stack and is not used on this path.
+/// and the copy in Recall would be the one that drifts.
+///
+/// The local Compose stack defines the same two functions over its own corpus
+/// (`migrations/0002_local_search_shims.sql`), so this is the only retrieval path
+/// and it is exercised identically in both environments.
 pub async fn run(
     ctx: &Arc<Ctx>,
     brain_id: Uuid,
