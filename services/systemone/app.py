@@ -124,6 +124,15 @@ class Backend(Protocol):
         batch_size: int,
     ) -> dict[str, float]: ...
 
+    def state_answers(
+        self,
+        *,
+        question: str,
+        as_of: str | None,
+        candidates: list[dict[str, Any]],
+        questions: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]: ...
+
 
 class LayaBackend:
     """Laya Agent.predict — verified API from laya 0.3.5 / convaiinnovations/laya."""
@@ -208,8 +217,40 @@ class LayaBackend:
         return out
 
 
+    def state_answers(
+        self,
+        *,
+        question: str,
+        as_of: str | None,
+        candidates: list[dict[str, Any]],
+        questions: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Answer questions about the shared state in one call.
+
+        This is the shape the protocol is built around: several typed questions
+        evaluated in parallel against one state. Answers are returned verbatim so
+        choice keeps its probabilities and confidence, and score keeps its legend.
+        """
+        state: dict[str, Any] = {
+            "question": question,
+            "candidates": {c["id"]: c.get("text", "") for c in candidates},
+        }
+        if as_of is not None:
+            state["as_of"] = as_of
+        return self.agent.predict(state, questions)["answers"]
+
+
 class RerankerBackend:
     """BAAI/bge-reranker-base via sentence-transformers CrossEncoder."""
+
+    def state_answers(self, **_: Any) -> dict[str, Any]:
+        # A cross-encoder scores query/passage pairs; it has no way to answer a
+        # choice or a score rubric. Say so rather than inventing a number.
+        raise HTTPException(
+            status_code=501,
+            detail="the reranker backend answers per-candidate noul only; "
+                   "choice and score need the laya backend",
+        )
 
     name = "reranker"
     model_id = RERANKER_ID
@@ -297,6 +338,8 @@ class State(BaseModel):
 class TypedQuestion(BaseModel):
     type: str
     instructions: str | None = None
+    # choice and score require criteria; noul may carry it as a clarification.
+    criteria: dict[str, str] | list[str] | None = None
 
 
 class SystemOneRequest(BaseModel):
@@ -354,30 +397,53 @@ def create_app(
         if len(cand_ids) != len(set(cand_ids)):
             raise HTTPException(status_code=400, detail="duplicate candidate ids")
         known = set(cand_ids)
-        missing = [qid for qid in req.questions if qid not in known]
-        if missing:
+
+        # Two kinds of question, per the System One protocol.
+        #
+        # A noul keyed by a candidate id is a per-candidate judgement, and our
+        # backend scores those one candidate at a time because that is the only
+        # shape measured to discriminate (see scripts/probe_question_shapes.py).
+        #
+        # Anything else — choice, score, or a noul about the state as a whole — is
+        # a question about the shared state. Those are passed to the model
+        # untouched and answered in a single batched call, which is what the
+        # protocol expects. Refusing them, as this service used to, made it a
+        # noul-only subset rather than an implementation of the format.
+        per_candidate = {
+            qid: q for qid, q in req.questions.items()
+            if q.type == "noul" and qid in known
+        }
+        general = {qid: q for qid, q in req.questions.items() if qid not in per_candidate}
+
+        unknown_noul = [
+            qid for qid, q in general.items() if q.type == "noul" and q.criteria is None
+        ]
+        if unknown_noul:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "questions keys must match state.candidates ids; "
-                    f"no candidate for: {', '.join(missing)}"
+                    "a noul keyed to no candidate and carrying no criteria is "
+                    f"ambiguous: {', '.join(unknown_noul)}. Key it to a candidate id "
+                    "for a per-candidate judgement, or give criteria to ask it of the "
+                    "state as a whole."
                 ),
             )
-        bad_types = [
-            qid for qid, q in req.questions.items() if q.type != "noul"
+        needs_criteria = [
+            qid for qid, q in general.items()
+            if q.type in ("choice", "score") and not q.criteria
         ]
-        if bad_types:
+        if needs_criteria:
             raise HTTPException(
                 status_code=400,
-                detail="only noul is supported "
-                f"(got type {req.questions[bad_types[0]].type!r} for {bad_types[0]!r})",
+                detail=f"{'/'.join(sorted({general[q].type for q in needs_criteria}))} "
+                       f"requires criteria: {', '.join(needs_criteria)}",
             )
 
         cal: Calibration = request.app.state.calibration
-        scored = [c.model_dump() for c in req.state.candidates if c.id in req.questions]
+        scored = [c.model_dump() for c in req.state.candidates if c.id in per_candidate]
         qmap = {
             qid: {"type": q.type, "instructions": q.instructions or ""}
-            for qid, q in req.questions.items()
+            for qid, q in per_candidate.items()
         }
         if not qmap:
             logits: dict[str, float] = {}
@@ -391,13 +457,38 @@ def create_app(
             )
 
         answers = {}
-        for qid in req.questions:
+        for qid in per_candidate:
             if qid not in logits:
                 raise HTTPException(
                     status_code=500,
                     detail=f"backend returned no score for {qid!r}",
                 )
             answers[qid] = {"noul": apply_temperature(logits[qid], cal.temperature)}
+
+        # Questions about the state as a whole: one batched call, answers returned
+        # as the model gives them. Temperature is deliberately not applied — it was
+        # fitted for the per-candidate noul and means nothing for a choice
+        # distribution or a score rubric.
+        if general:
+            raw = be.state_answers(
+                question=req.state.question,
+                as_of=req.state.as_of,
+                candidates=[c.model_dump() for c in req.state.candidates],
+                questions={
+                    qid: {
+                        "type": q.type,
+                        "instructions": q.instructions or "",
+                        **({"criteria": q.criteria} if q.criteria is not None else {}),
+                    }
+                    for qid, q in general.items()
+                },
+            )
+            for qid in general:
+                if qid not in raw:
+                    raise HTTPException(
+                        status_code=500, detail=f"backend returned no answer for {qid!r}"
+                    )
+                answers[qid] = raw[qid]
 
         return {
             "model": req.model or MODEL_NAME,
