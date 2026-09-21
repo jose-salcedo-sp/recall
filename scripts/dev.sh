@@ -19,7 +19,11 @@ set -a; . ./.env; set +a
 
 export SYSTEM_ONE_URL=http://localhost:8082
 export GENERATOR_URL=http://localhost:8080
-export BIND_ADDR="127.0.0.1:${RECALL_PORT:-8000}"
+# Loopback by default: Recall authenticates callers but has no user-level authz,
+# so anyone who can reach it can name any brain_id. Override only when the caller
+# is off-host (a container, another machine):
+#   BIND_ADDR=0.0.0.0:8000 scripts/dev.sh nexus
+export BIND_ADDR="${BIND_ADDR:-127.0.0.1:${RECALL_PORT:-8000}}"
 export LOG_FORMAT=json
 export EMBEDDING_DIM=1536
 export ASK_TIMEOUT_MS=300000
