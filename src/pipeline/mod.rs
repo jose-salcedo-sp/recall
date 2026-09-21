@@ -96,9 +96,15 @@ impl ProgressSink {
         let ok = result.is_ok();
         self.send(Progress::Finished { stage, ms, ok });
 
+        // `stage` is on the span, but repeating it on the event keeps each log line
+        // self-describing so `recall-dash` can read it without span reconstruction.
+        let st = stage.as_str();
         span.in_scope(|| match &result {
-            Ok(_) => tracing::info!(ms, "stage ok"),
-            Err(e) => tracing::warn!(ms, error = %e, transient = e.is_transient(), "stage failed"),
+            Ok(_) => tracing::info!(stage = st, ms, ask_id = %ids.ask_id, "stage ok"),
+            Err(e) => tracing::warn!(
+                stage = st, ms, ask_id = %ids.ask_id,
+                error = %e, transient = e.is_transient(), "stage failed"
+            ),
         });
 
         (result, StageRecord { stage, ms, ok })

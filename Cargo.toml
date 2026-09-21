@@ -22,3 +22,13 @@ thiserror = "2"
 backon = { version = "1.6", features = ["tokio-sleep"] }
 eventsource-stream = "0.2"
 anyhow = "1.0.104"
+ratatui = "0.30.2"
+crossterm = "0.29.0"
+
+[[bin]]
+name = "recall"
+path = "src/main.rs"
+
+[[bin]]
+name = "recall-dash"
+path = "src/bin/dash.rs"

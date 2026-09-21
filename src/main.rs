@@ -12,10 +12,16 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let json = std::env::var("LOG_FORMAT").as_deref() == Ok("json");
+    let reg = tracing_subscriber::registry().with(filter);
+    // JSON is what `recall-dash` reads; human format stays the default.
+    if json {
+        reg.with(tracing_subscriber::fmt::layer().json().flatten_event(true))
+            .init();
+    } else {
+        reg.with(tracing_subscriber::fmt::layer()).init();
+    }
 
     let cfg = config::Config::from_env();
     cfg.validate()?;
