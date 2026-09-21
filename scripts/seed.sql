@@ -1,5 +1,10 @@
 -- Demo corpus for Recall. Embeddings are placeholder zero-vectors;
 -- they must be backfilled by scripts/seed.py against a running embedder.
+--
+-- ALL DATA BELOW IS FABRICATED. The passwords, PINs, account digits and ID
+-- numbers are invented test fixtures, shaped to look like real personal
+-- memories so the admission classifier is exercised on the near-duplicate,
+-- credential-like content it must tell apart. None of it is real.
 
 INSERT INTO chunks (
     id, brain_id, text, statement, embedding,

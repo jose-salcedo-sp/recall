@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Seed Recall `chunks` with a demo personal-memory corpus.
 
+ALL DATA BELOW IS FABRICATED. The passwords, PINs, account digits and ID numbers
+are invented test fixtures, chosen to look like real personal memories so the
+admission classifier is exercised on the kind of near-duplicate, credential-shaped
+content it has to tell apart. None of it corresponds to any real person, account
+or system. Do not treat it as leaked material, and do not reuse any of it.
+
 Requires:
     pip install 'psycopg[binary]' httpx
 
