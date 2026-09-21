@@ -1,0 +1,4 @@
+fastapi==0.141.1
+uvicorn[standard]==0.35.0
+laya==0.3.5
+sentence-transformers==6.1.0

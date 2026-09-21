@@ -1,0 +1,204 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Recall — retrieve, admit, generate",
+    "locale": "en",
+    "output": "recall-service.html",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "ask-path",
+        "label": "Ask hot path",
+        "focus": ["nexus", "proxy", "recall", "postgres", "embed", "laya", "gen"],
+        "note": "Nexus Ask streams over SSE while Recall orchestrates embed, retrieve, admit, then generate."
+      },
+      {
+        "id": "queue-workers",
+        "label": "Serverless queue",
+        "focus": ["recall", "embed", "laya"],
+        "note": "Embed and admit enqueue on RunPod Serverless; workers pull jobs with no inbound addressability."
+      },
+      {
+        "id": "generator-bypass",
+        "label": "Generator bypass",
+        "focus": ["recall", "gen"],
+        "note": "Generation streams real SSE via worker-vllm OpenAI chat completions and bypasses the job queue."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "nexus",
+      "type": "frontend",
+      "label": "Nexus Ask",
+      "sublabel": "thin Ask client",
+      "pos": [40, 220],
+      "size": [140, 60]
+    },
+    {
+      "id": "mcp",
+      "type": "external",
+      "label": "MCP",
+      "sublabel": "later",
+      "pos": [40, 350],
+      "size": [140, 52],
+      "tag": "HTTPS JSON"
+    },
+    {
+      "id": "proxy",
+      "type": "cloud",
+      "label": "proxy.runpod.net",
+      "sublabel": "Cloudflare edge",
+      "brand": "cloudflare",
+      "pos": [250, 220],
+      "size": [168, 60],
+      "tag": "100 s start cap"
+    },
+    {
+      "id": "recall",
+      "type": "backend",
+      "label": "Recall",
+      "sublabel": "Rust · axum + tokio",
+      "brand": "rust",
+      "pos": [520, 210],
+      "size": [168, 68],
+      "tag": "POST /v1/ask"
+    },
+    {
+      "id": "postgres",
+      "type": "database",
+      "label": "Postgres",
+      "sublabel": "pgvector + FTS",
+      "brand": "postgresql",
+      "pos": [340, 380],
+      "size": [168, 60],
+      "tag": "network volume"
+    },
+    {
+      "id": "embed",
+      "type": "backend",
+      "label": "Embedder",
+      "sublabel": "Serverless · /runsync",
+      "pos": [820, 80],
+      "size": [168, 60],
+      "tag": "GPU"
+    },
+    {
+      "id": "laya",
+      "type": "backend",
+      "label": "System One",
+      "sublabel": "Laya · /runsync",
+      "pos": [820, 210],
+      "size": [168, 60],
+      "tag": "admit batch"
+    },
+    {
+      "id": "gen",
+      "type": "backend",
+      "label": "Generator",
+      "sublabel": "worker-vllm · /openai/v1",
+      "pos": [820, 380],
+      "size": [168, 60],
+      "tag": "SSE bypass"
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "RunPod Pod · CPU",
+      "wraps": ["recall", "postgres"]
+    },
+    {
+      "kind": "region",
+      "label": "RunPod Serverless · GPU",
+      "wraps": ["embed", "laya", "gen"]
+    }
+  ],
+  "connections": [
+    {
+      "id": "nexus-to-proxy",
+      "from": "nexus",
+      "to": "proxy",
+      "label": "HTTPS SSE",
+      "variant": "emphasis"
+    },
+    {
+      "id": "mcp-to-proxy",
+      "from": "mcp",
+      "to": "proxy",
+      "label": "HTTPS JSON",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "bottom"
+    },
+    {
+      "id": "proxy-to-recall",
+      "from": "proxy",
+      "to": "recall",
+      "label": "SSE unbuffered",
+      "variant": "emphasis",
+      "labelAt": [430, 170]
+    },
+    {
+      "id": "recall-to-postgres",
+      "from": "recall",
+      "to": "postgres",
+      "label": "hybrid retrieve",
+      "fromSide": "bottom",
+      "toSide": "right"
+    },
+    {
+      "id": "recall-to-embed",
+      "from": "recall",
+      "to": "embed",
+      "label": "job queue",
+      "fromSide": "top",
+      "toSide": "left"
+    },
+    {
+      "id": "recall-to-laya",
+      "from": "recall",
+      "to": "laya",
+      "label": "batched noul",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left",
+      "labelDy": -38
+    },
+    {
+      "id": "recall-to-gen",
+      "from": "recall",
+      "to": "gen",
+      "label": "stream tokens",
+      "fromSide": "bottom",
+      "toSide": "left"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Ask pipeline",
+      "items": [
+        "embed → retrieve → admit → generate",
+        "Empty admit skips the generator"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Queue ownership",
+      "items": [
+        "RunPod owns the Serverless job queue",
+        "Embed/admit via /runsync; generate bypasses with OpenAI SSE"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Product rules",
+      "items": [
+        "No silent fallback to unfiltered RAG",
+        "admit_threshold comes from Phase 4 calibration"
+      ]
+    }
+  ]
+}

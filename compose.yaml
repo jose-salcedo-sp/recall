@@ -1,0 +1,110 @@
+# Local development stack for Recall (Podman + libkrun on Apple Silicon).
+# Run: CONTAINERS_MACHINE_PROVIDER=libkrun podman compose up
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-recall}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-recall}
+      POSTGRES_DB: ${POSTGRES_DB:-recall}
+    ports:
+      # 5433 on the host: a pre-existing local Postgres commonly owns 5432 and would
+      # silently shadow this one. In-network clients still use postgres:5432.
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-recall} -d ${POSTGRES_DB:-recall}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  generator:
+    image: quay.io/slopezpa/fedora-vgpu-llama
+    entrypoint: ["llama-server"]
+    command:
+      - -m
+      - /models/${GENERATOR_MODEL:-qwen2.5-1.5b-q4km.gguf}
+      - -ngl
+      - "99"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - -c
+      - "8192"
+      - --parallel
+      - "2"
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - ${MODELS_HOST_PATH:-${HOME}/models}:/models:ro
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  embedder:
+    # Same llama.cpp runtime as generator, but CPU-only: PyTorch has no usable Vulkan
+    # backend on macOS, and nomic-embed-text-v1.5 GGUF gives fixed 768-dim vectors
+    # matching the pgvector schema — no second container runtime needed.
+    image: quay.io/slopezpa/fedora-vgpu-llama
+    entrypoint: ["/bin/sh", "/docker/embedder-entrypoint.sh"]
+    environment:
+      EMBEDDER_MODEL: ${EMBEDDER_MODEL:-nomic-embed-text-v1.5.Q4_K_M.gguf}
+      EMBEDDER_PORT: "8081"
+    volumes:
+      - ${MODELS_HOST_PATH:-${HOME}/models}:/models:ro
+      - ./docker/embedder-entrypoint.sh:/docker/embedder-entrypoint.sh:ro
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8081/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  systemone:
+    build: ./services/systemone
+    volumes:
+      - ${HF_CACHE_HOST_PATH:-${HOME}/.cache/huggingface}:/root/.cache/huggingface
+    ports:
+      - "8082:8082"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8082/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
+
+  recall:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://recall:recall@postgres:5432/recall}
+      EMBEDDER_URL: ${EMBEDDER_URL:-http://embedder:8081}
+      SYSTEM_ONE_URL: ${SYSTEM_ONE_URL:-http://systemone:8082}
+      GENERATOR_URL: ${GENERATOR_URL:-http://generator:8080}
+      RUST_LOG: ${RUST_LOG:-info,recall=debug}
+    ports:
+      - "${RECALL_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      generator:
+        condition: service_healthy
+      embedder:
+        condition: service_healthy
+      systemone:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
