@@ -82,35 +82,65 @@ async fn search(
         })
         .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|r| Candidate {
-            id: r.id,
-            statement: r.memory_statement,
+    let mut out = Vec::with_capacity(rows.len());
+    let mut withheld = 0usize;
+    for r in rows {
+        // Fail closed on `secret`. This is not a reimplementation of the grant
+        // rules — it cannot widen access, only narrow it — but architecture.md
+        // states secret is never indexed or cited, and forwarding one to a
+        // generator is not a mistake worth risking on an assumption about what
+        // the mounted function already filters.
+        if r.sensitivity.as_deref() == Some("secret") {
+            withheld += 1;
+            continue;
+        }
+
+        out.push(Candidate {
+            // `memory_id` is the memory being cited; `id` is the segment within it.
+            id: r.memory_id.unwrap_or(r.id),
+            statement: r.memory_statement.unwrap_or_else(|| r.text.clone()),
             text: r.text,
-            origin: origin.to_string(),
+            // The mounted function returns its own origin; trust it over our label.
+            origin: r.origin.unwrap_or_else(|| origin.to_string()),
             grantor_name: r.grantor_name,
-            source: r.source,
+            source: r.source_name.or(r.source_channel),
             occurred_at: r.occurred_at,
             rrf_score: r.score.unwrap_or(0.0),
             noul: None,
-        })
-        .collect())
+        });
+    }
+
+    if withheld > 0 {
+        tracing::warn!(withheld, origin, "withheld secret-sensitivity rows");
+    }
+    Ok(out)
 }
 
-/// Shared shape of both search functions. Optional columns are tolerated as NULL so
-/// a difference between the personal and mounted result sets is not a hard failure.
+/// Shared shape of both search functions.
+///
+/// The two result sets differ: the personal search returns no origin, grantor,
+/// source or sensitivity columns at all. Those are `#[sqlx(default)]` so an absent
+/// column is None rather than a decode error, which lets one struct serve both.
 #[derive(sqlx::FromRow)]
 struct SearchRow {
     id: Uuid,
-    memory_statement: String,
     text: String,
+    #[sqlx(default)]
+    memory_id: Option<Uuid>,
+    #[sqlx(default)]
+    memory_statement: Option<String>,
+    #[sqlx(default)]
+    score: Option<f64>,
+    #[sqlx(default)]
+    origin: Option<String>,
     #[sqlx(default)]
     grantor_name: Option<String>,
     #[sqlx(default)]
-    source: Option<String>,
+    source_name: Option<String>,
+    #[sqlx(default)]
+    source_channel: Option<String>,
     #[sqlx(default)]
     occurred_at: Option<DateTime<Utc>>,
     #[sqlx(default)]
-    score: Option<f64>,
+    sensitivity: Option<String>,
 }
