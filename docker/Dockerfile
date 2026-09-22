@@ -13,6 +13,8 @@ RUN mkdir src \
     && rm -rf src
 
 COPY src ./src
+COPY sql ./sql
+COPY migrations ./migrations
 RUN touch src/main.rs && cargo build --release
 
 FROM debian:bookworm-slim

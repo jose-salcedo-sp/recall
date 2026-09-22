@@ -16,6 +16,8 @@ Selected with `SYSTEMONE_BACKEND` (`laya` | `reranker` | `auto`, default `auto`)
 
 Verified Laya API (PyPI `laya==0.3.5`, HF `convaiinnovations/laya`, GitHub `NandhaKishorM/laya`): `load(model_id, device=..., subfolder=...)` → `Agent.predict` / `system_one`.
 
+On a `choice` answer, Laya's `confidence` is normalized entropy (`1 - H/log(k)`), not the probability of the chosen label. Recall gates relate on `probabilities[choice]`.
+
 ## Run standalone
 
 ```bash

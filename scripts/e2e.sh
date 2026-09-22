@@ -26,9 +26,7 @@ export EMBEDDER_URL=${EMBEDDER_URL:-https://ai-gateway.vercel.sh}
 export SYSTEM_ONE_URL=${SYSTEM_ONE_URL:-http://localhost:8082}
 export GENERATOR_URL=${GENERATOR_URL:-http://localhost:8080}
 export BIND_ADDR=${BIND_ADDR:-127.0.0.1:8000}
-# Pinned, not inherited: these assertions are threshold-dependent, so picking up a
-# stray ADMIT_THRESHOLD from the caller's environment would silently invert them.
-export ADMIT_THRESHOLD=0.15
+export RETRIEVE_K=${RETRIEVE_K:-64}
 export ASK_TIMEOUT_MS=${ASK_TIMEOUT_MS:-300000}
 export ADMIT_TIMEOUT_MS=${ADMIT_TIMEOUT_MS:-280000}
 export RUST_LOG=${RUST_LOG:-info,recall=debug}
@@ -103,6 +101,7 @@ AUD=$(curl -s -m 30 -H "$AUTH" "$BASE/v1/asks/$AID")
 echo "$AUD" | head -c 400; echo
 echo "$AUD" | grep -q '"admitted":false' && check 1 "rejected candidates kept for calibration" || check 0 "rejected candidates kept for calibration"
 echo "$AUD" | grep -q '"stage":"admit"' && check 1 "per-stage timings recorded" || check 0 "per-stage timings recorded"
+echo "$AUD" | grep -q '"kind"' && check 1 "kind persisted on audit" || check 0 "kind persisted on audit"
 
 echo
 echo "== index invariants =="
@@ -128,8 +127,14 @@ echo "$SSE" | head -c 500; echo
 grep -qi 'x-accel-buffering: no' /tmp/sse-headers.txt && check 1 "X-Accel-Buffering:no set (Cloudflare will not buffer)" || check 0 "X-Accel-Buffering:no set"
 echo "$SSE" | grep -q 'event: stage' && check 1 "stage progress events emitted" || check 0 "stage progress events emitted"
 echo "$SSE" | grep -q 'event: admitted' && check 1 "admitted event precedes tokens" || check 0 "admitted event precedes tokens"
-echo "$SSE" | grep -q 'event: token' && check 1 "tokens streamed" || check 0 "tokens streamed"
+echo "$SSE" | grep -q '"stage":"kind"' && check 1 "kind stage event" || check 0 "kind stage event"
+echo "$SSE" | grep -q 'event: token' && check 1 "published token emitted" || check 0 "published token emitted"
+echo "$SSE" | grep -q 'event: verified' && check 1 "verified event emitted" || check 0 "verified event emitted"
 echo "$SSE" | grep -q 'event: done' && check 1 "done event closes the stream" || check 0 "done event closes the stream"
+VERIFIED_LINE=$(echo "$SSE" | grep -n 'event: verified' | head -1 | cut -d: -f1)
+DONE_LINE=$(echo "$SSE" | grep -n 'event: done' | head -1 | cut -d: -f1)
+[ -n "$VERIFIED_LINE" ] && [ -n "$DONE_LINE" ] && [ "$VERIFIED_LINE" -lt "$DONE_LINE" ] \
+  && check 1 "verified precedes done" || check 0 "verified precedes done"
 
 echo
 echo "================================"

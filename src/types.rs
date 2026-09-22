@@ -25,6 +25,14 @@ impl AskRequest {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilterRoute {
+    Include,
+    Conflict,
+    Exclude,
+}
+
 /// A chunk returned by retrieval, before admission has judged it.
 #[derive(Debug, Clone)]
 pub struct Candidate {
@@ -33,12 +41,15 @@ pub struct Candidate {
     pub text: String,
     pub origin: String,
     pub grantor_name: Option<String>,
-    /// Provenance carried through from the mounted rows, untouched.
     pub source: Option<String>,
     pub occurred_at: Option<DateTime<Utc>>,
     pub rrf_score: f64,
-    /// Filled in by the admit stage.
     pub noul: Option<f64>,
+    pub injection: Option<f64>,
+    pub contradicts: Option<f64>,
+    pub relevant: Option<f64>,
+    pub evidence: Option<f64>,
+    pub route: Option<FilterRoute>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -49,47 +60,67 @@ pub struct Citation {
     pub noul: f64,
     pub origin: String,
     pub grantor_name: Option<String>,
-    /// Provenance from the mounted rows, passed through so the client can show where
-    /// a granted memory came from and when it happened.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occurred_at: Option<DateTime<Utc>>,
-    /// Not serialized to clients; the generator needs the full text to answer from.
+    pub route: FilterRoute,
     #[serde(skip)]
     pub text: String,
 }
 
-/// Non-empty by construction.
+/// Non-empty by construction: includes, conflicts, or both.
 ///
-/// This type is the enforcement of the one product rule that cannot be allowed to
-/// break: the generator is never invoked without admitted evidence. `generate` takes
-/// an `AdmittedCitations`, and the only way to obtain one is through `new`, which
-/// refuses an empty set. There is no `Default`, no public field, and no other
-/// constructor, so "generate without admission" does not typecheck.
+/// Conflict-only generate is allowed so a memory that refutes the question's
+/// premise is not hidden behind empty-admit. Still no unfiltered RAG: every
+/// fence came through the filter.
 #[derive(Debug, Clone)]
-pub struct AdmittedCitations(Vec<Citation>);
+pub struct AdmittedCitations {
+    includes: Vec<Citation>,
+    conflicts: Vec<Citation>,
+}
 
 impl AdmittedCitations {
-    pub fn new(citations: Vec<Citation>) -> Option<Self> {
-        if citations.is_empty() {
+    pub fn new(includes: Vec<Citation>, conflicts: Vec<Citation>) -> Option<Self> {
+        if includes.is_empty() && conflicts.is_empty() {
             None
         } else {
-            Some(Self(citations))
+            Some(Self {
+                includes,
+                conflicts,
+            })
         }
     }
 
-    pub fn as_slice(&self) -> &[Citation] {
-        &self.0
+    pub fn includes(&self) -> &[Citation] {
+        &self.includes
+    }
+
+    pub fn conflicts(&self) -> &[Citation] {
+        &self.conflicts
+    }
+
+    pub fn all(&self) -> impl Iterator<Item = &Citation> {
+        self.includes.iter().chain(self.conflicts.iter())
     }
 
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.includes.len() + self.conflicts.len()
+    }
+
+    pub fn by_index(&self, i: usize) -> Option<&Citation> {
+        self.all().find(|c| c.index == i)
     }
 }
 
-/// The state that moves from stage to stage. Never serialized between stages, so the
-/// stage marker lives in `Ask::stages` as runtime data rather than in the type.
+#[derive(Debug, Clone, Serialize)]
+pub struct ClaimVerdict {
+    pub claim: String,
+    pub verdict: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_index: Option<usize>,
+}
+
 #[derive(Debug)]
 pub struct Ask {
     pub ask_id: Uuid,
@@ -98,11 +129,17 @@ pub struct Ask {
     pub question: String,
     pub as_of: Option<DateTime<Utc>>,
 
+    pub kind: Option<String>,
+    pub kind_confidence: Option<f64>,
+    pub chitchat: bool,
+
     pub embedding: Option<Vec<f32>>,
     pub candidates: Vec<Candidate>,
     pub admitted: Vec<Citation>,
+    pub conflicts: Vec<Citation>,
     pub answer: Option<String>,
     pub empty: bool,
+    pub verdicts: Vec<ClaimVerdict>,
     pub stages: Vec<StageRecord>,
 }
 
@@ -114,44 +151,57 @@ impl Ask {
             trace_id: req.trace_id,
             question: req.question,
             as_of: req.as_of,
+            kind: None,
+            kind_confidence: None,
+            chitchat: false,
             embedding: None,
             candidates: Vec::new(),
             admitted: Vec::new(),
+            conflicts: Vec::new(),
             answer: None,
             empty: false,
+            verdicts: Vec::new(),
             stages: Vec::new(),
         }
     }
 
-    /// The terminal state for an ask whose admission came back empty. No generator call.
     pub fn into_empty_admit(mut self) -> Self {
         self.empty = true;
         self.answer = Some(EMPTY_ADMIT_TEXT.to_string());
         self.admitted.clear();
+        self.conflicts.clear();
         self
     }
 
     pub fn as_of_or_now(&self) -> DateTime<Utc> {
         self.as_of.unwrap_or_else(Utc::now)
     }
+
+    pub fn citations_for_generate(&self) -> Option<AdmittedCitations> {
+        AdmittedCitations::new(self.admitted.clone(), self.conflicts.clone())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
+    Kind,
     Embed,
     Retrieve,
     Admit,
     Generate,
+    Verify,
 }
 
 impl Stage {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Stage::Kind => "kind",
             Stage::Embed => "embed",
             Stage::Retrieve => "retrieve",
             Stage::Admit => "admit",
             Stage::Generate => "generate",
+            Stage::Verify => "verify",
         }
     }
 }
@@ -169,7 +219,6 @@ pub struct StageRecord {
     pub ok: bool,
 }
 
-/// Body of the `admitted` SSE event and of the sync response's citation list.
 #[derive(Debug, Serialize)]
 pub struct AdmittedEvent<'a> {
     pub citations: &'a [Citation],

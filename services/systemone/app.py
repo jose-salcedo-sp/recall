@@ -131,6 +131,7 @@ class Backend(Protocol):
         as_of: str | None,
         candidates: list[dict[str, Any]],
         questions: dict[str, dict[str, Any]],
+        extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -193,8 +194,23 @@ class LayaBackend:
         by_id = {c["id"]: c for c in candidates}
         qids = list(questions.keys())
 
-        def score_one(qid: str) -> tuple[str, float]:
-            cand = by_id[qid]
+        # Group nouls that share a candidate so four filter questions are one
+        # predict against that candidate's own state.
+        groups: dict[str, dict[str, Any]] = {}
+        for qid in qids:
+            spec = questions[qid]
+            about = spec.get("about") if isinstance(spec, dict) else None
+            cid = qid if qid in by_id else (about if about in by_id else None)
+            if cid is None and "_" in qid:
+                stem = qid.rsplit("_", 1)[0]
+                if stem in by_id:
+                    cid = stem
+            if cid is None:
+                raise ValueError(f"noul {qid!r} is not keyed to a candidate")
+            groups.setdefault(cid, {})[qid] = spec
+
+        def score_group(cid: str) -> list[tuple[str, float]]:
+            cand = by_id[cid]
             state: dict[str, Any] = {
                 "question": question,
                 "candidate": cand.get("text", ""),
@@ -203,17 +219,27 @@ class LayaBackend:
                 state["shared_by"] = cand["grantor"]
             if as_of is not None:
                 state["as_of"] = as_of
+            qs = {
+                qid: {
+                    "type": (spec.get("type") if isinstance(spec, dict) else "noul"),
+                    "instructions": (
+                        spec.get("instructions", "") if isinstance(spec, dict) else ""
+                    ),
+                }
+                for qid, spec in groups[cid].items()
+            }
+            result = self.agent.predict(state, qs)
+            return [
+                (qid, logit_from_prob(float(result["answers"][qid]["noul"])))
+                for qid in qs
+            ]
 
-            result = self.agent.predict(state, {qid: questions[qid]})
-            return qid, logit_from_prob(float(result["answers"][qid]["noul"]))
-
-        # Torch releases the GIL during the forward pass so these overlap, but it is
-        # already threading across cores internally; an unbounded pool thrashes.
-        workers = max(1, min(len(qids), batch_size, (os.cpu_count() or 4) // 2))
+        workers = max(1, min(len(groups), batch_size, (os.cpu_count() or 4) // 2))
         out: dict[str, float] = {}
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            for qid, logit in pool.map(score_one, qids):
-                out[qid] = logit
+            for pairs in pool.map(score_group, groups):
+                for qid, logit in pairs:
+                    out[qid] = logit
         return out
 
 
@@ -224,19 +250,18 @@ class LayaBackend:
         as_of: str | None,
         candidates: list[dict[str, Any]],
         questions: dict[str, dict[str, Any]],
+        extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Answer questions about the shared state in one call.
-
-        This is the shape the protocol is built around: several typed questions
-        evaluated in parallel against one state. Answers are returned verbatim so
-        choice keeps its probabilities and confidence, and score keeps its legend.
-        """
-        state: dict[str, Any] = {
-            "question": question,
-            "candidates": {c["id"]: c.get("text", "") for c in candidates},
-        }
+        """Answer questions about the shared state in one call."""
+        state: dict[str, Any] = {}
+        if question:
+            state["question"] = question
         if as_of is not None:
             state["as_of"] = as_of
+        if candidates:
+            state["candidates"] = {c["id"]: c.get("text", "") for c in candidates}
+        if extra:
+            state.update({k: v for k, v in extra.items() if v is not None})
         return self.agent.predict(state, questions)["answers"]
 
 
@@ -330,16 +355,18 @@ class Candidate(BaseModel):
 
 
 class State(BaseModel):
-    question: str
+    question: str = ""
     as_of: str | None = None
     candidates: list[Candidate] = Field(default_factory=list)
+    claim: str | None = None
+    section: str | None = None
 
 
 class TypedQuestion(BaseModel):
     type: str
     instructions: str | None = None
-    # choice and score require criteria; noul may carry it as a clarification.
     criteria: dict[str, str] | list[str] | None = None
+    about: str | None = None
 
 
 class SystemOneRequest(BaseModel):
@@ -409,9 +436,22 @@ def create_app(
         # untouched and answered in a single batched call, which is what the
         # protocol expects. Refusing them, as this service used to, made it a
         # noul-only subset rather than an implementation of the format.
+        def noul_target(qid: str, q: TypedQuestion) -> str | None:
+            if q.type != "noul":
+                return None
+            if qid in known:
+                return qid
+            if q.about in known:
+                return q.about
+            if "_" in qid:
+                stem = qid.rsplit("_", 1)[0]
+                if stem in known:
+                    return stem
+            return None
+
         per_candidate = {
             qid: q for qid, q in req.questions.items()
-            if q.type == "noul" and qid in known
+            if noul_target(qid, q)
         }
         general = {qid: q for qid, q in req.questions.items() if qid not in per_candidate}
 
@@ -440,9 +480,14 @@ def create_app(
             )
 
         cal: Calibration = request.app.state.calibration
-        scored = [c.model_dump() for c in req.state.candidates if c.id in per_candidate]
+        targets = {noul_target(qid, q) for qid, q in per_candidate.items()}
+        scored = [c.model_dump() for c in req.state.candidates if c.id in targets]
         qmap = {
-            qid: {"type": q.type, "instructions": q.instructions or ""}
+            qid: {
+                "type": q.type,
+                "instructions": q.instructions or "",
+                "about": noul_target(qid, q),
+            }
             for qid, q in per_candidate.items()
         }
         if not qmap:
@@ -481,6 +526,10 @@ def create_app(
                         **({"criteria": q.criteria} if q.criteria is not None else {}),
                     }
                     for qid, q in general.items()
+                },
+                extra={
+                    "claim": req.state.claim,
+                    "section": req.state.section,
                 },
             )
             for qid in general:

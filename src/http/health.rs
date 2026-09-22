@@ -18,7 +18,7 @@ pub async fn healthz() -> Json<serde_json::Value> {
 pub async fn readyz(State(ctx): State<Arc<Ctx>>) -> (StatusCode, Json<serde_json::Value>) {
     let (index_ms, index_ok) = timed(check_index(&ctx)).await;
     let (embed_ms, embed_ok) = timed(async { ctx.embedder.healthy().await }).await;
-    let (sys1_ms, sys1_ok) = timed(async { ctx.system_one.healthy().await }).await;
+    let (sys1_ms, sys1_ok) = timed(async { ctx.system_one.healthy_laya().await }).await;
     let (gen_ms, gen_ok) = timed(async { ctx.generator.healthy().await }).await;
 
     let ok = index_ok && embed_ok && sys1_ok && gen_ok;
@@ -28,8 +28,8 @@ pub async fn readyz(State(ctx): State<Arc<Ctx>>) -> (StatusCode, Json<serde_json
         "embed_ms": embed_ms, "embedder": embed_ok,
         "system_one_ms": sys1_ms, "system_one": sys1_ok,
         "generator_ms": gen_ms, "generator": gen_ok,
-        "admit_threshold": ctx.cfg.admit_threshold,
-        "admit_threshold_calibrated": ctx.cfg.admit_threshold_is_calibrated,
+        "admit_thresholds_calibrated": ctx.cfg.admit_thresholds_calibrated,
+        "evidence_min": ctx.cfg.evidence_min,
     });
 
     let status = if ok {

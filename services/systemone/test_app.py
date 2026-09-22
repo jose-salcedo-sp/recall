@@ -18,6 +18,7 @@ class FakeBackend:
     def __init__(self, scores: dict[str, float] | None = None) -> None:
         self.scores = scores or {}
         self.calls: list[dict] = []
+        self.choice_calls: list[dict] = []
 
     def warmup(self) -> None:
         return None
@@ -38,6 +39,25 @@ class FakeBackend:
                 out[qid] = self.scores[qid]
             else:
                 out[qid] = logit_from_prob(0.5)
+        return out
+
+    def state_answers(self, *, question, as_of, candidates, questions, extra=None):
+        self.choice_calls.append(
+            {
+                "question": question,
+                "as_of": as_of,
+                "candidates": candidates,
+                "questions": questions,
+                "extra": extra,
+            }
+        )
+        canned = getattr(self, "choices", None) or {}
+        out = {}
+        for qid in questions:
+            out[qid] = canned.get(
+                qid,
+                {"choice": "atomic_lookup", "confidence": 0.9, "probabilities": {}},
+            )
         return out
 
 
@@ -103,19 +123,18 @@ def test_mismatched_question_id_is_400():
     assert "no candidate" in r.json()["detail"].lower() or "must match" in r.json()["detail"].lower()
 
 
-def test_non_noul_type_is_400():
+def test_choice_without_criteria_is_400():
     body = {
         "model": "recall-systemone",
         "state": SAMPLE["state"],
         "questions": {
-            "m0": {"type": "choice", "instructions": "x"},
+            "kind": {"type": "choice", "instructions": "x"},
         },
     }
     with make_client() as client:
         r = client.post("/v1/systemone", json=body)
     assert r.status_code == 400
-    detail = r.json()["detail"].lower()
-    assert "noul" in detail
+    assert "criteria" in r.json()["detail"].lower()
 
 
 def test_every_question_key_gets_an_answer_and_json_shape():
@@ -176,3 +195,35 @@ def test_temperature_is_applied():
     assert data["calibration"]["temperature"] == 2.0
     assert data["calibration"]["fitted"] is True
     assert data["calibration"]["note"] == "unit"
+
+
+def test_four_nouls_per_candidate():
+    fake = FakeBackend(
+        {
+            "m0_injection": logit_from_prob(0.1),
+            "m0_contradicts": logit_from_prob(0.1),
+            "m0_relevant": logit_from_prob(0.8),
+            "m0_evidence": logit_from_prob(0.9),
+        }
+    )
+    body = {
+        "model": "recall-systemone",
+        "state": {
+            "question": "q",
+            "candidates": [{"id": "m0", "origin": "personal", "grantor": None, "text": "t"}],
+        },
+        "questions": {
+            "m0_injection": {"type": "noul", "instructions": "i", "about": "m0"},
+            "m0_contradicts": {"type": "noul", "instructions": "c", "about": "m0"},
+            "m0_relevant": {"type": "noul", "instructions": "r", "about": "m0"},
+            "m0_evidence": {"type": "noul", "instructions": "e", "about": "m0"},
+        },
+    }
+    with make_client(backend=fake) as client:
+        r = client.post("/v1/systemone", json=body)
+    assert r.status_code == 200
+    ans = r.json()["answers"]
+    assert set(ans) == set(body["questions"])
+    assert math.isclose(ans["m0_evidence"]["noul"], 0.9, abs_tol=1e-5)
+    assert len(fake.calls) == 1
+

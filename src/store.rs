@@ -38,30 +38,45 @@ pub async fn save_ask(ctx: &Arc<Ctx>, ask: &Ask, error: Option<&str>) {
             let admitted = ask.admitted.iter().find(|a| a.id == c.id);
             json!({
                 "id": c.id,
-                "noul": admitted.map(|a| a.noul).or(c.noul),
+                "noul": c.evidence.or(c.noul),
+                "injection": c.injection,
+                "contradicts": c.contradicts,
+                "relevant": c.relevant,
+                "evidence": c.evidence,
+                "route": c.route,
                 "admitted": admitted.is_some(),
                 "rrf_score": c.rrf_score,
             })
         })
         .collect::<Vec<_>>());
 
-    let admitted_ids = json!(ask.admitted.iter().map(|c| c.id).collect::<Vec<_>>());
+    let admitted_ids = json!(ask
+        .admitted
+        .iter()
+        .chain(ask.conflicts.iter())
+        .map(|c| c.id)
+        .collect::<Vec<_>>());
     let stages = json!(ask.stages);
+    let verdicts = json!(ask.verdicts);
 
     let result = sqlx::query(
         r#"
         INSERT INTO asks (
             ask_id, brain_id, trace_id, question, as_of,
-            candidates, admitted_ids, stages, empty, answer, error
+            candidates, admitted_ids, stages, empty, answer, error,
+            kind, kind_confidence, verdicts
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
         ON CONFLICT (ask_id) DO UPDATE SET
             candidates = EXCLUDED.candidates,
             admitted_ids = EXCLUDED.admitted_ids,
             stages = EXCLUDED.stages,
             empty = EXCLUDED.empty,
             answer = EXCLUDED.answer,
-            error = EXCLUDED.error
+            error = EXCLUDED.error,
+            kind = EXCLUDED.kind,
+            kind_confidence = EXCLUDED.kind_confidence,
+            verdicts = EXCLUDED.verdicts
         "#,
     )
     .bind(ask.ask_id)
@@ -75,6 +90,9 @@ pub async fn save_ask(ctx: &Arc<Ctx>, ask: &Ask, error: Option<&str>) {
     .bind(ask.empty)
     .bind(ask.answer.as_deref())
     .bind(error)
+    .bind(ask.kind.as_deref())
+    .bind(ask.kind_confidence)
+    .bind(&verdicts)
     .execute(&ctx.pg)
     .await;
 
@@ -91,11 +109,18 @@ pub struct AskAudit {
     pub admitted_ids: serde_json::Value,
     pub stages: serde_json::Value,
     pub empty: bool,
+    #[sqlx(default)]
+    pub kind: Option<String>,
+    #[sqlx(default)]
+    pub kind_confidence: Option<f64>,
+    #[sqlx(default)]
+    pub verdicts: serde_json::Value,
 }
 
 pub async fn get_ask(ctx: &Arc<Ctx>, ask_id: Uuid) -> Result<AskAudit> {
     sqlx::query_as::<_, AskAudit>(
-        "SELECT ask_id, question, candidates, admitted_ids, stages, empty \
+        "SELECT ask_id, question, candidates, admitted_ids, stages, empty, \
+         kind, kind_confidence, verdicts \
          FROM asks WHERE ask_id = $1",
     )
     .bind(ask_id)

@@ -7,6 +7,10 @@ created: 2026-09-21
 
 # Recall — retrieve, admit, generate
 
+Ask-path stages and knobs are specified in `plan.md`. This document is the product
+contract (empty admit, no unfiltered RAG, SSE events, index invariants). Where they
+conflict on the ask pipeline, `plan.md` wins.
+
 A service beside Nexus. Nexus Ask becomes a thin client. Recall owns retrieval, citation admission, and the streamed answer.
 
 Nexus does not call Jev, the embedder, or the generator.
@@ -125,11 +129,16 @@ Optional later: `scope` (personal | org mount). v0: Recall reads only the index 
 
 | Event | Data |
 | --- | --- |
-| `admitted` | `{ "citations": [Citation], "candidate_count": n }` |
-| `empty` | `{ "reason": "no_admitted_citation" }` then stream ends |
-| `token` | `{ "text": "..." }` |
-| `done` | `{ "ask_id": "uuid", "usage": { ... } }` |
+| `stage` | `{ "stage": "...", "status": "started" \| "ok" \| "failed", "ms": n? }` |
+| `admitted` | `{ "citations": [Citation], "candidate_count": n }` — provenance (id, origin, grantor, source, timestamps) lives on each citation object |
+| `empty` | `{ "reason": "no_admitted_citation" \| "no_verified_claim" }` |
+| `token` | `{ "text": "..." }` — verified published text only (memory asks; one event) |
+| `verified` | `{ "claims": [ClaimVerdict] }` |
+| `done` | `{ "ask_id": "uuid", "text": "...", "citations": [Citation], "empty": bool, "usage": { ... } }` |
 | `error` | `{ "code": "...", "message": "..." }` |
+
+Memory asks: `admitted` → (buffer generate + verify) → `token` → `verified` → `done`.
+Chitchat skips retrieve and verify; tokens may stream live before `done`.
 
 `Citation`:
 
@@ -243,7 +252,9 @@ Do not use `choice` over all memories as the only gate. High cardinality plus �
 
 ## Generator
 
-OpenAI-compatible `POST /v1/chat/completions` with `stream: true`. Prompt: system twin instructions + fenced admitted citations only + question. Cite `[memory_0]` as today.
+OpenAI-compatible `POST /v1/chat/completions` with `stream: true`. Prompt: system twin instructions + fenced admitted citations only + question. The prompt still asks for `[memory_N]` and a short quote.
+
+A small local model (Qwen 2.5 1.5B) paraphrases the admitted text and omits both. That does not drop the citations. Verify binds an uncited sentence to the admitted memory it overlaps and checks that pair with relate. `done.citations` and the sync `citations` array include those objects either way. The published sentence does not have to contain the marker. A claim that matches no admitted memory, or that relate does not support, is stripped; if nothing remains, the payload is the empty-admit refusal and `citations` is empty.
 
 Local or hosted. Recall sets `base_url` and `model` from env.
 

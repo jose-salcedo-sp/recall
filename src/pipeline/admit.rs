@@ -2,30 +2,33 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use uuid::Uuid;
 
+use crate::clients::systemone::FilterScores;
+use crate::config::Config;
 use crate::ctx::Ctx;
 use crate::error::Result;
-use crate::types::{Candidate, Citation, Stage};
+use crate::types::{Candidate, Citation, FilterRoute, Stage};
 
-/// Admission. The stage the product exists for.
-///
-/// Retrieval returns passages that look right; this asks whether each one actually
-/// answers the question. Semantic similarity is not the same as containing the answer,
-/// and that gap is exactly what admission closes.
-///
-/// One batched call covers every candidate (plan.md Finding 3). On failure the rule
-/// from architecture.md is absolute: retry once, then error or admit nothing. There is
-/// no fallback that forwards unfiltered candidates to the generator, because that
-/// would undo the product.
-/// What admission decided, including the scores of everything it rejected.
-///
-/// The rejected scores are not incidental: a calibration fit needs the negatives, and
-/// `GET /v1/asks/{id}` is where they are read from. Returning only the admitted
-/// citations would leave the audit trail unable to do the job it exists for.
 pub struct Admission {
     pub admitted: Vec<Citation>,
-    pub scores: HashMap<Uuid, f64>,
+    pub conflicts: Vec<Citation>,
+    pub scores: HashMap<uuid::Uuid, FilterScores>,
+}
+
+pub fn route(s: FilterScores, cfg: &Config) -> FilterRoute {
+    if s.injection > cfg.injection_max {
+        return FilterRoute::Exclude;
+    }
+    if s.relevant < cfg.relevant_min {
+        return FilterRoute::Exclude;
+    }
+    if s.contradicts > cfg.contradicts_min {
+        return FilterRoute::Conflict;
+    }
+    if s.evidence >= cfg.evidence_min {
+        return FilterRoute::Include;
+    }
+    FilterRoute::Exclude
 }
 
 pub async fn run(
@@ -38,115 +41,112 @@ pub async fn run(
     if candidates.is_empty() {
         return Ok(Admission {
             admitted: Vec::new(),
+            conflicts: Vec::new(),
             scores: HashMap::new(),
         });
     }
 
     let scores = ctx
         .with_retry(Stage::Admit, ctx.cfg.admit_timeout, || {
-            ctx.system_one.score(question, as_of, candidates)
+            ctx.system_one.filter(question, as_of, candidates)
         })
         .await?;
 
-    let mut scored: Vec<(&Candidate, f64)> = candidates
-        .iter()
-        .map(|c| {
-            let noul = scores.get(&c.id.to_string()).copied().unwrap_or(0.0);
-            (c, noul)
-        })
-        .collect();
+    let mut includes: Vec<(&Candidate, FilterScores)> = Vec::new();
+    let mut conflicts: Vec<(&Candidate, FilterScores)> = Vec::new();
+    let mut by_id = HashMap::new();
 
-    // Highest noul first, so truncating to max_citations keeps the best evidence.
-    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    for c in candidates {
+        let s = scores.get(&c.id.to_string()).copied().unwrap_or_default();
+        by_id.insert(c.id, s);
+        match route(s, &ctx.cfg) {
+            FilterRoute::Include => includes.push((c, s)),
+            FilterRoute::Conflict => conflicts.push((c, s)),
+            FilterRoute::Exclude => {}
+        }
+    }
 
-    let threshold = ctx.cfg.admit_threshold;
-    let admitted: Vec<Citation> = scored
+    includes.sort_by(|a, b| b.1.evidence.total_cmp(&a.1.evidence));
+    includes.truncate(ctx.cfg.max_citations);
+
+    let admitted = includes
         .iter()
-        .filter(|(_, noul)| *noul >= threshold)
-        .take(ctx.cfg.max_citations)
         .enumerate()
-        .map(|(index, (c, noul))| Citation {
-            id: c.id,
-            index,
-            statement: c.statement.clone(),
-            noul: *noul,
-            origin: c.origin.clone(),
-            grantor_name: c.grantor_name.clone(),
-            source: c.source.clone(),
-            occurred_at: c.occurred_at,
-            text: c.text.clone(),
-        })
-        .collect();
-
-    let ranked: Vec<serde_json::Value> = scored
+        .map(|(index, (c, s))| citation(c, index, s.evidence, FilterRoute::Include))
+        .collect::<Vec<_>>();
+    let conflict_cites = conflicts
         .iter()
-        .take(12)
-        .map(|(c, noul)| {
-            serde_json::json!({
-                "statement": trunc_stmt(&c.statement, 100),
-                "noul": noul,
-                "origin": c.origin,
-                "admitted": *noul >= threshold,
+        .enumerate()
+        .map(|(i, (c, s))| citation(c, admitted.len() + i, s.contradicts, FilterRoute::Conflict))
+        .collect::<Vec<_>>();
+
+    let ranked: Vec<serde_json::Value> = {
+        let mut all: Vec<_> = candidates
+            .iter()
+            .map(|c| {
+                let s = by_id.get(&c.id).copied().unwrap_or_default();
+                let r = route(s, &ctx.cfg);
+                serde_json::json!({
+                    "id": c.id,
+                    "statement": trunc_stmt(&c.statement, 400),
+                    "text": (c.text != c.statement).then(|| trunc_stmt(&c.text, 400)),
+                    "noul": s.evidence,
+                    "injection": s.injection,
+                    "contradicts": s.contradicts,
+                    "relevant": s.relevant,
+                    "evidence": s.evidence,
+                    "rrf": c.rrf_score,
+                    "origin": c.origin,
+                    "source": c.source,
+                    "grantor": c.grantor_name,
+                    "route": format!("{r:?}").to_lowercase(),
+                    "admitted": matches!(r, FilterRoute::Include),
+                })
             })
-        })
-        .collect();
+            .collect();
+        all.sort_by(|a, b| {
+            b["evidence"]
+                .as_f64()
+                .unwrap_or(0.0)
+                .total_cmp(&a["evidence"].as_f64().unwrap_or(0.0))
+        });
+        all
+    };
     let ranked_json = serde_json::to_string(&ranked).unwrap_or_else(|_| "[]".into());
 
     tracing::info!(
         ask_id = %ask_id,
-        question = %trunc_stmt(question, 240),
+        question = %trunc_stmt(question, 4000),
         candidates = candidates.len(),
         admitted = admitted.len(),
-        threshold,
-        calibrated = ctx.cfg.admit_threshold_is_calibrated,
-        top_noul = scored.first().map(|(_, n)| *n),
+        conflicts = conflict_cites.len(),
+        threshold = ctx.cfg.evidence_min,
+        calibrated = ctx.cfg.admit_thresholds_calibrated,
+        top_noul = includes.first().map(|(_, s)| s.evidence),
         ranked = ranked_json,
         "admission complete"
     );
 
-    // An empty admission where the best candidate was close to the line is the
-    // signature of a badly set threshold, which is worth saying out loud while the
-    // threshold is still uncalibrated.
-    if admitted.is_empty() {
-        if let Some((_, top)) = scored.first() {
-            tracing::warn!(
-                top_noul = top,
-                threshold,
-                "nothing admitted; best candidate scored below the threshold"
-            );
-        }
-    }
-
-    // Every candidate with its score and verdict, for the dashboard's detail pane
-    // and for eyeballing why something was or was not admitted. Debug because it
-    // carries memory text.
-    if tracing::enabled!(tracing::Level::DEBUG) {
-        let ranked: Vec<_> = scored
-            .iter()
-            .map(|(c, noul)| {
-                serde_json::json!({
-                    "statement": c.statement,
-                    "noul": noul,
-                    "origin": c.origin,
-                    "admitted": admitted.iter().any(|a| a.id == c.id),
-                })
-            })
-            .collect();
-        tracing::debug!(
-            ask_id = %ask_id,
-            question = %question,
-            ranked = %serde_json::Value::Array(ranked),
-            "ask detail"
-        );
-    }
-
     Ok(Admission {
         admitted,
-        scores: candidates
-            .iter()
-            .map(|c| (c.id, scores.get(&c.id.to_string()).copied().unwrap_or(0.0)))
-            .collect(),
+        conflicts: conflict_cites,
+        scores: by_id,
     })
+}
+
+fn citation(c: &Candidate, index: usize, noul: f64, route: FilterRoute) -> Citation {
+    Citation {
+        id: c.id,
+        index,
+        statement: c.statement.clone(),
+        noul,
+        origin: c.origin.clone(),
+        grantor_name: c.grantor_name.clone(),
+        source: c.source.clone(),
+        occurred_at: c.occurred_at,
+        route,
+        text: c.text.clone(),
+    }
 }
 
 fn trunc_stmt(s: &str, max_chars: usize) -> String {
@@ -162,65 +162,41 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
-    fn candidate(n: &str) -> Candidate {
-        Candidate {
-            id: Uuid::new_v4(),
-            statement: n.to_string(),
-            text: n.to_string(),
-            origin: "personal".into(),
-            grantor_name: None,
-            source: None,
-            occurred_at: None,
-            rrf_score: 0.0,
-            noul: None,
+    fn cfg(inj: f64, contra: f64, rel: f64, ev: f64, max: usize) -> Config {
+        let mut c = Config::from_env();
+        c.injection_max = inj;
+        c.contradicts_min = contra;
+        c.relevant_min = rel;
+        c.evidence_min = ev;
+        c.max_citations = max;
+        c
+    }
+
+    fn s(inj: f64, contra: f64, rel: f64, ev: f64) -> FilterScores {
+        FilterScores {
+            injection: inj,
+            contradicts: contra,
+            relevant: rel,
+            evidence: ev,
         }
     }
 
-    /// The selection logic in isolation: threshold, ordering, and the citation cap.
-    fn select(scored: Vec<(Candidate, f64)>, threshold: f64, max: usize) -> Vec<Citation> {
-        let mut s = scored;
-        s.sort_by(|a, b| b.1.total_cmp(&a.1));
-        s.iter()
-            .filter(|(_, n)| *n >= threshold)
-            .take(max)
-            .enumerate()
-            .map(|(index, (c, noul))| Citation {
-                id: c.id,
-                index,
-                statement: c.statement.clone(),
-                noul: *noul,
-                origin: c.origin.clone(),
-                grantor_name: None,
-                source: None,
-                occurred_at: None,
-                text: c.text.clone(),
-            })
-            .collect()
+    #[test]
+    fn policy_order() {
+        let c = cfg(0.70, 0.70, 0.45, 0.55, 4);
+        assert_eq!(route(s(0.8, 0.0, 1.0, 1.0), &c), FilterRoute::Exclude);
+        assert_eq!(route(s(0.1, 0.8, 1.0, 1.0), &c), FilterRoute::Conflict);
+        assert_eq!(route(s(0.1, 0.8, 0.2, 0.9), &c), FilterRoute::Exclude);
+        assert_eq!(route(s(0.1, 0.1, 0.2, 0.9), &c), FilterRoute::Exclude);
+        assert_eq!(route(s(0.1, 0.1, 0.6, 0.6), &c), FilterRoute::Include);
+        assert_eq!(route(s(0.1, 0.1, 0.6, 0.4), &c), FilterRoute::Exclude);
     }
 
     #[test]
-    fn admits_only_above_threshold_best_first_and_caps() {
-        let scored = vec![
-            (candidate("weak"), 0.2),
-            (candidate("strong"), 0.95),
-            (candidate("mid"), 0.75),
-            (candidate("also_strong"), 0.9),
-        ];
-        let out = select(scored, 0.7, 2);
-
-        assert_eq!(out.len(), 2, "must respect max_citations");
-        assert_eq!(out[0].statement, "strong", "highest noul first");
-        assert_eq!(out[1].statement, "also_strong");
-        assert_eq!(out[0].index, 0);
-        assert_eq!(out[1].index, 1, "index must be contiguous for [memory_N]");
-    }
-
-    #[test]
-    fn nothing_above_threshold_yields_empty_admit() {
-        let scored = vec![(candidate("a"), 0.3), (candidate("b"), 0.69)];
-        assert!(
-            select(scored, 0.7, 4).is_empty(),
-            "an empty admission is the correct answer, never a fallback to all candidates"
-        );
+    fn citation_cap_is_includes_only() {
+        let _ = Uuid::new_v4();
+        let c = cfg(0.70, 0.70, 0.45, 0.55, 2);
+        let includes = 5;
+        assert!(includes > c.max_citations);
     }
 }

@@ -71,6 +71,8 @@ LANGUAGE sql STABLE AS $$
     LIMIT match_limit;
 $$;
 
+-- Same hybrid as personal. Rank fusion lives in Recall; this must not be a
+-- vector-only list or a granted lexical hit is dropped before RRF sees it.
 CREATE FUNCTION search_mounted_for_brain(
     p_requester     uuid,
     query_text      text,
@@ -99,18 +101,39 @@ RETURNS TABLE (
     sensitivity       text
 )
 LANGUAGE sql STABLE AS $$
-    WITH ts AS (SELECT coalesce(as_of, now()) AS at)
+    WITH ts AS (SELECT coalesce(as_of, now()) AS at),
+    tsq AS (SELECT websearch_to_tsquery('english', coalesce(query_text, '')) AS q),
+    vec AS (
+        SELECT c.id, ROW_NUMBER() OVER (ORDER BY c.embedding <=> query_embedding) AS rank
+        FROM chunks c, ts
+        WHERE c.brain_id = p_requester AND c.origin = 'granted'
+          AND c.state = 'active' AND c.sensitivity <> 'secret'
+          AND (c.valid_from IS NULL OR c.valid_from <= ts.at)
+          AND (c.valid_to   IS NULL OR c.valid_to   >  ts.at)
+        ORDER BY c.embedding <=> query_embedding
+        LIMIT match_limit * 4
+    ),
+    fts AS (
+        SELECT c.id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(c.tsv, tsq.q) DESC) AS rank
+        FROM chunks c, ts, tsq
+        WHERE c.brain_id = p_requester AND c.origin = 'granted'
+          AND c.state = 'active' AND c.sensitivity <> 'secret'
+          AND (c.valid_from IS NULL OR c.valid_from <= ts.at)
+          AND (c.valid_to   IS NULL OR c.valid_to   >  ts.at)
+          AND numnode(tsq.q) > 0 AND c.tsv @@ tsq.q
+        ORDER BY ts_rank_cd(c.tsv, tsq.q) DESC
+        LIMIT match_limit * 4
+    )
     SELECT c.id, c.text, NULL::text,
-           1.0 - (c.embedding <=> query_embedding),
+           coalesce(1.0 / (60 + v.rank), 0) + coalesce(1.0 / (60 + f.rank), 0),
            c.id, c.statement, c.valid_from, c.valid_to,
            'granted'::text, c.grantor_brain_id, c.grantor_name, NULL::text,
            NULL::uuid, NULL::uuid, NULL::text, NULL::text,
            NULL::timestamptz, c.sensitivity
-    FROM chunks c, ts
-    WHERE c.brain_id = p_requester AND c.origin = 'granted'
-      AND c.state = 'active' AND c.sensitivity <> 'secret'
-      AND (c.valid_from IS NULL OR c.valid_from <= ts.at)
-      AND (c.valid_to   IS NULL OR c.valid_to   >  ts.at)
-    ORDER BY c.embedding <=> query_embedding
+    FROM chunks c
+    LEFT JOIN vec v ON v.id = c.id
+    LEFT JOIN fts f ON f.id = c.id
+    WHERE v.id IS NOT NULL OR f.id IS NOT NULL
+    ORDER BY 4 DESC
     LIMIT match_limit;
 $$;

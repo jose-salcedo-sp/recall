@@ -1,7 +1,9 @@
 pub mod admit;
 pub mod embed;
 pub mod generate;
+pub mod kind;
 pub mod retrieve;
+pub mod verify;
 
 use std::future::Future;
 use std::sync::Arc;
@@ -15,7 +17,6 @@ use crate::ctx::Ctx;
 use crate::error::{RecallError, Result};
 use crate::types::{AdmittedCitations, Ask, AskRequest, Stage, StageRecord};
 
-/// What a stage transition reports outward while the ask is still in flight.
 #[derive(Debug, Clone)]
 pub enum Progress {
     Entered(Stage),
@@ -37,13 +38,6 @@ impl From<&Ask> for AskIds {
     }
 }
 
-/// One mechanism, three consumers: the SSE stream shows the client where we are, a
-/// tracing span gives the operator per-stage timings, and the returned records
-/// accumulate on the ask row for `GET /v1/asks/{id}`.
-///
-/// The SSE half is not cosmetic. RunPod's ingress closes a connection that has not
-/// produced bytes within 100 seconds, so emitting progress during a slow admission is
-/// what keeps the stream alive.
 pub struct ProgressSink {
     tx: Option<mpsc::UnboundedSender<Progress>>,
 }
@@ -54,7 +48,6 @@ impl ProgressSink {
         (Self { tx: Some(tx) }, rx)
     }
 
-    /// For `/v1/ask/sync`, where nobody is watching mid-flight.
     pub fn silent() -> Self {
         Self { tx: None }
     }
@@ -65,16 +58,7 @@ impl ProgressSink {
         }
     }
 
-    /// Wrap one stage: time it, trace it, report it, and hand back its record.
-    ///
-    /// Returns the record alongside the result rather than mutating the `Ask`, so a
-    /// stage future is free to borrow the `Ask` it reads from.
-    pub async fn track<T, F>(
-        &self,
-        ids: AskIds,
-        stage: Stage,
-        fut: F,
-    ) -> (Result<T>, StageRecord)
+    pub async fn track<T, F>(&self, ids: AskIds, stage: Stage, fut: F) -> (Result<T>, StageRecord)
     where
         F: Future<Output = Result<T>>,
     {
@@ -87,17 +71,11 @@ impl ProgressSink {
 
         self.send(Progress::Entered(stage));
         let started = Instant::now();
-
-        // `.instrument` rather than holding an entered guard across the await, which
-        // would attribute time to the wrong span whenever the task yields.
         let result = fut.instrument(span.clone()).await;
-
         let ms = started.elapsed().as_millis() as u64;
         let ok = result.is_ok();
         self.send(Progress::Finished { stage, ms, ok });
 
-        // `stage` is on the span, but repeating it on the event keeps each log line
-        // self-describing so `recall-dash` can read it without span reconstruction.
         let st = stage.as_str();
         span.in_scope(|| match &result {
             Ok(_) => tracing::info!(stage = st, ms, ask_id = %ids.ask_id, "stage ok"),
@@ -111,53 +89,52 @@ impl ProgressSink {
     }
 }
 
-/// Run one stage, record it on the ask, and short-circuit on failure.
 macro_rules! stage {
     ($sink:expr, $ask:expr, $stage:expr, $fut:expr) => {{
-        let ids = AskIds::from(&$ask);
+        let ids = AskIds {
+            ask_id: $ask.ask_id,
+            trace_id: $ask.trace_id,
+        };
         let (res, rec) = $sink.track(ids, $stage, $fut).await;
         $ask.stages.push(rec);
         res?
     }};
 }
 
-/// The ask pipeline up to and including admission.
-///
-/// Stops before generation because the two entry points diverge there: `/v1/ask`
-/// streams tokens, `/v1/ask/sync` blocks for the whole answer. Everything before that
-/// point is identical, so it lives here once.
-///
-/// Four stages in a straight line, so there is no framework: a sequence of async fns
-/// over a state struct that moves from one to the next is the pipeline. The `embed`
-/// and `admit` stages await queue-backed workers, but the `Ask` never leaves this
-/// process, which is why `Stage` is runtime data rather than a type parameter.
-pub async fn run_until_admit(
-    ctx: &Arc<Ctx>,
-    req: AskRequest,
-    sink: &ProgressSink,
-) -> Result<Ask> {
-    req.validate().map_err(|e| RecallError::BadRequest(e.into()))?;
+pub async fn run_until_admit(ctx: &Arc<Ctx>, req: AskRequest, sink: &ProgressSink) -> Result<Ask> {
+    req.validate()
+        .map_err(|e| RecallError::BadRequest(e.into()))?;
     let mut ask = Ask::new(req);
 
-    // Debug, not info: the question is user content and should not land in
-    // production logs by default. `RUST_LOG=recall=debug` turns it on for the
-    // dashboard.
     tracing::debug!(
         ask_id = %ask.ask_id,
         brain_id = %ask.brain_id,
         question = %ask.question,
         "ask started"
     );
-
     tracing::info!(
         ask_id = %ask.ask_id,
         brain_id = %ask.brain_id,
-        question = %trunc_log(&ask.question, 240),
+        question = %trunc_log(&ask.question, 4000),
         as_of = ?ask.as_of,
         "ask started"
     );
 
+    let (kind, confidence) = stage!(
+        sink,
+        ask,
+        Stage::Kind,
+        kind::run(ctx, ask.ask_id, &ask.question)
+    );
+    ask.kind = Some(kind.clone());
+    ask.kind_confidence = Some(confidence);
+    if kind::is_chitchat(&kind, confidence, ctx.cfg.kind_confidence_min) {
+        ask.chitchat = true;
+        return Ok(ask);
+    }
+
     let embedding = stage!(sink, ask, Stage::Embed, embed::run(ctx, &ask.question));
+    tracing::info!(ask_id = %ask.ask_id, dims = embedding.len(), "embedded");
     ask.embedding = Some(embedding);
 
     ask.candidates = stage!(
@@ -173,6 +150,13 @@ pub async fn run_until_admit(
             ask.as_of,
         )
     );
+    let top_rrf = ask.candidates.first().map(|c| c.rrf_score).unwrap_or(0.0);
+    tracing::info!(
+        ask_id = %ask.ask_id,
+        merged = ask.candidates.len(),
+        top_rrf,
+        "retrieve merged"
+    );
 
     let admission = stage!(
         sink,
@@ -187,41 +171,132 @@ pub async fn run_until_admit(
         )
     );
 
-    // Write every score back, admitted or not, so the ask record carries the
-    // negatives that a calibration fit needs.
     for c in ask.candidates.iter_mut() {
-        c.noul = admission.scores.get(&c.id).copied();
+        if let Some(s) = admission.scores.get(&c.id) {
+            c.injection = Some(s.injection);
+            c.contradicts = Some(s.contradicts);
+            c.relevant = Some(s.relevant);
+            c.evidence = Some(s.evidence);
+            c.noul = Some(s.evidence);
+            c.route = Some(admit::route(*s, &ctx.cfg));
+        }
     }
     ask.admitted = admission.admitted;
+    ask.conflicts = admission.conflicts;
 
     Ok(ask)
 }
 
-/// The full synchronous ask, for `/v1/ask/sync`.
 pub async fn run(ctx: &Arc<Ctx>, req: AskRequest, sink: &ProgressSink) -> Result<Ask> {
     let mut ask = run_until_admit(ctx, req, sink).await?;
 
-    // The one branch that matters. `AdmittedCitations` cannot hold an empty set, so
-    // there is no path from here to the generator without evidence.
-    match AdmittedCitations::new(ask.admitted.clone()) {
+    if ask.chitchat {
+        let (text, _usage) = stage!(
+            sink,
+            ask,
+            Stage::Generate,
+            generate::run_chitchat(ctx, &ask.question)
+        );
+        log_generated(ask.ask_id, true, 0, &text);
+        log_published(ask.ask_id, true, false, &text);
+        ask.answer = Some(text);
+        return Ok(ask);
+    }
+
+    match ask.citations_for_generate() {
         None => {
-            tracing::info!(
-                candidates = ask.candidates.len(),
-                "empty admission; skipping generator"
-            );
-            Ok(ask.into_empty_admit())
+            log_empty_admission(ask.ask_id, ask.candidates.len());
+            let ask = ask.into_empty_admit();
+            log_published(ask.ask_id, false, true, ask.answer.as_deref().unwrap_or(""));
+            Ok(ask)
         }
         Some(cites) => {
-            let (text, _usage) = stage!(
-                sink,
-                ask,
-                Stage::Generate,
-                generate::run(ctx, &ask.question, &cites)
-            );
-            ask.answer = Some(text);
+            generate_verify_publish(ctx, &mut ask, &cites, sink).await?;
             Ok(ask)
         }
     }
+}
+
+/// Generate, verify, optionally regenerate once, then publish verified text only.
+pub async fn generate_verify_publish(
+    ctx: &Arc<Ctx>,
+    ask: &mut Ask,
+    cites: &AdmittedCitations,
+    sink: &ProgressSink,
+) -> Result<()> {
+    let mut attempts = 0u32;
+    loop {
+        let (text, _usage) = stage!(
+            sink,
+            ask,
+            Stage::Generate,
+            generate::run(ctx, &ask.question, cites)
+        );
+        log_generated(ask.ask_id, false, cites.len(), &text);
+        let verdicts = stage!(sink, ask, Stage::Verify, verify::run(ctx, &text, cites));
+        ask.verdicts = verdicts.clone();
+        let all_ok = verdicts.iter().all(|v| v.verdict == "supports");
+        let supported = verdicts.iter().filter(|v| v.verdict == "supports").count();
+        let verdicts_json = serde_json::to_string(&verdicts).unwrap_or_else(|_| "[]".into());
+        tracing::info!(
+            ask_id = %ask.ask_id,
+            claims = verdicts.len(),
+            supported,
+            all_ok,
+            attempt = attempts + 1,
+            verdicts = %verdicts_json,
+            "verify verdicts"
+        );
+        if all_ok {
+            publish_verified(ask, &text, &verdicts);
+            return Ok(());
+        }
+        attempts += 1;
+        if attempts > ctx.cfg.verify_regen_max {
+            publish_verified(ask, &text, &verdicts);
+            return Ok(());
+        }
+        tracing::info!(
+            ask_id = %ask.ask_id,
+            attempt = attempts,
+            "verify failed; regenerating once"
+        );
+    }
+}
+
+fn publish_verified(ask: &mut Ask, text: &str, verdicts: &[crate::types::ClaimVerdict]) {
+    let outcome = verify::apply_publish(text, verdicts, &mut ask.admitted, &mut ask.conflicts);
+    log_published(ask.ask_id, false, outcome.empty, &outcome.text);
+    ask.answer = Some(outcome.text);
+    ask.empty = outcome.empty;
+}
+
+pub(crate) fn log_generated(ask_id: Uuid, chitchat: bool, citations: usize, answer: &str) {
+    tracing::info!(
+        ask_id = %ask_id,
+        chitchat,
+        citations,
+        answer = %trunc_log(answer, 4000),
+        "generated"
+    );
+}
+
+pub(crate) fn log_published(ask_id: Uuid, chitchat: bool, empty: bool, answer: &str) {
+    tracing::info!(
+        ask_id = %ask_id,
+        chitchat,
+        empty,
+        answer = %trunc_log(answer, 4000),
+        "answer published"
+    );
+}
+
+pub(crate) fn log_empty_admission(ask_id: Uuid, candidates: usize) {
+    tracing::info!(
+        ask_id = %ask_id,
+        candidates,
+        "empty admission; skipping generator"
+    );
 }
 
 fn trunc_log(s: &str, max_chars: usize) -> String {

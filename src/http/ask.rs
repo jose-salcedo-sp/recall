@@ -12,7 +12,7 @@ use crate::ctx::Ctx;
 use crate::error::{RecallError, Result};
 use crate::pipeline::{self, Progress, ProgressSink};
 use crate::store;
-use crate::types::{AdmittedCitations, AdmittedEvent, Ask, AskRequest, Stage, SyncResponse};
+use crate::types::{AdmittedEvent, Ask, AskRequest, Stage, SyncResponse};
 
 /// `POST /v1/ask/sync` — JSON, for tests and MCP.
 pub async fn sync(
@@ -33,10 +33,12 @@ pub async fn sync(
 
     store::save_ask(&ctx, &ask, None).await;
 
+    let mut citations = ask.admitted.clone();
+    citations.extend(ask.conflicts.clone());
     Ok(Json(SyncResponse {
         ask_id: ask.ask_id,
         text: ask.answer.clone().unwrap_or_default(),
-        citations: ask.admitted.clone(),
+        citations,
         empty: ask.empty,
         usage: json!({}),
     }))
@@ -116,11 +118,62 @@ pub async fn stream(
 
         let mut ask = admitted_ask;
 
-        // Phase 2: admission outcome. Citations reach the client before any token, so
-        // the UI can render provenance while the answer is still being written.
-        let cites = match AdmittedCitations::new(ask.admitted.clone()) {
+        if ask.chitchat {
+            let mut stream = match pipeline::generate::stream_chitchat(&ctx, &ask.question).await {
+                Ok(s) => s,
+                Err(e) => {
+                    yield sse(error_event(e.code(), &e.to_string()));
+                    store::save_ask(&ctx, &ask, Some(&e.to_string())).await;
+                    drop(permit);
+                    return;
+                }
+            };
+            let gen_started = std::time::Instant::now();
+            let mut answer = String::new();
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(text) => {
+                        answer.push_str(&text);
+                        match Event::default().event("token").json_data(json!({ "text": text })) {
+                            Ok(ev) => yield sse(ev),
+                            Err(_) => continue,
+                        }
+                    }
+                    Err(e) => {
+                        yield sse(error_event(e.code(), &e.to_string()));
+                        ask.answer = Some(answer);
+                        store::save_ask(&ctx, &ask, Some(&e.to_string())).await;
+                        drop(permit);
+                        return;
+                    }
+                }
+            }
+            let gen_ms = gen_started.elapsed().as_millis() as u64;
+            ask.stages.push(crate::types::StageRecord {
+                stage: Stage::Generate,
+                ms: gen_ms,
+                ok: true,
+            });
+            tracing::info!(stage = "generate", ms = gen_ms, ask_id = %ask.ask_id, "stage ok");
+            crate::pipeline::log_generated(ask.ask_id, true, 0, &answer);
+            crate::pipeline::log_published(ask.ask_id, true, false, &answer);
+            ask.answer = Some(answer);
+            yield sse(done_event(&ask));
+            store::save_ask(&ctx, &ask, None).await;
+            drop(permit);
+            return;
+        }
+
+        let cites = match ask.citations_for_generate() {
             None => {
+                crate::pipeline::log_empty_admission(ask.ask_id, ask.candidates.len());
                 let ask = ask.into_empty_admit();
+                crate::pipeline::log_published(
+                    ask.ask_id,
+                    false,
+                    true,
+                    ask.answer.as_deref().unwrap_or(""),
+                );
                 yield sse(Event::default()
                     .event("empty")
                     .json_data(json!({ "reason": "no_admitted_citation" }))
@@ -133,8 +186,14 @@ pub async fn stream(
             Some(c) => c,
         };
 
+        let shown: Vec<_> = ask
+            .admitted
+            .iter()
+            .chain(ask.conflicts.iter())
+            .cloned()
+            .collect();
         let admitted_payload = AdmittedEvent {
-            citations: ask.admitted.as_slice(),
+            citations: shown.as_slice(),
             candidate_count: ask.candidates.len(),
         };
         match Event::default().event("admitted").json_data(&admitted_payload) {
@@ -145,54 +204,40 @@ pub async fn stream(
             }
         }
 
-        // Phase 3: stream tokens.
-        let mut stream = match pipeline::generate::stream(&ctx, &ask.question, &cites).await {
-            Ok(s) => s,
+        // Buffer generation and verify before any answer bytes reach the client.
+        // Keep-alive pings hold the connection through this work; stage events for
+        // generate/verify are recorded on `ask.stages` and appear in audit, not SSE.
+        if let Err(e) = pipeline::generate_verify_publish(&ctx, &mut ask, &cites, &ProgressSink::silent()).await {
+            yield sse(error_event(e.code(), &e.to_string()));
+            store::save_ask(&ctx, &ask, Some(&e.to_string())).await;
+            drop(permit);
+            return;
+        }
+
+        if ask.empty {
+            yield sse(Event::default()
+                .event("empty")
+                .json_data(json!({ "reason": "no_verified_claim" }))
+                .unwrap_or_else(|_| Event::default().event("empty").data("{}")));
+        }
+
+        let published = ask.answer.clone().unwrap_or_default();
+        match Event::default().event("token").json_data(json!({ "text": published })) {
+            Ok(ev) => yield sse(ev),
             Err(e) => {
-                yield sse(error_event(e.code(), &e.to_string()));
-                store::save_ask(&ctx, &ask, Some(&e.to_string())).await;
+                yield sse(error_event("internal", &format!("serialize token: {e}")));
                 drop(permit);
                 return;
             }
-        };
-
-        // The streaming path bypasses ProgressSink::track, so without this the
-        // generate stage never appears in timings at all — on the product path.
-        let gen_started = std::time::Instant::now();
-        let mut answer = String::new();
-        while let Some(item) = stream.next().await {
-            match item {
-                Ok(text) => {
-                    answer.push_str(&text);
-                    match Event::default().event("token").json_data(json!({ "text": text })) {
-                        Ok(ev) => yield sse(ev),
-                        Err(_) => continue,
-                    }
-                }
-                Err(e) => {
-                    // Tokens may already have shipped, so there is no retry here; the
-                    // client is told the stream broke and keeps what it received.
-                    yield sse(error_event(e.code(), &e.to_string()));
-                    ask.answer = Some(answer);
-                    store::save_ask(&ctx, &ask, Some(&e.to_string())).await;
-                    drop(permit);
-                    return;
-                }
-            }
         }
 
-        let gen_ms = gen_started.elapsed().as_millis() as u64;
-        tracing::info!(
-            stage = "generate", ms = gen_ms, ask_id = %ask.ask_id,
-            chars = answer.len(), "stage ok"
+        yield sse(
+            Event::default()
+                .event("verified")
+                .json_data(json!({ "claims": ask.verdicts }))
+                .unwrap_or_else(|_| Event::default().event("verified").data("{}")),
         );
-        ask.stages.push(crate::types::StageRecord {
-            stage: Stage::Generate,
-            ms: gen_ms,
-            ok: true,
-        });
 
-        ask.answer = Some(answer);
         yield sse(done_event(&ask));
         store::save_ask(&ctx, &ask, None).await;
         drop(permit);
@@ -244,9 +289,84 @@ fn error_event(code: &str, message: &str) -> Event {
 fn done_event(ask: &Ask) -> Event {
     Event::default()
         .event("done")
-        .json_data(json!({
-            "ask_id": ask.ask_id,
-            "usage": { "candidates": ask.candidates.len(), "admitted": ask.admitted.len() },
-        }))
+        .json_data(done_data(ask))
         .unwrap_or_else(|_| Event::default().event("done").data("{}"))
+}
+
+fn done_data(ask: &Ask) -> serde_json::Value {
+    let citations: Vec<_> = ask.admitted.iter().chain(ask.conflicts.iter()).collect();
+    json!({
+        "ask_id": ask.ask_id,
+        "text": ask.answer.as_deref().unwrap_or_default(),
+        "citations": citations,
+        "empty": ask.empty,
+        "usage": {
+            "candidates": ask.candidates.len(),
+            "admitted": ask.admitted.len(),
+        },
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{AskRequest, Citation, FilterRoute};
+    use uuid::Uuid;
+
+    #[test]
+    fn done_data_contains_published_text_and_cited_citations_only() {
+        let mut ask = Ask::new(AskRequest {
+            question: "Who is on the team?".into(),
+            as_of: None,
+            brain_id: Uuid::new_v4(),
+            trace_id: None,
+        });
+        let cited_id = Uuid::new_v4();
+        let uncited_id = Uuid::new_v4();
+        ask.answer = Some("Pepe is an infra engineer. [memory_0]".into());
+        ask.admitted.push(Citation {
+            id: cited_id,
+            index: 0,
+            statement: "Pepe is an infra engineer.".into(),
+            noul: 0.9,
+            origin: "granted".into(),
+            grantor_name: Some("Pepe".into()),
+            source: Some("onboarding-seed".into()),
+            occurred_at: None,
+            route: FilterRoute::Include,
+            text: "Pepe is an infra engineer.".into(),
+        });
+        ask.admitted.push(Citation {
+            id: uncited_id,
+            index: 1,
+            statement: "Ana is on the team.".into(),
+            noul: 0.8,
+            origin: "personal".into(),
+            grantor_name: None,
+            source: None,
+            occurred_at: None,
+            route: FilterRoute::Include,
+            text: "Ana is on the team.".into(),
+        });
+
+        let verdicts = vec![crate::types::ClaimVerdict {
+            claim: ask.answer.clone().unwrap(),
+            verdict: "supports".into(),
+            memory_index: Some(0),
+        }];
+        let outcome = pipeline::verify::apply_publish(
+            ask.answer.as_deref().unwrap(),
+            &verdicts,
+            &mut ask.admitted,
+            &mut ask.conflicts,
+        );
+        ask.answer = Some(outcome.text);
+
+        let data = done_data(&ask);
+        assert_eq!(data["text"], "Pepe is an infra engineer. [memory_0]");
+        assert_eq!(data["citations"].as_array().unwrap().len(), 1);
+        assert_eq!(data["citations"][0]["id"], cited_id.to_string());
+        assert_eq!(data["citations"][0]["index"], 0);
+        assert_eq!(data["citations"][0]["grantor_name"], "Pepe");
+    }
 }

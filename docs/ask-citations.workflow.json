@@ -1,0 +1,49 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Recall Ask With Citations",
+    "quality_profile": "showcase",
+    "output": "docs/ask-citations.html"
+  },
+  "lanes": [
+    { "id": "caller", "label": "Caller" },
+    { "id": "recall", "label": "Recall" },
+    { "id": "memory", "label": "Memory", "variant": "exception" }
+  ],
+  "phases": [
+    { "id": "find", "label": "Find", "fromCol": 0, "toCol": 2 },
+    { "id": "answer", "label": "Answer", "fromCol": 3, "toCol": 4, "variant": "emphasis" },
+    { "id": "publish", "label": "Publish", "fromCol": 5, "toCol": 5 }
+  ],
+  "mainPath": ["question", "retrieve", "admit", "generate", "verify", "payload"],
+  "nodes": [
+    { "id": "question", "lane": "caller", "col": 0, "type": "external", "label": "Question", "sublabel": "POST /v1/ask", "width": 140 },
+    { "id": "retrieve", "lane": "recall", "col": 1, "type": "backend", "label": "Retrieve", "sublabel": "embed + RRF", "width": 140 },
+    { "id": "admit", "lane": "recall", "col": 2, "type": "security", "label": "Admit", "sublabel": "keep four", "width": 140 },
+    { "id": "generate", "lane": "recall", "col": 3, "type": "cloud", "label": "Qwen 1.5B", "sublabel": "prose, no markers", "width": 140 },
+    { "id": "verify", "lane": "recall", "col": 4, "type": "security", "label": "Verify", "sublabel": "overlap, then relate", "width": 140 },
+    { "id": "payload", "lane": "caller", "col": 5, "type": "frontend", "label": "Payload", "sublabel": "text + citations", "width": 140 },
+    { "id": "corpus", "lane": "memory", "col": 1, "type": "database", "label": "Nexus", "sublabel": "personal + granted", "width": 140 },
+    { "id": "empty", "lane": "memory", "col": 5, "type": "security", "label": "Empty", "sublabel": "I do not have that", "width": 140 }
+  ],
+  "edges": [
+    { "id": "ask-retrieve", "from": "question", "to": "retrieve", "label": "question", "variant": "emphasis", "role": "main" },
+    { "id": "corpus-retrieve", "from": "corpus", "to": "retrieve", "label": "chunks", "variant": "dashed" },
+    { "id": "retrieve-admit", "from": "retrieve", "to": "admit", "variant": "default", "role": "main" },
+    { "id": "admit-generate", "from": "admit", "to": "generate", "label": "fenced memories", "variant": "emphasis", "role": "main" },
+    { "id": "generate-verify", "from": "generate", "to": "verify", "label": "uncited prose", "variant": "default", "role": "main" },
+    { "id": "verify-payload", "from": "verify", "to": "payload", "label": "answer + citations", "variant": "emphasis", "role": "main" },
+    { "id": "verify-empty", "from": "verify", "to": "empty", "label": "no support", "variant": "security", "role": "error" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Citations on the payload",
+      "items": [
+        "Qwen 1.5B writes the sentence and omits [memory_N]",
+        "Recall still attaches the supporting citation objects"
+      ]
+    }
+  ]
+}

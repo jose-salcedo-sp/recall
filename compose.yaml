@@ -52,6 +52,9 @@ services:
 
   systemone:
     build: ./services/systemone
+    environment:
+      SYSTEMONE_BACKEND: laya
+      ADMIT_BATCH_SIZE: ${ADMIT_BATCH_SIZE:-32}
     volumes:
       - ${HF_CACHE_HOST_PATH:-${HOME}/.cache/huggingface}:/root/.cache/huggingface
     ports:
@@ -77,7 +80,11 @@ services:
       EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
       SYSTEM_ONE_URL: ${SYSTEM_ONE_URL:-http://systemone:8082}
       GENERATOR_URL: ${GENERATOR_URL:-http://generator:8080}
-      RUST_LOG: ${RUST_LOG:-info,recall=debug}
+      RETRIEVE_K: ${RETRIEVE_K:-64}
+      ALLOW_INSECURE_DB: "true"
+      INDEX_WRITES_ENABLED: "true"
+      PERSIST_ASKS: "true"
+      RECALL_SERVICE_TOKEN: ${RECALL_SERVICE_TOKEN:-local-dev-token}
     ports:
       - "${RECALL_PORT:-8000}:8000"
     depends_on:
