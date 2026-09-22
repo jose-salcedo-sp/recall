@@ -2,3 +2,20 @@
 .env
 *.gguf
 models/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Archify delivery snapshots and visual-check evidence
+**/.archify-delivery-*/
+*.visual-check.html
+*.visual-check.json
+*.visual-check.*.png
+
+# Dump of live Nexus memories for the Jev playground (scripts/export_jev_fixtures.py)
+jev-playground-fixtures.json
+
+.DS_Store
