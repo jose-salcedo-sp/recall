@@ -25,6 +25,8 @@ These files are shared between modules: `src/domain.rs`, `src/pipeline/{mod,trac
 
 ## Conventions
 
+For Rust work, start from the `rust-patterns` skill in `.cursor/skills/`.
+
 - Queries use runtime-checked `sqlx::query` / `query_as`; the `query!` macros need a live database at compile time.
 - Migrations are new files named `YYYYMMDDHHMMSS_description.sql`. Applied migrations are immutable.
 - Database tests use `#[sqlx::test(migrator = "recall::store::MIGRATOR")]`, which gives each test its own database.
