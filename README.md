@@ -58,13 +58,26 @@ sequenceDiagram
         end
     end
     Note over P: Rerank keeps the best 5 by retrieval rank,<br/>fused with System One's when it judges
+    opt admit.judge is system_one (off by default)
+        loop Admit: each kept source
+            P->>K: injection? relevant? contradicts the premise? usable evidence?
+            K-->>P: four probabilities; excluded sources never reach Explain
+        end
+    end
     opt boolean
         P->>K: Answer: going by these sources, is the answer yes?
         K-->>P: verdict and its confidence, checked against the threshold
     end
     P->>L: Explain: question, 5 sources and any verdict, delimited as data
     L-->>P: claims as JSON citing chunk ids, a contradiction declines
-    Note over P: Verify: an uncited claim, or a citation outside<br/>this run's chunks, declines the run
+    Note over P: Verify: an uncited claim, a citation outside this run's chunks,<br/>or a quoted span no cited chunk contains fails the claim
+    opt verify.support is system_one (shipped on)
+        loop each claim, its cited chunks in order
+            P->>K: does this text support, contradict, or say nothing about the claim?
+            K-->>P: the chosen relation and its probability
+        end
+    end
+    Note over P: verify.publish: a failed claim declines the run,<br/>or with strip is left out
     P-->>S: run report (answered, declined or failed) and trace
     S->>DB: save the run and its trace
     S-->>C: answer with numbered citations and the run id
@@ -178,7 +191,7 @@ What the configuration relies on:
 
 ## Configuration
 
-Tunables (retrieval, the Classify fallback, Rerank, Explain's `max_tokens`, step thresholds) are in [`config/drew.json`](config/drew.json), or the file `DREW_CONFIG` names; unknown keys are rejected. `drew eval run` prints the config and models at the start (through `jq` when installed) and records them in the results file; `models.rerank` names the model that judged Rerank, or is `null` when none did.
+Tunables (retrieval, the Classify fallback, Rerank, admission, Explain's `max_tokens`, Verify's support check and publish policy, step thresholds) are in [`config/drew.json`](config/drew.json), or the file `DREW_CONFIG` names; unknown keys are rejected. `drew eval run` prints the config and models at the start (through `jq` when installed) and records them in the results file; `models.rerank`, `models.admit` and `models.verify` name the models that judged Rerank, Admit and Verify's support check, or are `null` when none did.
 
 `explain.max_tokens` is Explain's token budget, reasoning included, from 1 to 65,536 (default 2,048). [`config/drew-workers-ai.json`](config/drew-workers-ai.json) is `config/drew.json` with it at 8,192 for the hosted reasoning model; a test fails if the two files differ anywhere else, so change both.
 
@@ -188,6 +201,19 @@ Tunables (retrieval, the Classify fallback, Rerank, Explain's `max_tokens`, step
 - `{"system_one": {"candidates": 25}}`: System One judges the best 25 matches by fused score, as before. `candidates` lives inside the variant because it means nothing without a judge, and must be at least `top_k`.
 
 On the 2026-10-22 DaaS run (`eval/results/daas-2026-10-22-v5.json`) System One reranking cost about 40 s and 25 System One calls per question for hit@5 43/58 against 41/58 in retrieval order, and was worse on yes/no questions (7/15 against 10/15), so it is off.
+
+`admit.judge` screens the reranked sources before Explain sees them, as recall's admission filter did:
+
+- `"none"` (the default and the shipped setting): no `admit` step; every reranked source reaches Explain.
+- `{"system_one": {}}`: one System One request per source, when System One is configured. A match is asked four yes/no questions and routed by the first cutoff it crosses: `injection_max` (0.7) excludes it, `relevant_min` (0.45) excludes it, `contradicts_min` (0.7) keeps it as a conflict, and `evidence_min` (0.55) keeps it, else it is excluded. Context is only screened for injection and otherwise rides with its match. No kept match declines the run with `no_sources`. The cutoffs are uncalibrated; fit them with `drew eval` before relying on them. The corpus is pre-audited, which is why the shipped config leaves this off.
+
+`verify.support` is what a claim must pass besides citing this run's sources:
+
+- `"membership"` (the default): citations only.
+- `"quotes"`: also, every span in backticks or double quotes appears in a cited chunk; no model call.
+- `{"system_one": {"min_support": 0.75}}` (shipped): the quote check, then System One judges each cited chunk in order until one "supports" the claim with at least `min_support`. Without System One it falls back to `quotes`.
+
+`verify.publish` is `"decline"` (the default and shipped: any failed claim declines the run) or `"strip"` (failed claims are left out and the rest published; the run declines only when none passes). Every verdict is in the Verify trace record, and `drew eval` reports the share of judged claims that are supported as `faithfulness`.
 
 See `.env.example`. Key variables: `DATABASE_URL`, `DREW_API_KEYS`, `DREW_ADMIN_USERS`, `DREW_DOCS_DIR`, `DREW_DOCS_BASE_URL`, `DREW_DOCS_AUTHORITATIVE` / `DREW_DOCS_EVIDENCE` / `DREW_DOCS_SKIP` (which paths are Drew's answers, which are supporting evidence, and which are left out), the model backends below, `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`.
 

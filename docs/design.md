@@ -147,8 +147,10 @@ Steps take their input by value and also see the question; they never see the tr
 
 | Category | Steps |
 |---|---|
-| `Boolean`, `Choice`, `Ranking` | `Classify` ∥ `Retrieve` → `Rerank` → `Answer` → `Explain` → `Verify` |
-| `Open` | `Classify` ∥ `Retrieve` → `Rerank` → `Explain` → `Verify` |
+| `Boolean`, `Choice`, `Ranking` | `Classify` ∥ `Retrieve` → `Rerank` [→ `Admit`] → `Answer` → `Explain` → `Verify` |
+| `Open` | `Classify` ∥ `Retrieve` → `Rerank` [→ `Admit`] → `Explain` → `Verify` |
+
+`Admit` is in a run only when `admit.judge` names a judge and one is configured; it maps `Reranked` to `Reranked`, so the pipeline types after it do not change.
 
 A pipeline is a typed path through the same state machine. A `Step` is a one-transition pipeline, and `Seq` composes two pipelines only when the first one's output state is the second one's input state.
 
@@ -248,7 +250,18 @@ Rules:
 - Model output is deserialized into a raw DTO, then converted with `TryFrom` into domain types. Any conversion failure halts as a decline.
 - The `Explain` LLM must flag when cited sources contradict the System One verdict.
 - `Explain` applies the corpus's answering rules from its system prompt, never from retrieved text: authoritative sources outrank evidence; generation, store, vocabulary and scope are settled or named; no identifier that the sources lack; source provenance tags kept and the model's own inferences tagged `[INF]`; sandbox and tenant numbers never generalised; recorded unknowns stated, not guessed.
-- `VerifiedAnswer` is only constructible inside `Verify`, which rejects any claim without a citation and any citation not among this run's retrieved chunks (runtime membership check).
+- `VerifiedAnswer` is only constructible inside `Verify`, which rejects any claim without a citation and any citation not among this run's retrieved chunks (runtime membership check), then applies the configured support check (5.7).
+
+### 5.7 Provenance checks
+
+Ported from recall. Both ask through `llm::judge::Judge`, a vendor-neutral port (yes/no and one-of questions over a text, answered with probabilities); `SystemOneJudge` adapts any System One backend, so neither step builds a wire request.
+
+- **Admission** (`Admit`, `admit.judge`): each reranked match is asked whether it tries to change the assistant's instructions, addresses the question, contradicts its premise, and states usable evidence. It is routed by the first cutoff it crosses: injection and irrelevant matches are excluded, a contradicting match is kept as a conflict, and the rest are kept only with evidence. Context is screened for injection only and otherwise follows its match. No kept match declines with `NoSources`. The record lists every source's probabilities and route.
+- **Support** (`Verify`, `verify.support`): `membership` checks citations only; `quotes` also requires every span in backticks or double quotes to appear in a cited chunk (`Explain`'s prompt says such spans are verbatim); `system_one` adds a one-of question per cited chunk (supports, contradicts, says nothing), in citation order, until one supports the claim with at least `min_support`. The chosen option's own probability is compared, not an entropy confidence. Without a judge, `system_one` falls back to `quotes`, and the record says which check ran.
+- **Publishing** (`verify.publish`): `decline` declines on any failed claim; `strip` leaves failed claims out and declines only when none is left, so what is shown is still verified.
+- **Audit**: the Admit and Verify records, with every probability and verdict, are part of the trace in `pipeline_runs`; `drew eval` reports `faithfulness`, the share of judged claims that are supported.
+
+Not ported: recall's single regeneration after a failed verify (a loop back to `Explain` that the typed pipeline has no combinator for), its personal and granted visibility model (permissions are the deferred security phase, section 8), streaming stage events (nothing is shown before verification), and its marker-less claim attribution (Explain's schema requires and constrains citations).
 
 ### 5.6 Trace
 
@@ -262,11 +275,11 @@ The trace is a flat list ordered by start time, serialized through the `TraceRec
 ## 6. Evaluation
 
 - **Golden set**: about 50 questions per category, mined from Drew's Q&A threads, held out of the corpus, verified by Drew.
-- **`drew eval`** reports per step: classification accuracy, retrieval recall@50, rerank hit@5, answer precision, decline rate, citation validity. Recall counts the matches retrieval ranked; the neighbouring sections it adds as context (`context_for` in the trace) neither count nor take a place.
+- **`drew eval`** reports per step: classification accuracy, retrieval recall@50, rerank hit@5, answer precision, decline rate, citation validity, and faithfulness (supported claims among those a judge checked). Recall counts the matches retrieval ranked; the neighbouring sections it adds as context (`context_for` in the trace) neither count nor take a place.
 - **`drew eval retrieval`** runs only `Retrieve` (embedder and database) and reports recall@10 and recall@50 per question and category, with each question gained, lost or unchanged against a baseline results file. Retrieval changes are gated here first: a lost question exits non-zero.
 - **CI**: runs on every change to prompts, models, chunking, or thresholds; a regression in any metric fails the build.
 - **Threshold tuning**: re-applies candidate thresholds to persisted runs from their recorded scores, without calling any model. Full replay is out of scope for v1. A candidate's `thresholds` and `per_category` have the same shape as those in `config/drew.json`, so a tuned candidate is pasted in as is.
-- **Configuration**: every tunable (retrieval candidates and BM25 `k1`/`b`, `classify.min_confidence`, rerank `top_k`, `judge` (with its `candidates`) and `evidence_rank_penalty`, step thresholds) is in one JSON file, `config/drew.json` or `DREW_CONFIG`. Unknown keys are rejected. `drew eval run` prints it with the models in use and records both, with the git revision, in the results file; `models.rerank` is the model that judged Rerank, `null` when the judge is `none` or System One is not configured.
+- **Configuration**: every tunable (retrieval candidates and BM25 `k1`/`b`, `classify.min_confidence`, rerank `top_k`, `judge` (with its `candidates`) and `evidence_rank_penalty`, the `admit` judge and cutoffs, `verify.support` and `verify.publish`, step thresholds) is in one JSON file, `config/drew.json` or `DREW_CONFIG`. Unknown keys are rejected. `drew eval run` prints it with the models in use and records both, with the git revision, in the results file; `models.rerank` is the model that judged Rerank, `null` when the judge is `none` or System One is not configured.
 - **Launch gate** (opening beyond the 4 users): answered precision ≥ 95% and decline rate ≤ ~40%. Until then v1 is the shadow phase, with Drew reviewing.
 - **Feedback loop**: declined and thumbs-down answers go to Drew's review queue. His corrections are ingested as authoritative chunks, and the question joins the golden set.
 

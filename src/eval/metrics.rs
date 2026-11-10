@@ -16,7 +16,9 @@ use crate::{
     pipeline::{
         answerer::Models,
         report::{Answer, Answerer, Outcome, RunReport, Verdict},
-        trace::{ClassifyRecord, RerankRecord, RetrieveRecord, TraceRecord},
+        trace::{
+            ClassifyRecord, RerankRecord, RetrieveRecord, SupportMode, TraceRecord, VerifyRecord,
+        },
     },
 };
 
@@ -115,6 +117,10 @@ pub struct RunScores {
     pub failed: bool,
     /// Every citation is a chunk this run retrieved or reranked; `None` unless answered.
     pub citations_valid: Option<bool>,
+    /// Share of the claims `Verify` judged that a cited chunk supports, in `0..=1`, whether or not the run
+    /// answered; `None` unless a judge checked at least one claim. Results written before it existed have none.
+    #[serde(default)]
+    pub claims_supported: Option<f64>,
 }
 
 /// Told about each golden question as its run starts and finishes, in completion order.
@@ -190,6 +196,10 @@ impl RunScores {
             TraceRecord::Rerank(record) => Some(record),
             _ => None,
         });
+        let verify = last_record(report, |record| match record {
+            TraceRecord::Verify(record) => Some(record),
+            _ => None,
+        });
         let relevant: HashSet<&ChunkId> = golden.relevant_chunks.iter().collect();
 
         Self {
@@ -210,6 +220,7 @@ impl RunScores {
                 Outcome::Answered(answer) => Some(citations_valid(answer, retrieve, rerank)),
                 _ => None,
             },
+            claims_supported: verify.and_then(claims_supported),
         }
     }
 }
@@ -275,6 +286,18 @@ fn hit(relevant: &HashSet<&ChunkId>, record: &RerankRecord) -> bool {
         .iter()
         .take(HIT_K)
         .any(|ranked| relevant.contains(&ranked.chunk.id))
+}
+
+pub(super) fn claims_supported(verify: &VerifyRecord) -> Option<f64> {
+    if verify.support != SupportMode::Judged || verify.claims.is_empty() {
+        return None;
+    }
+    let supported = verify
+        .claims
+        .iter()
+        .filter(|check| check.verdict.passed())
+        .count();
+    Some(supported as f64 / verify.claims.len() as f64)
 }
 
 /// Retrieved means returned by `Retrieve` or by `Rerank`, which also sees parent expansions.
@@ -361,10 +384,13 @@ pub struct Metrics {
     pub failure_rate: Metric,
     /// Mean of [`RunScores::citations_valid`].
     pub citation_validity: Metric,
+    /// Mean of [`RunScores::claims_supported`]: how faithful the explanations are to the chunks they cite.
+    #[serde(default)]
+    pub faithfulness: Metric,
 }
 
 /// A mean over the `n` runs that count toward it; `value` is `None` when `n` is 0.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Metric {
     /// The mean; in `0..=1` for every metric this module computes.
     pub value: Option<f64>,
@@ -432,7 +458,8 @@ impl Metrics {
             answer_precision: Metric::rate(scores.clone().filter_map(|s| s.answer_correct)),
             decline_rate: Metric::rate(scores.clone().map(|s| s.declined)),
             failure_rate: Metric::rate(scores.clone().map(|s| s.failed)),
-            citation_validity: Metric::rate(scores.filter_map(|s| s.citations_valid)),
+            citation_validity: Metric::rate(scores.clone().filter_map(|s| s.citations_valid)),
+            faithfulness: Metric::mean(scores.filter_map(|s| s.claims_supported)),
         }
     }
 
@@ -446,6 +473,7 @@ impl Metrics {
             MetricName::DeclineRate => self.decline_rate,
             MetricName::FailureRate => self.failure_rate,
             MetricName::CitationValidity => self.citation_validity,
+            MetricName::Faithfulness => self.faithfulness,
         }
     }
 }
@@ -470,11 +498,13 @@ pub enum MetricName {
     FailureRate,
     /// [`Metrics::citation_validity`].
     CitationValidity,
+    /// [`Metrics::faithfulness`].
+    Faithfulness,
 }
 
 impl MetricName {
     /// Every metric, in report order.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::ClassificationAccuracy,
         Self::RetrievalRecallAt50,
         Self::RerankHitAt5,
@@ -482,6 +512,7 @@ impl MetricName {
         Self::DeclineRate,
         Self::FailureRate,
         Self::CitationValidity,
+        Self::Faithfulness,
     ];
 
     /// `false` for the decline and failure rates, where a rise is the regression.
@@ -499,6 +530,7 @@ impl MetricName {
             Self::DeclineRate => "declined",
             Self::FailureRate => "failed",
             Self::CitationValidity => "citations",
+            Self::Faithfulness => "supported",
         }
     }
 }

@@ -6,8 +6,8 @@ use chrono::Utc;
 use super::{
     golden::{Expected, GoldenQuestion, YesNo},
     metrics::{
-        Baseline, EvalRun, Metric, MetricName, MetricsReport, Progress, Results, evaluate,
-        regressions,
+        Baseline, EvalRun, Metric, MetricName, MetricsReport, Progress, Results, claims_supported,
+        evaluate, regressions,
     },
     tune::{Candidate, tune},
     *,
@@ -1315,4 +1315,43 @@ fn tune_command_reads_results_and_candidate_files() {
     let report: tune::TuneReport = read_json(&dir.join("tune.json")).unwrap();
     assert_eq!(report.candidates[0].overall.answered, 4);
     fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn faithfulness_counts_only_claims_a_judge_checked() {
+    use crate::pipeline::trace::{
+        ClaimCheck, ClaimVerdict, Relation, RelationKind, SupportMode, VerifyRecord,
+    };
+
+    let relation = |kind| Relation {
+        chunk: ChunkId("c".into()),
+        relation: kind,
+        probability: Probability::new(0.9).unwrap(),
+    };
+    let check = |verdict| ClaimCheck {
+        claim: "A.".into(),
+        verdict,
+    };
+    let judged = VerifyRecord {
+        support: SupportMode::Judged,
+        claims: vec![
+            check(ClaimVerdict::Supported {
+                by: relation(RelationKind::Supports),
+            }),
+            check(ClaimVerdict::Contradicted {
+                by: relation(RelationKind::Contradicts),
+            }),
+            check(ClaimVerdict::Fabricated { span: "x".into() }),
+            check(ClaimVerdict::Unsupported { relations: vec![] }),
+        ],
+        ..VerifyRecord::default()
+    };
+    assert_eq!(claims_supported(&judged), Some(0.25));
+    let quotes = VerifyRecord {
+        support: SupportMode::Quotes,
+        claims: vec![check(ClaimVerdict::QuotesFound)],
+        ..VerifyRecord::default()
+    };
+    assert_eq!(claims_supported(&quotes), None);
+    assert_eq!(claims_supported(&VerifyRecord::default()), None);
 }

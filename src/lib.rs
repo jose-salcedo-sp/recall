@@ -14,13 +14,15 @@
 //! entry and checks its threshold; a decline or failure becomes [`pipeline::Halted`], which keeps the trace.
 //!
 //! ```text
-//! Classify ∥ Retrieve → Rerank → Answer → Explain → Verify    boolean, choice, ranking
-//! Classify ∥ Retrieve → Rerank →          Explain → Verify    open
+//! Classify ∥ Retrieve → Rerank [→ Admit] → Answer → Explain → Verify    boolean, choice, ranking
+//! Classify ∥ Retrieve → Rerank [→ Admit] →          Explain → Verify    open
 //! ```
 //!
 //! The steps are in [`pipeline::steps`]; [`pipeline::answerer::PipelineAnswerer`] drives a question through them
-//! and returns a [`pipeline::report::RunReport`]. [`pipeline::steps::VerifiedAnswer`] can only be built by
-//! `Verify`, which rejects any claim without a citation and any citation outside the run's sources.
+//! and returns a [`pipeline::report::RunReport`]. `Admit`, when configured, screens the sources for injection,
+//! relevance, contradiction and evidence. [`pipeline::steps::VerifiedAnswer`] can only be built by `Verify`, which
+//! rejects any claim without a citation or citing outside the run's sources and, when configured, any claim whose
+//! quoted spans or judged support its cited chunks do not back.
 //!
 //! # Ports
 //!
@@ -33,6 +35,7 @@
 //! | [`llm::Embedder`] | Bedrock or an OpenAI-compatible server (Ollama, Workers AI), chosen by [`llm::embedder`] |
 //! | [`llm::ChatModel`] | Bedrock or an OpenAI-compatible server (Ollama, Workers AI), chosen by [`llm::explain_model`] |
 //! | [`llm::system_one::SystemOne`] | [`llm::system_one::HttpSystemOne`] (Kev, system-one.dev) or [`llm::workers_ai::WorkersAiSystemOne`], chosen by [`llm::system_one_client`] |
+//! | [`llm::judge::Judge`] | [`llm::judge::SystemOneJudge`], over whichever System One is configured |
 //! | [`retrieval::Retriever`] | [`retrieval::hybrid::HybridRetriever`], full-text and vector search in Postgres |
 //! | [`store::RunStore`] | [`store::runs::PgRunStore`] |
 //! | [`pipeline::report::Answerer`] | [`pipeline::answerer::PipelineAnswerer`] |

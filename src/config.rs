@@ -770,6 +770,51 @@ mod tests {
     }
 
     #[test]
+    fn admission_and_the_support_check_are_off_by_default_and_checked_on_every_load_path() {
+        let defaults = PipelineConfig::default();
+        assert_eq!(defaults.admit.judge, AdmitJudge::None);
+        assert_eq!(defaults.verify.support, SupportCheck::Membership);
+        assert_eq!(defaults.verify.publish, PublishPolicy::Decline);
+
+        let shipped = PipelineConfig::parse(include_str!("../config/drew.json")).unwrap();
+        assert_eq!(shipped.admit.judge, AdmitJudge::None);
+        assert_eq!(
+            shipped.verify.support,
+            SupportCheck::SystemOne(SupportCutoff::default())
+        );
+
+        let config = PipelineConfig::parse(
+            r#"{"admit": {"judge": {"system_one": {"evidence_min": 0.3}}}, "verify": {"support": "quotes", "publish": "strip"}}"#,
+        )
+        .unwrap();
+        let AdmitJudge::SystemOne(cutoffs) = config.admit.judge else {
+            panic!("expected the System One judge");
+        };
+        assert_eq!(cutoffs.evidence_min.get(), 0.3);
+        assert_eq!(
+            cutoffs.injection_max,
+            AdmissionCutoffs::default().injection_max
+        );
+        assert_eq!(config.verify.support, SupportCheck::Quotes);
+        assert_eq!(config.verify.publish, PublishPolicy::Strip);
+
+        for bad in [
+            r#"{"admit": {"judge": "kev"}}"#,
+            r#"{"admit": {"judge": {"system_one": {"evidence": 0.5}}}}"#,
+            r#"{"admit": {"judge": {"system_one": {"injection_max": 1.5}}}}"#,
+            r#"{"verify": {"support": {"system_one": {"min_support": -0.1}}}}"#,
+            r#"{"verify": {"publish": "regenerate"}}"#,
+            r#"{"verify": {"supports": "quotes"}}"#,
+        ] {
+            assert!(PipelineConfig::parse(bad).is_err(), "{bad}");
+            assert!(
+                serde_json::from_str::<PipelineConfig>(bad).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
     fn bm25_constants_are_checked_on_every_load_path() {
         for bad in [
             r#"{"retrieval": {"bm25": {"k1": -0.1}}}"#,

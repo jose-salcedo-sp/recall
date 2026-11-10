@@ -22,8 +22,19 @@
     "judge": "none",
     "evidence_rank_penalty": 10
   },
+  "admit": {
+    "judge": "none"
+  },
   "explain": {
     "max_tokens": 2048
+  },
+  "verify": {
+    "support": {
+      "system_one": {
+        "min_support": 0.75
+      }
+    },
+    "publish": "decline"
   },
   "thresholds": {},
   "per_category": {
