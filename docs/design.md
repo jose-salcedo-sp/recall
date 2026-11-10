@@ -43,7 +43,7 @@ Ingestion:
 | Concern | Choice |
 |---|---|
 | Language | Rust, one library crate and one binary: `recall serve`, `recall ingest`, `recall eval`, `recall models check` |
-| Modules | `ingest`, `retrieval`, `pipeline`, `llm`, `store`, `server`, `eval` |
+| Modules | `access`, `ingest`, `retrieval`, `pipeline`, `llm`, `store`, `server`, `eval`, plus `config`, `clock` and `models` (`recall models check`) |
 | Store | Postgres + pgvector, behind the `ChunkStore` and `RunStore` ports; time and run ids behind `Clock` and `RunIds`, eval's files behind `Files` |
 | Retrieval | Hybrid: full-text + vector, merged with reciprocal rank fusion (identifiers like `A_OPCODE` or `ROLE_USERS` embed poorly). Full text ranks exact identifier matches first, then BM25 in plain SQL over corpus statistics that `recall ingest` refreshes (no extension). Before searching, a question can gain the words of the glossary table rows it names by a part, alternative or acronym of their term (`retrieval.expansion.documents` lists the glossary documents; parsed from their current chunks on each retrieval, capped per question, recorded in the `Retrieve` trace) |
 | Embeddings, "why" LLM | Adapters for Amazon Bedrock and any OpenAI-compatible server (locally Ollama or llama.cpp; hosted, Cloudflare Workers AI). Each port names its backend (`RECALL_EMBED_BACKEND`, `RECALL_EXPLAIN_BACKEND`), with no default |
@@ -101,9 +101,10 @@ pub struct Open;
 
 pub struct Run<TCategory, TState> {
     id: RunId,
-    question: Question,
+    ask: Ask, // question, principal, access
     state: TState,
     trace: Trace,
+    clock: Arc<dyn Clock>, // stamps each trace entry
     category: PhantomData<TCategory>,
 }
 
@@ -262,7 +263,7 @@ Every judged step (`Classify`, `Rerank`, `Answer`, `Admit`, `Verify`) asks throu
 - **Publishing** (`verify.publish`): `decline` declines on any failed claim; `strip` leaves failed claims out and declines only when none is left, so what is shown is still verified.
 - **Audit**: the Admit and Verify records, with every probability and verdict, are part of the trace in `pipeline_runs`; `recall eval` reports `faithfulness`, the share of judged claims that are supported.
 
-Not built: regenerating once after a failed claim (a loop back to `Explain` that the typed pipeline has no combinator for), visibility rules over the recorded labels (section 8), and streaming stage events (nothing is shown before verification).
+Not built: regenerating once after a failed claim (a loop back to `Explain` that the typed pipeline has no combinator for), and streaming stage events (nothing is shown before verification).
 
 ### 5.6 Trace
 
@@ -275,7 +276,7 @@ The trace is a flat list ordered by start time, serialized through the `TraceRec
 
 ### 5.8 Assembly
 
-`pipeline::assembly` resolves the config against the model backends available (`Ports`: retriever, Explain LLM, optional `Judge`) once, before any question, and builds every step. It is the only place that decides what an absent judge means:
+`pipeline::assembly` resolves the config against the model backends available (`Ports`: retriever, Explain LLM, optional `Judge`, plus the `Authorizer`, `Clock` and `RunIds` every run uses) once, before any question, and builds every step. It is the only place that decides what an absent judge means:
 
 - A check the config names runs as named, or assembly fails with `Unassembled`: `rerank.judge`, `admit.judge` or `verify.support` naming a judge with none configured lists every such key in one error, and a `rerank` threshold while `rerank.judge` is `none` (the step is unscored) is an error too. No step falls back to a quieter check.
 - Without a judge, `Classify` records every question as `open` and there is no boolean path: no config key asks for classification, so this follows from the backends rather than downgrading a check.
