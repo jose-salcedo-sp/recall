@@ -428,14 +428,16 @@ impl BaselineRecords {
 pub async fn run_retrieval(
     retriever: Arc<dyn Retriever>,
     authorizer: &dyn Authorizer,
+    ports: &super::EvalPorts,
     args: RetrievalArgs,
     setup: Option<RetrievalSetup>,
 ) -> eros::Result<()> {
+    let files = ports.files.as_ref();
     let principal = args.asking.principal();
     let access = authorizer.access(&principal).await?;
-    let golden = super::select(super::read_golden(&args.golden)?, &args.questions)?;
+    let golden = super::select(super::read_golden(files, &args.golden)?, &args.questions)?;
     let baseline = match args.baseline.as_deref() {
-        Some(path) => Some((path, read_baseline(path)?)),
+        Some(path) => Some((path, read_baseline(files, path)?)),
         None => None,
     };
 
@@ -459,7 +461,7 @@ pub async fn run_retrieval(
         .collect();
     let results = RetrievalResults {
         setup: setup.map(|setup| RetrievalSetup {
-            finished_at: Some(Utc::now()),
+            finished_at: Some(ports.clock.now()),
             ..setup
         }),
         metrics: RetrievalReport::of(&scores),
@@ -474,7 +476,7 @@ pub async fn run_retrieval(
         elapsed.as_secs_f64()
     );
     if let Some(out) = &args.out {
-        super::write_json(out, &results)?;
+        super::write_json(files, out, &results)?;
         println!("Results written to {}", out.display());
     }
 
@@ -493,8 +495,8 @@ pub async fn run_retrieval(
 }
 
 #[eros::context("reading baseline {}", path.display())]
-fn read_baseline(path: &Path) -> eros::Result<BaselineRecords> {
-    BaselineRecords::parse(&std::fs::read_to_string(path)?)
+fn read_baseline(files: &dyn super::files::Files, path: &Path) -> eros::Result<BaselineRecords> {
+    BaselineRecords::parse(&files.read(path)?)
 }
 
 fn score(value: Option<f64>) -> String {

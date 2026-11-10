@@ -16,6 +16,7 @@ use crate::{
         fakes::FailingAuthorizer,
         rules::{AccessConfig, RulePolicy},
     },
+    clock::{Clock, fakes::FixedClock},
     domain::{CategoryKind, ChunkId, ChunkRef, ChunkVersion, Question, RunId, UserId},
     pipeline::report::{Answerer, CannedAnswerer, Outcome, RunReport},
     store::{
@@ -66,6 +67,7 @@ fn app(answerer: impl Answerer + 'static) -> App {
         runs: Arc::<MemoryRunStore>::clone(&runs),
         keys: keys(),
         authorizer: policy(),
+        clock: Arc::new(FixedClock::default()),
     };
     App {
         router: router(state),
@@ -374,6 +376,7 @@ async fn persistence_failure_returns_500_with_the_run_id() {
             runs: Arc::new(FailingRunStore),
             keys: keys(),
             authorizer: policy(),
+            clock: Arc::new(FixedClock::default()),
         };
         let reply = send(&router(state), chat(Some(ANA_KEY), &ask("Is it?"))).await;
         assert_eq!(reply.status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -575,6 +578,7 @@ async fn a_policy_that_cannot_answer_hides_every_run() {
         runs,
         keys: keys(),
         authorizer: Arc::new(FailingAuthorizer),
+        clock: Arc::new(FixedClock::default()),
     });
 
     let reply = send(&router, get(&format!("/v1/runs/{id}"), ANA_KEY)).await;
@@ -582,4 +586,16 @@ async fn a_policy_that_cannot_answer_hides_every_run() {
     assert_eq!(reply.status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(reply.json()["error"]["code"], "authorizer_unavailable");
     assert!(!reply.body.contains("Is it?"));
+}
+
+#[tokio::test]
+async fn completions_and_stored_runs_are_stamped_by_the_injected_clock() {
+    let app = app(canned(None, fixtures::answered()));
+
+    let reply = send(&app.router, chat(Some(ANA_KEY), &ask("Is it?"))).await;
+
+    let now = FixedClock::default().now();
+    assert_eq!(reply.json()["created"], now.timestamp());
+    let stored = app.runs.get(run_id(&reply.json())).await.unwrap().unwrap();
+    assert_eq!(stored.created_at, now);
 }

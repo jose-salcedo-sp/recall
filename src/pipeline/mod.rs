@@ -93,13 +93,13 @@ pub mod report;
 pub mod steps;
 pub mod trace;
 
-use std::{future::Future, marker::PhantomData, time::Instant};
+use std::{future::Future, marker::PhantomData, sync::Arc, time::Instant};
 
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     access::{Access, AccessDecision, Authorizer, Principal},
+    clock::Clock,
     domain::{CategoryKind, Probability, Question, RunId},
     llm::ModelRef,
 };
@@ -197,32 +197,36 @@ pub struct Run<TCategory, TState> {
     ask: Ask,
     state: TState,
     trace: Trace,
+    clock: Arc<dyn Clock>,
     category: PhantomData<TCategory>,
 }
 
 impl Run<Unclassified, Asked> {
-    /// A fresh run with a new [`RunId`] and an empty trace, for an `ask` whose access is already decided.
-    pub fn new(ask: Ask) -> Self {
+    /// A run with an empty trace, for an `ask` whose access is already decided. `clock` stamps each trace entry.
+    pub fn new(id: RunId, ask: Ask, clock: Arc<dyn Clock>) -> Self {
         Self {
-            id: RunId::new(),
+            id,
             ask,
             state: Asked,
             trace: Trace::default(),
+            clock,
             category: PhantomData,
         }
     }
 
-    /// A fresh run for `principal`, with the access `authorizer` gives it as the first trace entry.
+    /// Run `id` for `principal`, with the access `authorizer` gives it as the first trace entry.
     ///
     /// # Errors
     ///
     /// [`Halted`] at [`AUTHORIZE`], failed, when the authorizer errors: the run reads nothing it was not granted.
     pub async fn authorize(
+        id: RunId,
         question: Question,
         principal: Principal,
         authorizer: &dyn Authorizer,
+        clock: Arc<dyn Clock>,
     ) -> Result<Self, Halted> {
-        let started_at = Utc::now();
+        let started_at = clock.now();
         let started = Instant::now();
         let result = authorizer.access(&principal).await;
         let duration_ms = started.elapsed().as_millis() as u64;
@@ -256,7 +260,7 @@ impl Run<Unclassified, Asked> {
                 ));
                 Ok(Self {
                     trace,
-                    ..Self::new(Ask::new(question, principal, access))
+                    ..Self::new(id, Ask::new(question, principal, access), clock)
                 })
             }
             Err(error) => {
@@ -268,7 +272,7 @@ impl Run<Unclassified, Asked> {
                     record(None),
                 ));
                 Err(Halted {
-                    id: RunId::new(),
+                    id,
                     question,
                     trace,
                     category: None,
@@ -531,9 +535,10 @@ impl<TCategory: Category, TState: Send> Run<TCategory, TState> {
             ask,
             state,
             mut trace,
+            clock,
             ..
         } = self;
-        let (entry, result) = execute(step, &ask, state, None).await;
+        let (entry, result) = execute(step, &ask, state, None, clock.as_ref()).await;
         trace.push(entry);
         match result {
             Ok(output) => Ok(Run {
@@ -541,6 +546,7 @@ impl<TCategory: Category, TState: Send> Run<TCategory, TState> {
                 ask,
                 state: output,
                 trace,
+                clock,
                 category: PhantomData,
             }),
             Err(halt) => Err(Halted {
@@ -576,11 +582,12 @@ impl<TCategory: Category, TState: Send> Run<TCategory, TState> {
             ask,
             state,
             mut trace,
+            clock,
             ..
         } = self;
         let ((left_entry, left_result), (right_entry, right_result)) = futures::join!(
-            execute(left, &ask, state.clone(), Some(group)),
-            execute(right, &ask, state, Some(group)),
+            execute(left, &ask, state.clone(), Some(group), clock.as_ref()),
+            execute(right, &ask, state, Some(group), clock.as_ref()),
         );
         trace.push(left_entry);
         trace.push(right_entry);
@@ -598,6 +605,7 @@ impl<TCategory: Category, TState: Send> Run<TCategory, TState> {
                 ask: ask.clone(),
                 state: (left, right),
                 trace,
+                clock: Arc::clone(&clock),
                 category: PhantomData,
             }),
             (Err(halt), _) => Err(halted(trace, TLeft::NAME, halt)),
@@ -612,6 +620,7 @@ impl<TCategory: Category, TState: Send> Run<TCategory, TState> {
             ask: self.ask,
             state: f(self.state),
             trace: self.trace,
+            clock: self.clock,
             category: PhantomData,
         }
     }
@@ -623,6 +632,7 @@ impl<TCategory: Category, TState: Send> Run<TCategory, TState> {
             ask: self.ask,
             state: self.state,
             trace: self.trace,
+            clock: self.clock,
             category: PhantomData,
         }
     }
@@ -633,8 +643,9 @@ async fn execute<TStep: Step>(
     ask: &Ask,
     input: TStep::Input,
     group: Option<&'static str>,
+    clock: &dyn Clock,
 ) -> (TraceEntry, Result<TStep::Output, Halt>) {
-    let started_at = Utc::now();
+    let started_at = clock.now();
     let started = Instant::now();
     let result = step.run(ask, input).await;
     let duration_ms = started.elapsed().as_millis() as u64;

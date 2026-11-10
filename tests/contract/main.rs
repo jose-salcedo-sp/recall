@@ -11,6 +11,7 @@ mod runs;
 
 mod bedrock;
 mod chat_model;
+mod chunk_store;
 mod embedder;
 mod judge;
 mod models_check;

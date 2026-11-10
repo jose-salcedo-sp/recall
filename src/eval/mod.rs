@@ -6,6 +6,7 @@
 //! recorded scores without calling any model ([`tune`]). `recall eval retrieval` runs only `Retrieve` and reports
 //! recall ([`retrieval`]). Eval reads runs; it never writes the database.
 
+pub mod files;
 pub mod golden;
 pub mod metrics;
 pub mod progress;
@@ -13,20 +14,18 @@ pub mod retrieval;
 pub mod tune;
 
 use std::{
-    fs,
     io::Write as _,
     path::PathBuf,
     process::{Command as Process, Stdio},
     sync::Arc,
 };
 
-use chrono::Utc;
-
 use crate::{
     access::{
         Principal,
         rules::{AccessArgs, RulePolicy},
     },
+    clock::{Clock, SystemClock},
     config::ConfigArgs,
     domain::UserId,
     llm::{self, backend::EmbedArgs},
@@ -39,6 +38,7 @@ use crate::{
 };
 
 use self::{
+    files::{Files, LocalFiles},
     golden::GoldenQuestion,
     metrics::{Baseline, Results, RunSetup},
     retrieval::{RetrievalArgs, RetrievalSetup, run_retrieval},
@@ -157,18 +157,31 @@ pub struct TuneArgs {
     pub out: Option<PathBuf>,
 }
 
-/// Runs `recall eval`.
+/// What eval reads and writes its files through, and stamps its results with.
+#[derive(Clone)]
+pub struct EvalPorts {
+    /// Golden sets, baselines and candidates in; results and reports out.
+    pub files: Arc<dyn Files>,
+    /// Stamps `started_at` and `finished_at`.
+    pub clock: Arc<dyn Clock>,
+}
+
+/// Runs `recall eval` on the local file system and the system clock.
 ///
 /// # Errors
 ///
 /// As [`run_golden`] or [`run_tune`], or when the database or pipeline cannot be set up.
 pub async fn run(args: Args) -> eros::Result<()> {
+    let ports = EvalPorts {
+        files: Arc::new(LocalFiles),
+        clock: Arc::new(SystemClock),
+    };
     match args.command {
         Command::Run(args) => {
             let pool = store::connect(&args.db).await?;
             let answerer = PipelineAnswerer::from_args(pool, &args.pipeline).await?;
             let setup = RunSetup {
-                started_at: Utc::now(),
+                started_at: ports.clock.now(),
                 finished_at: None,
                 golden: args.files.golden.display().to_string(),
                 git: git_describe(),
@@ -176,14 +189,14 @@ pub async fn run(args: Args) -> eros::Result<()> {
                 models: answerer.models(),
                 plan: Some(answerer.plan()),
             };
-            run_golden(Arc::new(answerer), args.files, Some(setup)).await
+            run_golden(Arc::new(answerer), &ports, args.files, Some(setup)).await
         }
         Command::Retrieval(args) => {
             let pool = store::connect(&args.db).await?;
             let config = args.config.load()?;
             let embedder = llm::embedder(&args.embed).await?;
             let setup = RetrievalSetup {
-                started_at: Utc::now(),
+                started_at: ports.clock.now(),
                 finished_at: None,
                 golden: args.files.golden.display().to_string(),
                 git: git_describe(),
@@ -192,9 +205,16 @@ pub async fn run(args: Args) -> eros::Result<()> {
             };
             let retriever = HybridRetriever::new(pool, embedder, config.retrieval);
             let authorizer = RulePolicy::new(args.access.load()?);
-            run_retrieval(Arc::new(retriever), &authorizer, args.files, Some(setup)).await
+            run_retrieval(
+                Arc::new(retriever),
+                &authorizer,
+                &ports,
+                args.files,
+                Some(setup),
+            )
+            .await
         }
-        Command::Tune(args) => run_tune(&args),
+        Command::Tune(args) => run_tune(ports.files.as_ref(), &args),
     }
 }
 
@@ -207,11 +227,17 @@ pub async fn run(args: Args) -> eros::Result<()> {
 /// restricted to the selection, or any metric regressed beyond its tolerance.
 pub async fn run_golden(
     answerer: Arc<dyn Answerer>,
+    ports: &EvalPorts,
     args: RunArgs,
     setup: Option<RunSetup>,
 ) -> eros::Result<()> {
-    let golden = select(read_golden(&args.golden)?, &args.questions)?;
-    let mut baseline: Option<Baseline> = args.baseline.as_deref().map(read_json).transpose()?;
+    let files = ports.files.as_ref();
+    let golden = select(read_golden(files, &args.golden)?, &args.questions)?;
+    let mut baseline: Option<Baseline> = args
+        .baseline
+        .as_deref()
+        .map(|path| read_json(files, path))
+        .transpose()?;
     if !args.questions.is_empty() {
         baseline = baseline
             .map(|baseline| baseline.restricted_to(&args.questions))
@@ -239,10 +265,10 @@ pub async fn run_golden(
     .await;
     bar.finish();
     results.setup = setup.map(|setup| RunSetup {
-        finished_at: Some(Utc::now()),
+        finished_at: Some(ports.clock.now()),
         ..setup
     });
-    write_json(&args.out, &results)?;
+    write_json(files, &args.out, &results)?;
     println!("{}", results.metrics);
     println!("Results written to {}", args.out.display());
 
@@ -266,13 +292,13 @@ pub async fn run_golden(
 /// # Errors
 ///
 /// When a file cannot be read, parsed or written.
-pub fn run_tune(args: &TuneArgs) -> eros::Result<()> {
-    let results: Results = read_json(&args.results)?;
-    let candidates: Vec<Candidate> = read_json(&args.candidates)?;
+pub fn run_tune(files: &dyn Files, args: &TuneArgs) -> eros::Result<()> {
+    let results: Results = read_json(files, &args.results)?;
+    let candidates: Vec<Candidate> = read_json(files, &args.candidates)?;
     let report = tune::tune(&results, &candidates);
     println!("{report}");
     if let Some(out) = &args.out {
-        write_json(out, &report)?;
+        write_json(files, out, &report)?;
         println!("Tuning report written to {}", out.display());
     }
     Ok(())
@@ -336,21 +362,27 @@ fn select(golden: Vec<GoldenQuestion>, ids: &[String]) -> eros::Result<Vec<Golde
 }
 
 #[eros::context("reading golden set {}", path.display())]
-fn read_golden(path: &std::path::Path) -> eros::Result<Vec<GoldenQuestion>> {
-    let text = fs::read_to_string(path)?;
+fn read_golden(files: &dyn Files, path: &std::path::Path) -> eros::Result<Vec<GoldenQuestion>> {
+    let text = files.read(path)?;
     Ok(golden::parse(&text)?)
 }
 
-#[eros::context("reading {}", path.display())]
-fn read_json<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> eros::Result<T> {
-    let text = fs::read_to_string(path)?;
+#[eros::context("parsing {}", path.display())]
+fn read_json<T: serde::de::DeserializeOwned>(
+    files: &dyn Files,
+    path: &std::path::Path,
+) -> eros::Result<T> {
+    let text = files.read(path)?;
     Ok(serde_json::from_str(&text)?)
 }
 
-#[eros::context("writing {}", path.display())]
-fn write_json(path: &std::path::Path, value: &impl serde::Serialize) -> eros::Result<()> {
+fn write_json(
+    files: &dyn Files,
+    path: &std::path::Path,
+    value: &impl serde::Serialize,
+) -> eros::Result<()> {
     let json = serde_json::to_string_pretty(value)?;
-    Ok(fs::write(path, json + "\n")?)
+    files.write(path, &(json + "\n"))
 }
 
 #[cfg(test)]

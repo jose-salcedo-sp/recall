@@ -33,6 +33,7 @@ use uuid::Uuid;
 
 use crate::{
     access::{Authorizer, RunAccess},
+    clock::{Clock, SystemClock},
     domain::{RunId, UserId},
     pipeline::{
         answerer::{PipelineAnswerer, PipelineArgs},
@@ -75,6 +76,8 @@ pub struct AppState {
     pub keys: Arc<ApiKeys>,
     /// Decides who reads a persisted run; the same policy the answerer authorizes runs by.
     pub authorizer: Arc<dyn Authorizer>,
+    /// Stamps completions.
+    pub clock: Arc<dyn Clock>,
 }
 
 /// The API routes, each behind a bearer key. An unknown path gets an OpenAI-style 404 without authentication.
@@ -96,11 +99,13 @@ pub async fn run(args: Args) -> eros::Result<()> {
     let pool = store::connect(&args.db).await?;
     let answerer = PipelineAnswerer::from_args(pool.clone(), &args.pipeline).await?;
     tracing::info!(plan = ?answerer.plan(), "pipeline assembled");
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let state = AppState {
         authorizer: answerer.authorizer(),
         answerer: Arc::new(answerer),
-        runs: Arc::new(PgRunStore::new(pool.clone())),
+        runs: Arc::new(PgRunStore::new(pool.clone(), Arc::clone(&clock))),
         keys: Arc::new(args.api_keys),
+        clock,
     };
     let listener = tokio::net::TcpListener::bind(&args.bind)
         .await
@@ -176,7 +181,7 @@ async fn chat_completions(
         }
     };
 
-    let created = Utc::now().timestamp();
+    let created = state.clock.now().timestamp();
     if request.stream != Some(true) {
         return Ok(Json(Completion::new(summary, content, created)).into_response());
     }

@@ -12,14 +12,15 @@ use crate::{
         Authorizer, PolicyRef, Principal,
         rules::{AccessArgs, RulePolicy},
     },
+    clock::{SystemClock, UuidV7},
     config::{ConfigArgs, PipelineConfig},
     domain::{CategoryKind, Chunk, Provenance, Question, RunId},
     llm::{
-        self, ChatModel, ModelRef,
+        self, ModelRef,
         backend::{ChatArgs, EmbedArgs, SystemOneArgs},
         judge::Judge,
     },
-    retrieval::{Retrieved, Retriever, hybrid::HybridRetriever},
+    retrieval::{Retrieved, hybrid::HybridRetriever},
 };
 
 use super::{
@@ -115,20 +116,14 @@ impl PipelineAnswerer {
         })
     }
 
-    /// The default config, which needs no judge, with no judge: every question is `open`.
-    pub fn new(
-        retriever: Arc<dyn Retriever>,
-        explain: Arc<dyn ChatModel>,
-        authorizer: Arc<dyn Authorizer>,
-    ) -> Self {
+    /// The default config, which names no judged check, over `ports`; `ports.judge` is replaced by none, so every
+    /// question is `open` until [`PipelineAnswerer::with_judge`].
+    pub fn new(ports: Ports) -> Self {
         Self::assemble(
             PipelineConfig::default(),
             Ports {
-                retriever,
-                embedding: None,
-                explain,
                 judge: None,
-                authorizer,
+                ..ports
             },
         )
         .expect("the default config names no judged check and no rerank threshold")
@@ -201,6 +196,8 @@ impl PipelineAnswerer {
             explain: llm::explain_model(&args.chat).await?,
             judge: llm::judge(&args.system_one)?,
             authorizer,
+            clock: Arc::new(SystemClock),
+            ids: Arc::new(UuidV7),
         };
         Ok(Self::assemble(config, ports)?)
     }
@@ -213,10 +210,16 @@ impl PipelineAnswerer {
         question: Question,
     ) -> Result<(CategoryKind, Classified<'_>), Halted> {
         let steps = &self.steps;
-        let run = Run::authorize(question, principal.clone(), self.ports.authorizer.as_ref())
-            .await?
-            .both("classify_retrieve", &steps.classify, &steps.retrieve)
-            .await?;
+        let run = Run::authorize(
+            self.ports.ids.next(),
+            question,
+            principal.clone(),
+            self.ports.authorizer.as_ref(),
+            Arc::clone(&self.ports.clock),
+        )
+        .await?
+        .both("classify_retrieve", &steps.classify, &steps.retrieve)
+        .await?;
         let category = run.state().0;
         let run: Run<Unclassified, Candidates> = run.map(|(_, candidates)| candidates);
         let classified = match (category, &steps.boolean) {

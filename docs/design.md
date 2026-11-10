@@ -44,7 +44,7 @@ Ingestion:
 |---|---|
 | Language | Rust, one library crate and one binary: `recall serve`, `recall ingest`, `recall eval`, `recall models check` |
 | Modules | `ingest`, `retrieval`, `pipeline`, `llm`, `store`, `server`, `eval` |
-| Store | Postgres + pgvector |
+| Store | Postgres + pgvector, behind the `ChunkStore` and `RunStore` ports; time and run ids behind `Clock` and `RunIds`, eval's files behind `Files` |
 | Retrieval | Hybrid: full-text + vector, merged with reciprocal rank fusion (identifiers like `A_OPCODE` or `ROLE_USERS` embed poorly). Full text ranks exact identifier matches first, then BM25 in plain SQL over corpus statistics that `recall ingest` refreshes (no extension). Before searching, a question can gain the words of the glossary table rows it names by a part, alternative or acronym of their term (`retrieval.expansion.documents` lists the glossary documents; parsed from their current chunks on each retrieval, capped per question, recorded in the `Retrieve` trace) |
 | Embeddings, "why" LLM | Adapters for Amazon Bedrock and any OpenAI-compatible server (locally Ollama or llama.cpp; hosted, Cloudflare Workers AI). Each port names its backend (`RECALL_EMBED_BACKEND`, `RECALL_EXPLAIN_BACKEND`), with no default |
 | System One | Adapters for the System One API (`POST /v1/systemone`: yes/no, choice, and score questions over a text, answered with calibrated probabilities), served locally by [Kev](https://github.com/jaredpalmer/kev) and hosted by system-one.dev, and for Cloudflare's Clef models on Workers AI. `RECALL_SYSTEM_ONE_BACKEND` is `none`, `system-one` or `workers-ai` |

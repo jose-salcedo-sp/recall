@@ -43,6 +43,9 @@
 //! | [`llm::judge::Judge`] | [`llm::judge::SystemOneJudge`], over whichever System One is configured, chosen by [`llm::judge()`]; every judged step asks through it |
 //! | [`retrieval::Retriever`] | [`retrieval::hybrid::HybridRetriever`], full-text and vector search in Postgres |
 //! | [`store::RunStore`] | [`store::runs::PgRunStore`] |
+//! | [`store::chunks::ChunkStore`] | [`store::chunks::PgChunkStore`]; [`ingest::ingest`] writes through it |
+//! | [`clock::Clock`], [`clock::RunIds`] | [`clock::SystemClock`], [`clock::UuidV7`]: trace, run and eval timestamps and run ids |
+//! | [`eval::files::Files`] | [`eval::files::LocalFiles`]: golden sets, baselines and results |
 //! | [`pipeline::report::Answerer`] | [`pipeline::answerer::PipelineAnswerer`] |
 //!
 //! # Where to start
@@ -58,6 +61,7 @@
 //! [`docs/design.md`]: https://github.com/jose-salcedo-sp/recall/blob/main/docs/design.md
 
 pub mod access;
+pub mod clock;
 pub mod config;
 pub mod domain;
 pub mod eval;

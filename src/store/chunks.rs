@@ -1,8 +1,10 @@
-//! Writes documents and chunk versions: insert new versions, supersede replaced and removed ones.
+//! Writes documents and chunk versions behind the [`ChunkStore`] port: insert new versions, supersede replaced and
+//! removed ones. [`PgChunkStore`] is the Postgres adapter; `store::fakes::MemoryChunkStore` keeps them in memory.
 
 use std::collections::{HashMap, HashSet};
 
-use eros::{Context, bail, ensure};
+use async_trait::async_trait;
+use eros::{Context, IntoUnion, bail, ensure};
 use pgvector::Vector;
 use sqlx::PgPool;
 
@@ -10,6 +12,68 @@ use crate::{
     domain::{ChunkDraft, ChunkVersion, Document, DocumentId, SourceName},
     llm::{EMBEDDING_DIM, EmbedPurpose, Embedder, ModelRef},
 };
+
+/// The chunk store could not answer a query that spans every source: its backend is unreachable or rejected it.
+#[derive(Debug, thiserror::Error)]
+#[error("the chunk store failed")]
+pub struct ChunkStoreFailed(#[source] Box<dyn std::error::Error + Send + Sync>);
+
+impl ChunkStoreFailed {
+    /// Wraps the backend's error, which stays the source.
+    pub fn new(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
+        Self(error.into())
+    }
+}
+
+/// Chunk versions: content-addressed, immutable, and current until superseded. Ingestion writes through it; the
+/// `store_contract!` suite in `tests/contract/chunk_store.rs` holds the rules every adapter keeps.
+#[async_trait]
+pub trait ChunkStore: Send + Sync {
+    /// Makes the document's drafts its current chunks, embedding only drafts whose version is not already stored. A
+    /// draft whose version was stored earlier and superseded is made current again without embedding it.
+    ///
+    /// # Errors
+    ///
+    /// When two drafts share a locator, embedding fails or returns the wrong count or dimension, or the backend
+    /// fails. Nothing of the document is stored then.
+    async fn store(&self, document: &Document, embedder: &dyn Embedder) -> eros::Result<Stored>;
+
+    /// Supersedes current chunks of documents from `source` whose ids are not in `present`. Returns how many.
+    ///
+    /// # Errors
+    ///
+    /// When the backend fails.
+    async fn supersede_missing_documents(
+        &self,
+        source: &SourceName,
+        present: &[DocumentId],
+    ) -> eros::Result<u64>;
+
+    /// Distinct embedding models among current chunks, sorted by id then version.
+    ///
+    /// # Errors
+    ///
+    /// [`ChunkStoreFailed`].
+    async fn current_embedding_models(&self) -> eros::Result<Vec<ModelRef>, (ChunkStoreFailed,)>;
+
+    /// Supersedes every current chunk embedded with a model other than `model`. Returns how many.
+    ///
+    /// # Errors
+    ///
+    /// [`ChunkStoreFailed`].
+    async fn supersede_other_models(
+        &self,
+        model: &ModelRef,
+    ) -> eros::Result<u64, (ChunkStoreFailed,)>;
+
+    /// Recomputes whatever corpus statistics retrieval ranks with from the current chunks; a store whose retriever
+    /// needs none does nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`ChunkStoreFailed`].
+    async fn refresh_term_stats(&self) -> eros::Result<(), (ChunkStoreFailed,)>;
+}
 
 /// What storing one document changed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -27,28 +91,22 @@ impl std::ops::AddAssign for Stored {
     }
 }
 
-/// Writes chunk versions; cheap to clone (shares the pool).
+/// The production [`ChunkStore`], over the `documents` and `chunks` tables; cheap to clone (shares the pool).
 #[derive(Clone)]
-pub struct ChunkStore {
+pub struct PgChunkStore {
     pool: PgPool,
 }
 
-impl ChunkStore {
+impl PgChunkStore {
     /// Wraps a pool whose migrations have run.
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
+}
 
-    /// Makes the document's drafts its current chunks, embedding only drafts whose version is not already stored.
-    ///
-    /// # Errors
-    ///
-    /// When two drafts share a locator, embedding fails or returns the wrong count or dimension, or a query fails.
-    pub async fn store(
-        &self,
-        document: &Document,
-        embedder: &dyn Embedder,
-    ) -> eros::Result<Stored> {
+#[async_trait]
+impl ChunkStore for PgChunkStore {
+    async fn store(&self, document: &Document, embedder: &dyn Embedder) -> eros::Result<Stored> {
         let document_id = document.id();
         let model = embedder.model();
 
@@ -230,32 +288,25 @@ impl ChunkStore {
         })
     }
 
-    /// Distinct embedding models among current chunks, sorted by id then version.
-    ///
-    /// # Errors
-    ///
-    /// When the query fails.
-    pub async fn current_embedding_models(&self) -> eros::Result<Vec<ModelRef>, (sqlx::Error,)> {
-        Ok(sqlx::query_as::<_, (String, String)>(
+    async fn current_embedding_models(&self) -> eros::Result<Vec<ModelRef>, (ChunkStoreFailed,)> {
+        let rows = sqlx::query_as::<_, (String, String)>(
             "SELECT DISTINCT embedding_model, embedding_model_version FROM chunks
              WHERE superseded_at IS NULL ORDER BY 1, 2",
         )
         .fetch_all(&self.pool)
-        .await?
-        .into_iter()
-        .map(|(id, version)| ModelRef::new(id, version))
-        .collect())
+        .await
+        .map_err(ChunkStoreFailed::new)
+        .union()?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, version)| ModelRef::new(id, version))
+            .collect())
     }
 
-    /// Supersedes every current chunk embedded with a model other than `model`. Returns how many.
-    ///
-    /// # Errors
-    ///
-    /// When the query fails.
-    pub async fn supersede_other_models(
+    async fn supersede_other_models(
         &self,
         model: &ModelRef,
-    ) -> eros::Result<u64, (sqlx::Error,)> {
+    ) -> eros::Result<u64, (ChunkStoreFailed,)> {
         Ok(sqlx::query(
             "UPDATE chunks SET superseded_at = now()
              WHERE superseded_at IS NULL
@@ -264,33 +315,28 @@ impl ChunkStore {
         .bind(&model.id)
         .bind(&model.version)
         .execute(&self.pool)
-        .await?
+        .await
+        .map_err(ChunkStoreFailed::new)
+        .union()?
         .rows_affected())
     }
 
-    /// Recomputes the full-text statistics that BM25 ranking reads (document frequency per lexeme, chunk count and
-    /// average length) from the current chunks, in one transaction.
-    ///
-    /// # Errors
-    ///
-    /// When the query fails.
-    pub async fn refresh_term_stats(&self) -> eros::Result<(), (sqlx::Error,)> {
+    /// The full-text statistics BM25 ranking reads (document frequency per lexeme, chunk count and average length),
+    /// in one transaction.
+    async fn refresh_term_stats(&self) -> eros::Result<(), (ChunkStoreFailed,)> {
         sqlx::query("SELECT refresh_fts_prose_stats()")
             .execute(&self.pool)
-            .await?;
+            .await
+            .map_err(ChunkStoreFailed::new)
+            .union()?;
         Ok(())
     }
 
-    /// Supersedes current chunks of documents for `source` whose ids are not in `present`. Returns how many.
-    ///
-    /// # Errors
-    ///
-    /// When the query fails.
-    pub async fn supersede_missing_documents(
+    async fn supersede_missing_documents(
         &self,
         source: &SourceName,
         present: &[DocumentId],
-    ) -> eros::Result<u64, (sqlx::Error,)> {
+    ) -> eros::Result<u64> {
         let ids: Vec<&str> = present.iter().map(|d| d.0.as_str()).collect();
         Ok(sqlx::query(
             "UPDATE chunks SET superseded_at = now()
@@ -308,7 +354,7 @@ impl ChunkStore {
 }
 
 /// The document title and section heading give a section's text the context it lacks on its own.
-fn embedding_input(document: &Document, draft: &ChunkDraft) -> String {
+pub(crate) fn embedding_input(document: &Document, draft: &ChunkDraft) -> String {
     match &draft.heading {
         Some(heading) => format!("{}\n{heading}\n\n{}", document.title, draft.text),
         None => format!("{}\n\n{}", document.title, draft.text),

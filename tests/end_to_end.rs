@@ -18,13 +18,17 @@ use recall::{
         Authorizer, ConnectorLabels,
         rules::{AccessConfig, LabelRules, RulePolicy},
     },
+    clock::{SystemClock, UuidV7},
     domain::{ChunkDraft, Document, Labels, Sensitivity},
     ingest::{Sources, fakes::StaticSource, ingest, markdown},
-    llm::fakes::{HashEmbedder, ScriptedChat},
-    pipeline::answerer::PipelineAnswerer,
+    llm::{
+        ChatModel,
+        fakes::{HashEmbedder, ScriptedChat},
+    },
+    pipeline::{answerer::PipelineAnswerer, assembly::Ports},
     retrieval::hybrid::{HybridConfig, HybridRetriever},
     server::{AppState, router},
-    store::runs::PgRunStore,
+    store::{chunks::PgChunkStore, runs::PgRunStore},
 };
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -61,6 +65,22 @@ fn roles_page() -> Document {
     }
 }
 
+fn ports(
+    retriever: HybridRetriever,
+    explain: Arc<dyn ChatModel>,
+    authorizer: &Arc<dyn Authorizer>,
+) -> Ports {
+    Ports {
+        retriever: Arc::new(retriever),
+        embedding: None,
+        explain,
+        judge: None,
+        authorizer: Arc::clone(authorizer),
+        clock: Arc::new(SystemClock),
+        ids: Arc::new(UuidV7),
+    }
+}
+
 /// The policy `config/access.json` ships: every user is a `reader` of internal chunks and its own runs.
 fn shipped_policy() -> Arc<dyn Authorizer> {
     Arc::new(RulePolicy::new(
@@ -75,7 +95,14 @@ async fn an_ingested_page_answers_a_question_over_http(pool: PgPool) -> eros::Re
         name: markdown::NAME.clone(),
         documents: vec![roles_page()],
     })])?;
-    ingest(&pool, &HashEmbedder, &ConnectorLabels, &sources, false).await?;
+    ingest(
+        &PgChunkStore::new(pool.clone()),
+        &HashEmbedder,
+        &ConnectorLabels,
+        &sources,
+        false,
+    )
+    .await?;
 
     let retriever = HybridRetriever::new(
         pool.clone(),
@@ -91,12 +118,13 @@ async fn an_ingested_page_answers_a_question_over_http(pool: PgPool) -> eros::Re
     .to_string()]);
     let authorizer = shipped_policy();
     let app = router(AppState {
-        answerer: Arc::new(PipelineAnswerer::new(
-            Arc::new(retriever),
+        answerer: Arc::new(PipelineAnswerer::new(ports(
+            retriever,
             Arc::new(explain),
-            Arc::clone(&authorizer),
-        )),
-        runs: Arc::new(PgRunStore::new(pool)),
+            &authorizer,
+        ))),
+        runs: Arc::new(PgRunStore::new(pool, Arc::new(SystemClock))),
+        clock: Arc::new(SystemClock),
         keys: Arc::new("sk-jose:jose".parse().unwrap()),
         authorizer,
     });
@@ -197,7 +225,7 @@ async fn a_relabelled_confidential_page_never_reaches_a_reader(pool: PgPool) -> 
         r#"{ "roles": {}, "labels": [{ "documents": "markdown:hr/", "sensitivity": "confidential" }] }"#,
     )?;
     ingest(
-        &pool,
+        &PgChunkStore::new(pool.clone()),
         &HashEmbedder,
         &LabelRules::new(rules.labels()),
         &sources,
@@ -219,12 +247,13 @@ async fn a_relabelled_confidential_page_never_reaches_a_reader(pool: PgPool) -> 
     );
     let authorizer = shipped_policy();
     let app = router(AppState {
-        answerer: Arc::new(PipelineAnswerer::new(
-            Arc::new(retriever),
-            Arc::<ScriptedChat>::clone(&explain),
-            Arc::clone(&authorizer),
-        )),
-        runs: Arc::new(PgRunStore::new(pool)),
+        answerer: Arc::new(PipelineAnswerer::new(ports(
+            retriever,
+            Arc::<ScriptedChat>::clone(&explain) as Arc<dyn ChatModel>,
+            &authorizer,
+        ))),
+        runs: Arc::new(PgRunStore::new(pool, Arc::new(SystemClock))),
+        clock: Arc::new(SystemClock),
         keys: Arc::new("sk-jose:jose".parse().unwrap()),
         authorizer,
     });

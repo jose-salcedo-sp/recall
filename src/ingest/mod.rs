@@ -1,5 +1,5 @@
 //! Batch ingestion (`recall ingest`): a [`Source`] returns a full snapshot of documents; [`ingest`] labels them through
-//! the [`Labeler`] port, versions, embeds and stores their chunks through [`crate::store::chunks::ChunkStore`], and
+//! the [`Labeler`] port, versions, embeds and stores their chunks through the [`ChunkStore`] port, and
 //! supersedes what the snapshot no longer contains. Ingestion never reads or writes pipeline runs.
 //!
 //! A connector is any [`Source`]: it names itself with a [`SourceName`], and nothing in the core or the schema lists
@@ -15,7 +15,6 @@ use std::{collections::HashSet, fmt};
 
 use async_trait::async_trait;
 use eros::{Context, IntoUnion, ReshapeUnion};
-use sqlx::PgPool;
 
 use crate::{
     access::{
@@ -26,7 +25,7 @@ use crate::{
     llm::{self, Embedder, ModelRef, backend::EmbedArgs},
     store::{
         self, DbArgs,
-        chunks::{ChunkStore, Stored},
+        chunks::{ChunkStore, ChunkStoreFailed, PgChunkStore, Stored},
     },
 };
 
@@ -140,10 +139,10 @@ pub async fn run(args: Args) -> eros::Result<()> {
 pub async fn run_with(args: &IngestArgs, sources: &Sources) -> eros::Result<()> {
     eros::ensure!(!sources.is_empty(), "no sources are configured");
     let labeler = LabelRules::new(args.access.load()?.labels());
-    let pool = store::connect(&args.db).await?;
+    let store = PgChunkStore::new(store::connect(&args.db).await?);
     let embedder = llm::embedder(&args.embed).await?;
 
-    let reports = ingest(&pool, embedder.as_ref(), &labeler, sources, args.reembed).await?;
+    let reports = ingest(&store, embedder.as_ref(), &labeler, sources, args.reembed).await?;
     let failed: Vec<&str> = reports
         .iter()
         .filter(|r| r.error.is_some())
@@ -195,15 +194,14 @@ pub struct SourceReport {
 /// # Errors
 ///
 /// [`EmbeddingModelMismatch`], before touching any source, when current chunks use another model and `reembed` is
-/// off; [`sqlx::Error`] when the model check, the final supersede, or the statistics refresh fails.
+/// off; [`ChunkStoreFailed`] when the model check, the final supersede, or the statistics refresh fails.
 pub async fn ingest(
-    pool: &PgPool,
+    store: &dyn ChunkStore,
     embedder: &dyn Embedder,
     labeler: &dyn Labeler,
     sources: &Sources,
     reembed: bool,
-) -> eros::Result<Vec<SourceReport>, (EmbeddingModelMismatch, sqlx::Error)> {
-    let store = ChunkStore::new(pool.clone());
+) -> eros::Result<Vec<SourceReport>, (EmbeddingModelMismatch, ChunkStoreFailed)> {
     let model = embedder.model();
 
     let current = store.current_embedding_models().await.widen()?;
@@ -224,7 +222,7 @@ pub async fn ingest(
             stored: Stored::default(),
             error: None,
         };
-        let result = ingest_source(&store, embedder, labeler, source, &mut report).await;
+        let result = ingest_source(store, embedder, labeler, source, &mut report).await;
         match result {
             Ok(()) => tracing::info!(
                 source = name.as_str(),
@@ -264,7 +262,7 @@ pub async fn ingest(
 
 #[eros::context("ingesting source {}", source.name())]
 async fn ingest_source(
-    store: &ChunkStore,
+    store: &dyn ChunkStore,
     embedder: &dyn Embedder,
     labeler: &dyn Labeler,
     source: &dyn Source,

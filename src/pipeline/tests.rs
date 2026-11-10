@@ -7,6 +7,7 @@ use crate::{
         Access,
         fakes::{FailingAuthorizer, StaticAuthorizer, tester},
     },
+    clock::fakes::FixedClock,
     domain::Probability,
 };
 
@@ -83,8 +84,16 @@ fn empty_record() -> VerifyRecord {
     VerifyRecord::default()
 }
 
+fn clock() -> Arc<dyn Clock> {
+    Arc::new(FixedClock::default())
+}
+
+fn run(ask: Ask) -> Run<Unclassified, Asked> {
+    Run::new(RunId::new(), ask, clock())
+}
+
 fn open_run() -> Run<Open, Asked> {
-    Run::new(Ask::unrestricted("does it work?")).classified()
+    run(Ask::unrestricted("does it work?")).classified()
 }
 
 fn probability(value: f32) -> Probability {
@@ -136,7 +145,7 @@ async fn score_below_threshold_halts_with_the_trace_so_far() {
 
 #[tokio::test]
 async fn declined_step_keeps_its_record_and_model() {
-    let halted = Run::new(Ask::unrestricted("q"))
+    let halted = run(Ask::unrestricted("q"))
         .then(&Refuse)
         .await
         .err()
@@ -152,7 +161,7 @@ async fn declined_step_keeps_its_record_and_model() {
 
 #[tokio::test]
 async fn both_traces_the_other_branch_when_one_halts() {
-    let halted = Run::new(Ask::unrestricted("q"))
+    let halted = run(Ask::unrestricted("q"))
         .both("classify_retrieve", &Refuse, &fetch(0.9, None))
         .await
         .err()
@@ -173,7 +182,7 @@ fn trace_round_trips_through_json() {
     let entry = TraceEntry {
         step: "verify".into(),
         group: None,
-        started_at: Utc::now(),
+        started_at: chrono::Utc::now(),
         duration_ms: 3,
         model: None,
         prompt_version: None,
@@ -216,9 +225,12 @@ fn stored_scores_stay_bare_numbers_and_are_checked_on_read() {
 async fn authorize_records_who_asked_and_what_they_may_read() {
     let authorizer = StaticAuthorizer::tester();
 
-    let run = Run::authorize(Question::new("q"), tester(), &authorizer)
+    let id = RunId::new();
+    let run = Run::authorize(id, Question::new("q"), tester(), &authorizer, clock())
         .await
         .unwrap();
+
+    assert_eq!(run.id(), id);
 
     assert_eq!(run.ask().principal(), &tester());
     assert_eq!(run.ask().access(), &crate::access::fakes::unrestricted());
@@ -235,9 +247,11 @@ async fn authorize_records_who_asked_and_what_they_may_read() {
 #[tokio::test]
 async fn an_unknown_principal_runs_with_no_access() {
     let run = Run::authorize(
+        RunId::new(),
         Question::new("q"),
         Principal::new(crate::domain::UserId("stranger".into())),
         &StaticAuthorizer::tester(),
+        clock(),
     )
     .await
     .unwrap();
@@ -247,10 +261,19 @@ async fn an_unknown_principal_runs_with_no_access() {
 
 #[tokio::test]
 async fn a_policy_that_cannot_answer_fails_the_run_before_any_step() {
-    let halted = Run::authorize(Question::new("q"), tester(), &FailingAuthorizer)
-        .await
-        .err()
-        .unwrap();
+    let id = RunId::new();
+    let halted = Run::authorize(
+        id,
+        Question::new("q"),
+        tester(),
+        &FailingAuthorizer,
+        clock(),
+    )
+    .await
+    .err()
+    .unwrap();
+
+    assert_eq!(halted.id, id);
 
     assert_eq!(halted.at, AUTHORIZE);
     assert_eq!(halted.category, None);
@@ -262,4 +285,23 @@ async fn a_policy_that_cannot_answer_fails_the_run_before_any_step() {
         panic!("expected an authorize record");
     };
     assert_eq!(record.access, None);
+}
+
+#[tokio::test]
+async fn the_injected_clock_stamps_every_entry() {
+    let fixed = Arc::new(FixedClock::default());
+    let run = Run::new(
+        RunId::new(),
+        Ask::unrestricted("q"),
+        Arc::<FixedClock>::clone(&fixed) as Arc<dyn Clock>,
+    )
+    .classified::<Open>()
+    .then(&fetch(0.9, None))
+    .await
+    .unwrap();
+    fixed.advance(chrono::Duration::seconds(3));
+    let run = run.then(&Double).await.unwrap();
+
+    let started: Vec<_> = run.trace().entries().iter().map(|e| e.started_at).collect();
+    assert_eq!(started[1] - started[0], chrono::Duration::seconds(3));
 }

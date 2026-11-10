@@ -12,6 +12,8 @@ fn ports(judge: Option<Arc<dyn Judge>>) -> Ports {
         explain: Arc::new(ScriptedChat::replying(Vec::<String>::new())),
         judge,
         authorizer: Arc::new(crate::access::fakes::StaticAuthorizer::tester()),
+        clock: Arc::new(crate::clock::fakes::FixedClock::default()),
+        ids: Arc::new(crate::clock::fakes::SequentialIds::default()),
     }
 }
 

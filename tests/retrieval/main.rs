@@ -18,7 +18,7 @@ use recall::{
         Relevance, Retrieved, Retriever,
         hybrid::{EmbeddingModelMismatch, ExpansionConfig, HybridConfig, HybridRetriever},
     },
-    store::chunks::ChunkStore,
+    store::chunks::{ChunkStore, PgChunkStore},
 };
 use seed::{ACL_GROUP, SeedChunk, document, embed, recall_at_k, similar_to};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -155,7 +155,7 @@ async fn a_rare_term_outranks_repeats_of_a_common_one(pool: PgPool) {
     for i in 0..5 {
         chunk(&format!("note-{i}.md"), &format!("Note {i} on the role.")).await;
     }
-    ChunkStore::new(pool.clone())
+    PgChunkStore::new(pool.clone())
         .refresh_term_stats()
         .await
         .unwrap();
@@ -801,4 +801,28 @@ async fn the_vector_side_fills_its_candidates_past_chunks_the_asker_may_not_read
     found.sort();
     readable.sort();
     assert_eq!(found, readable);
+}
+
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
+async fn an_embedder_that_cannot_answer_fails_retrieval(pool: PgPool) {
+    let doc = document(&pool, &markdown::NAME, "roles.md", "Roles").await;
+    SeedChunk::new(&doc, "body", 0, "ROLE_USERS maps users to roles.")
+        .model(recall::llm::fakes::FailingModel.model())
+        .insert(&pool)
+        .await;
+    let retriever = HybridRetriever::new(
+        pool.clone(),
+        Arc::new(recall::llm::fakes::FailingModel),
+        HybridConfig::default(),
+    );
+
+    let error = retriever
+        .retrieve("ROLE_USERS", &everything())
+        .await
+        .unwrap_err();
+
+    assert!(
+        format!("{error:#?}").contains("connection refused"),
+        "{error:#?}"
+    );
 }

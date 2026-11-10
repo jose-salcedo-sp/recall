@@ -7,9 +7,11 @@ use crate::{
         fakes::{FailingAuthorizer, StaticAuthorizer, tester},
         rules::AccessConfig,
     },
+    clock::fakes::{FixedClock, SequentialIds},
     domain::{ChunkId, Labels, Sensitivity, UserId},
+    llm::ChatModel,
     llm::{
-        fakes::ScriptedChat,
+        fakes::{FailingModel, ScriptedChat},
         judge::{FnJudge, JudgeQuestion, RawJudgement},
     },
     pipeline::{
@@ -21,6 +23,7 @@ use crate::{
             TraceRecord,
         },
     },
+    retrieval::Retriever,
     retrieval::fakes::{FailingRetriever, KeywordRetriever, LeakyRetriever},
 };
 
@@ -54,12 +57,28 @@ fn reply(claims: &serde_json::Value) -> String {
     json!({ "claims": claims }).to_string()
 }
 
+fn ports(
+    retriever: Arc<dyn Retriever>,
+    explain: Arc<dyn ChatModel>,
+    authorizer: Arc<dyn Authorizer>,
+) -> Ports {
+    Ports {
+        retriever,
+        embedding: None,
+        explain,
+        judge: None,
+        authorizer,
+        clock: Arc::new(FixedClock::default()),
+        ids: Arc::new(SequentialIds::default()),
+    }
+}
+
 fn answerer(chunks: Vec<Chunk>, chat: &Arc<ScriptedChat>) -> PipelineAnswerer {
-    PipelineAnswerer::new(
+    PipelineAnswerer::new(ports(
         Arc::new(KeywordRetriever { chunks }),
         Arc::<ScriptedChat>::clone(chat),
         Arc::new(StaticAuthorizer::tester()),
-    )
+    ))
 }
 
 async fn ask(chunks: Vec<Chunk>, chat: &Arc<ScriptedChat>) -> RunReport {
@@ -268,11 +287,11 @@ async fn an_empty_corpus_declines_without_calling_the_model() {
 #[tokio::test]
 async fn retriever_error_fails_the_run() {
     let chat = Arc::new(ScriptedChat::replying(Vec::<String>::new()));
-    let answerer = PipelineAnswerer::new(
+    let answerer = PipelineAnswerer::new(ports(
         Arc::new(FailingRetriever),
         Arc::<ScriptedChat>::clone(&chat),
         Arc::new(StaticAuthorizer::tester()),
-    );
+    ));
 
     let report = answerer.answer(&tester(), Question::new(QUESTION)).await;
 
@@ -850,11 +869,11 @@ async fn no_principal_sees_a_chunk_its_access_denies() {
                 _ => Arc::new(LeakyRetriever { chunks }),
             };
             let authorizer = policy();
-            let answerer = PipelineAnswerer::new(
+            let answerer = PipelineAnswerer::new(ports(
                 retriever,
                 Arc::<ScriptedChat>::clone(&chat),
                 Arc::clone(&authorizer) as Arc<dyn Authorizer>,
-            )
+            ))
             .with_config(strip())
             .unwrap();
             let principal = principal(id);
@@ -881,13 +900,13 @@ async fn a_citation_of_a_denied_chunk_is_stripped_and_never_shown() {
         { "text": "ROLE_USERS maps users to roles.", "chunk_ids": [role_users().id] },
         { "text": "The override is ROLE_ROOT.", "chunk_ids": [secret().id] },
     ]))]));
-    let answerer = PipelineAnswerer::new(
+    let answerer = PipelineAnswerer::new(ports(
         Arc::new(LeakyRetriever {
             chunks: labelled_corpus(),
         }),
         Arc::<ScriptedChat>::clone(&chat),
         policy(),
-    )
+    ))
     .with_config(strip())
     .unwrap();
 
@@ -937,13 +956,13 @@ async fn a_citation_of_a_denied_chunk_is_stripped_and_never_shown() {
 #[tokio::test]
 async fn a_principal_with_no_access_declines_without_calling_the_model() {
     let chat = Arc::new(ScriptedChat::replying(Vec::<String>::new()));
-    let answerer = PipelineAnswerer::new(
+    let answerer = PipelineAnswerer::new(ports(
         Arc::new(LeakyRetriever {
             chunks: labelled_corpus(),
         }),
         Arc::<ScriptedChat>::clone(&chat),
         Arc::new(StaticAuthorizer::default()),
-    );
+    ));
 
     let report = answerer
         .answer(&principal("eve"), Question::new(QUESTION))
@@ -964,11 +983,11 @@ async fn a_principal_with_no_access_declines_without_calling_the_model() {
 #[tokio::test]
 async fn a_policy_that_cannot_answer_fails_the_run_before_retrieval() {
     let chat = Arc::new(ScriptedChat::replying(Vec::<String>::new()));
-    let answerer = PipelineAnswerer::new(
+    let answerer = PipelineAnswerer::new(ports(
         Arc::new(KeywordRetriever { chunks: corpus() }),
         Arc::<ScriptedChat>::clone(&chat),
         Arc::new(FailingAuthorizer),
-    );
+    ));
 
     let report = answerer.answer(&tester(), Question::new(QUESTION)).await;
 
@@ -989,13 +1008,13 @@ async fn a_boolean_verdict_is_judged_only_on_readable_sources() {
         yes: 0.2,
     }
     .judge();
-    let answerer = PipelineAnswerer::new(
+    let answerer = PipelineAnswerer::new(ports(
         Arc::new(LeakyRetriever {
             chunks: labelled_corpus(),
         }),
         Arc::<ScriptedChat>::clone(&chat),
         policy(),
-    )
+    ))
     .with_judge(Arc::<FnJudge>::clone(&judge));
 
     answerer
@@ -1008,4 +1027,57 @@ async fn a_boolean_verdict_is_judged_only_on_readable_sources() {
         }
     }
     assert!(judge.requests().len() > 1, "the judge answered the verdict");
+}
+
+#[tokio::test]
+async fn runs_are_named_and_stamped_by_the_injected_ports() {
+    let chat = Arc::new(ScriptedChat::replying(Vec::<String>::new()));
+    let answerer = answerer(Vec::new(), &chat);
+
+    let first = answerer.answer(&tester(), Question::new(QUESTION)).await;
+    let second = answerer.answer(&tester(), Question::new(QUESTION)).await;
+
+    assert_eq!(first.id.to_string(), "00000000-0000-0000-0000-000000000001");
+    assert_eq!(
+        second.id.to_string(),
+        "00000000-0000-0000-0000-000000000002"
+    );
+    let now = crate::clock::Clock::now(&FixedClock::default());
+    assert!(
+        first
+            .trace
+            .entries()
+            .iter()
+            .all(|entry| entry.started_at == now)
+    );
+}
+
+#[tokio::test]
+async fn a_judge_that_cannot_answer_fails_the_run_at_classify() {
+    let chat = Arc::new(ScriptedChat::replying(Vec::<String>::new()));
+    let answerer = answerer(corpus(), &chat).with_judge(Arc::new(FailingModel));
+
+    let report = answerer.answer(&tester(), Question::new(QUESTION)).await;
+
+    assert!(matches!(
+        &report.outcome,
+        Outcome::Failed { at, error } if at == "classify" && error.contains("connection refused")
+    ));
+    assert!(chat.requests().is_empty());
+}
+
+#[tokio::test]
+async fn an_explain_model_that_cannot_answer_fails_the_run_at_explain() {
+    let answerer = PipelineAnswerer::new(ports(
+        Arc::new(KeywordRetriever { chunks: corpus() }),
+        Arc::new(FailingModel),
+        Arc::new(StaticAuthorizer::tester()),
+    ));
+
+    let report = answerer.answer(&tester(), Question::new(QUESTION)).await;
+
+    assert!(matches!(
+        &report.outcome,
+        Outcome::Failed { at, error } if at == "explain" && error.contains("connection refused")
+    ));
 }

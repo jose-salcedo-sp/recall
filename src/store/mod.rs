@@ -49,7 +49,7 @@ pub async fn connect(args: &DbArgs) -> eros::Result<PgPool> {
 pub struct StoredRun {
     /// Who asked.
     pub user: UserId,
-    /// When it was saved, set by the store.
+    /// When it was saved, by the store's clock.
     pub created_at: DateTime<Utc>,
     /// The outcome and full trace.
     pub report: RunReport,

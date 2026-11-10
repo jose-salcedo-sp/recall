@@ -17,11 +17,13 @@ use crate::{
         Principal,
         fakes::{StaticAuthorizer, tester},
     },
+    clock::fakes::FixedClock,
     config::{PerCategory, StepName},
     domain::{
         AtLeastOne, CategoryKind, ChunkId, ChunkRef, ChunkVersion, Cited, Probability, Provenance,
         Question, RunId,
     },
+    eval::files::{Files, fakes::MemoryFiles},
     pipeline::{
         DeclineReason,
         report::{Answer, CannedAnswerer, Citation, Outcome, RunReport, Verdict},
@@ -56,6 +58,15 @@ fn ranked(ids: &[&str]) -> Vec<RankedChunk> {
             context_for: None,
         })
         .collect()
+}
+
+fn eval_ports() -> (EvalPorts, Arc<MemoryFiles>) {
+    let files = Arc::new(MemoryFiles::default());
+    let ports = EvalPorts {
+        files: Arc::<MemoryFiles>::clone(&files),
+        clock: Arc::new(FixedClock::default()),
+    };
+    (ports, files)
 }
 
 fn tester_args() -> AsArgs {
@@ -759,14 +770,14 @@ async fn baseline_gate_treats_rising_decline_rate_and_lost_metrics_as_regression
 #[tokio::test]
 async fn run_command_writes_results_and_gates_on_the_baseline_file() {
     let runs = fixture();
-    let dir = std::env::temp_dir().join(format!("recall-eval-{}", RunId::new()));
-    fs::create_dir_all(&dir).unwrap();
+    let dir = PathBuf::from("/eval");
+    let (ports, files) = eval_ports();
     let golden_path = dir.join("golden.jsonl");
     let golden_text: Vec<String> = runs
         .iter()
         .map(|(golden, _)| serde_json::to_string(golden).unwrap())
         .collect();
-    fs::write(&golden_path, golden_text.join("\n")).unwrap();
+    files.write(&golden_path, &golden_text.join("\n")).unwrap();
     let args = |out: &str, baseline: Option<PathBuf>| RunArgs {
         golden: golden_path.clone(),
         out: dir.join(out),
@@ -778,18 +789,20 @@ async fn run_command_writes_results_and_gates_on_the_baseline_file() {
 
     run_golden(
         Arc::new(Scripted::new(&runs)),
+        &ports,
         args("first.json", None),
         None,
     )
     .await
     .unwrap();
-    let first: Results = read_json(&dir.join("first.json")).unwrap();
+    let first: Results = read_json(files.as_ref(), &dir.join("first.json")).unwrap();
     assert_eq!(first.runs.len(), 5);
     assert_eq!(first.runs[0].report, runs[0].1);
 
     // A results file is a valid baseline as is.
     run_golden(
         Arc::new(Scripted::new(&runs)),
+        &ports,
         args("second.json", Some(dir.join("first.json"))),
         None,
     )
@@ -800,16 +813,18 @@ async fn run_command_writes_results_and_gates_on_the_baseline_file() {
     worse[0].1.outcome = answered(yes(false), &["a"]);
     let error = run_golden(
         Arc::new(Scripted::new(&worse)),
+        &ports,
         args("third.json", Some(dir.join("first.json"))),
         None,
     )
     .await
     .unwrap_err();
     assert!(error.to_string().contains("regressed"), "{error}");
-    assert!(dir.join("third.json").exists());
+    assert!(files.get(dir.join("third.json")).is_some());
 
     // Tolerances stored in the baseline file loosen the gate.
-    let mut tolerant: serde_json::Value = read_json(&dir.join("first.json")).unwrap();
+    let mut tolerant: serde_json::Value =
+        read_json(files.as_ref(), &dir.join("first.json")).unwrap();
     tolerant["tolerances"] = MetricName::ALL
         .iter()
         .map(|metric| {
@@ -824,29 +839,28 @@ async fn run_command_writes_results_and_gates_on_the_baseline_file() {
         })
         .collect::<serde_json::Map<_, _>>()
         .into();
-    write_json(&dir.join("tolerant.json"), &tolerant).unwrap();
+    write_json(files.as_ref(), &dir.join("tolerant.json"), &tolerant).unwrap();
     run_golden(
         Arc::new(Scripted::new(&worse)),
+        &ports,
         args("fourth.json", Some(dir.join("tolerant.json"))),
         None,
     )
     .await
     .unwrap();
-
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[tokio::test]
 async fn one_question_runs_alone_and_is_gated_against_the_same_question() {
     let runs = fixture();
-    let dir = std::env::temp_dir().join(format!("recall-eval-{}", RunId::new()));
-    fs::create_dir_all(&dir).unwrap();
+    let dir = PathBuf::from("/eval");
+    let (ports, files) = eval_ports();
     let golden_path = dir.join("golden.jsonl");
     let golden_text: Vec<String> = runs
         .iter()
         .map(|(golden, _)| serde_json::to_string(golden).unwrap())
         .collect();
-    fs::write(&golden_path, golden_text.join("\n")).unwrap();
+    files.write(&golden_path, &golden_text.join("\n")).unwrap();
     let args = |out: &str, baseline: Option<PathBuf>, questions: &[&str]| RunArgs {
         golden: golden_path.clone(),
         out: dir.join(out),
@@ -857,6 +871,7 @@ async fn one_question_runs_alone_and_is_gated_against_the_same_question() {
     };
     run_golden(
         Arc::new(Scripted::new(&runs)),
+        &ports,
         args("all.json", None, &[]),
         None,
     )
@@ -867,17 +882,19 @@ async fn one_question_runs_alone_and_is_gated_against_the_same_question() {
     let baseline = Some(dir.join("all.json"));
     run_golden(
         Arc::new(Scripted::new(&runs)),
+        &ports,
         args("o2.json", baseline.clone(), &["o2"]),
         None,
     )
     .await
     .unwrap();
-    let only: Results = read_json(&dir.join("o2.json")).unwrap();
+    let only: Results = read_json(files.as_ref(), &dir.join("o2.json")).unwrap();
     let ids: Vec<&str> = only.runs.iter().map(|run| run.golden.id.as_str()).collect();
     assert_eq!(ids, ["o2"]);
 
     let error = run_golden(
         Arc::new(Scripted::new(&runs)),
+        &ports,
         args("nope.json", None, &["o2", "missing"]),
         None,
     )
@@ -886,25 +903,29 @@ async fn one_question_runs_alone_and_is_gated_against_the_same_question() {
     assert!(format!("{error:#?}").contains("\"missing\""), "{error:#?}");
 
     let metrics_only = serde_json::json!({ "metrics": only.metrics });
-    write_json(&dir.join("metrics-only.json"), &metrics_only).unwrap();
+    write_json(
+        files.as_ref(),
+        &dir.join("metrics-only.json"),
+        &metrics_only,
+    )
+    .unwrap();
     let error = run_golden(
         Arc::new(Scripted::new(&runs)),
+        &ports,
         args("subset.json", Some(dir.join("metrics-only.json")), &["o2"]),
         None,
     )
     .await
     .unwrap_err();
     assert!(error.to_string().contains("no recorded runs"), "{error}");
-
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[tokio::test]
 async fn golden_parse_errors_surface_through_the_run_command() {
-    let dir = std::env::temp_dir().join(format!("recall-eval-{}", RunId::new()));
-    fs::create_dir_all(&dir).unwrap();
+    let dir = PathBuf::from("/eval");
+    let (ports, files) = eval_ports();
     let golden_path = dir.join("golden.jsonl");
-    fs::write(&golden_path, "\n{}\n").unwrap();
+    files.write(&golden_path, "\n{}\n").unwrap();
     let error = run_golden(
         Arc::new(CannedAnswerer {
             category: None,
@@ -913,6 +934,7 @@ async fn golden_parse_errors_surface_through_the_run_command() {
                 error: "unused".into(),
             },
         }),
+        &ports,
         RunArgs {
             golden: golden_path,
             out: dir.join("out.json"),
@@ -926,7 +948,6 @@ async fn golden_parse_errors_surface_through_the_run_command() {
     .await
     .unwrap_err();
     assert!(format!("{error:#?}").contains("line 2: "), "{error:#?}");
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 // ---- tuning ----
@@ -1172,14 +1193,14 @@ async fn retrieval_command_scores_matches_and_diffs_each_question_against_a_base
         retrieval_golden("roles", "which role grants ROLE_USERS", &chunks[0]),
         retrieval_golden("sheet", "mitigation detail sheet empty", &chunks[1]),
     ];
-    let dir = std::env::temp_dir().join(format!("recall-eval-{}", RunId::new()));
-    fs::create_dir_all(&dir).unwrap();
+    let dir = PathBuf::from("/eval");
+    let (ports, files) = eval_ports();
     let golden_path = dir.join("golden.jsonl");
     let lines: Vec<String> = golden
         .iter()
         .map(|g| serde_json::to_string(g).unwrap())
         .collect();
-    fs::write(&golden_path, lines.join("\n")).unwrap();
+    files.write(&golden_path, &lines.join("\n")).unwrap();
     let args = |out: &str, baseline: Option<PathBuf>| RetrievalArgs {
         golden: golden_path.clone(),
         out: Some(dir.join(out)),
@@ -1204,17 +1225,18 @@ async fn retrieval_command_scores_matches_and_diffs_each_question_against_a_base
             })
             .collect(),
     );
-    write_json(&dir.join("full.json"), &full).unwrap();
+    write_json(files.as_ref(), &dir.join("full.json"), &full).unwrap();
 
     run_retrieval(
         retriever(chunks.clone()),
         &StaticAuthorizer::tester(),
+        &ports,
         args("first.json", Some(dir.join("full.json"))),
         None,
     )
     .await
     .unwrap();
-    let first: RetrievalResults = read_json(&dir.join("first.json")).unwrap();
+    let first: RetrievalResults = read_json(files.as_ref(), &dir.join("first.json")).unwrap();
     assert_eq!(first.runs.len(), 2);
     assert_eq!(first.runs[0].scores.recall_at_10, Some(1.0));
     assert_eq!(first.runs[1].scores.recall_at_50, Some(1.0));
@@ -1233,13 +1255,14 @@ async fn retrieval_command_scores_matches_and_diffs_each_question_against_a_base
     let error = run_retrieval(
         retriever(vec![chunks[0].clone(), chunks[2].clone()]),
         &StaticAuthorizer::tester(),
+        &ports,
         args("second.json", Some(dir.join("first.json"))),
         None,
     )
     .await
     .unwrap_err();
     assert!(error.to_string().contains("lost recall"), "{error}");
-    let second: RetrievalResults = read_json(&dir.join("second.json")).unwrap();
+    let second: RetrievalResults = read_json(files.as_ref(), &dir.join("second.json")).unwrap();
     let changes: Vec<Change> = second
         .baseline
         .unwrap()
@@ -1253,6 +1276,7 @@ async fn retrieval_command_scores_matches_and_diffs_each_question_against_a_base
     run_retrieval(
         retriever(chunks),
         &StaticAuthorizer::tester(),
+        &ports,
         RetrievalArgs {
             questions: vec!["sheet".into()],
             ..args("third.json", Some(dir.join("first.json")))
@@ -1261,31 +1285,31 @@ async fn retrieval_command_scores_matches_and_diffs_each_question_against_a_base
     )
     .await
     .unwrap();
-    let third: RetrievalResults = read_json(&dir.join("third.json")).unwrap();
+    let third: RetrievalResults = read_json(files.as_ref(), &dir.join("third.json")).unwrap();
     assert_eq!(third.runs.len(), 1);
-
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
 fn tune_command_reads_results_and_candidate_files() {
-    let dir = std::env::temp_dir().join(format!("recall-eval-{}", RunId::new()));
-    fs::create_dir_all(&dir).unwrap();
-    write_json(&dir.join("results.json"), &tuning_results()).unwrap();
-    fs::write(
-        dir.join("candidates.json"),
+    let dir = PathBuf::from("/eval");
+    let (_, files) = eval_ports();
+    write_json(files.as_ref(), &dir.join("results.json"), &tuning_results()).unwrap();
+    files.write(
+        &dir.join("candidates.json"),
         r#"[{"name": "strict", "thresholds": {"answer": 0.5}, "per_category": {"choice": {"answer": 0.3}}}]"#,
     )
     .unwrap();
-    run_tune(&TuneArgs {
-        results: dir.join("results.json"),
-        candidates: dir.join("candidates.json"),
-        out: Some(dir.join("tune.json")),
-    })
+    run_tune(
+        files.as_ref(),
+        &TuneArgs {
+            results: dir.join("results.json"),
+            candidates: dir.join("candidates.json"),
+            out: Some(dir.join("tune.json")),
+        },
+    )
     .unwrap();
-    let report: tune::TuneReport = read_json(&dir.join("tune.json")).unwrap();
+    let report: tune::TuneReport = read_json(files.as_ref(), &dir.join("tune.json")).unwrap();
     assert_eq!(report.candidates[0].overall.answered, 4);
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
