@@ -1,8 +1,9 @@
-//! Retrieval behind the [`Retriever`] port: given the question text, return current chunk versions best first.
+//! Retrieval behind the [`Retriever`] port: given the question text and the asker's [`ChunkScope`], return the current
+//! chunk versions the scope admits, best first.
 //! [`hybrid::HybridRetriever`] is the Postgres adapter (full-text + vector, merged with reciprocal rank fusion).
 //! Judging relevance is not retrieval's job; [`crate::pipeline::steps::Rerank`] does that.
 
-/// An in-memory [`Retriever`] for tests.
+/// An in-memory and a failing [`Retriever`] for tests.
 #[cfg(any(test, feature = "testing"))]
 pub mod fakes;
 pub mod glossary;
@@ -11,7 +12,10 @@ pub mod hybrid;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{Chunk, ChunkId};
+use crate::{
+    access::ChunkScope,
+    domain::{Chunk, ChunkId},
+};
 
 use glossary::Expansion;
 
@@ -32,18 +36,21 @@ pub struct Retrieved {
 #[serde(transparent)]
 pub struct Relevance(pub f32);
 
-/// Finds the chunks a question is most likely about.
+/// Finds the chunks a question is most likely about, among those the asker may read.
 #[async_trait]
 pub trait Retriever: Send + Sync {
     /// Top hybrid matches, expanded to their parent unit and deduplicated, best first, ties by chunk id.
     ///
-    /// There is no relevance floor: a non-blank query over a non-empty corpus returns its nearest chunks even when
-    /// none is about the question, and Rerank judges relevance. Only a blank query or an empty corpus returns nothing.
+    /// Only chunks `scope` admits are read: matches, the context added next to them, and the text questions are
+    /// expanded from. Filtering happens before ranking, so a chunk outside the scope neither appears nor takes a
+    /// place. There is no relevance floor: a non-blank query over a corpus with a readable chunk returns its nearest
+    /// readable chunks even when none is about the question, and Rerank judges relevance. Only a blank query or no
+    /// readable chunk returns nothing.
     ///
     /// # Errors
     ///
     /// When the backend fails, or the corpus was embedded with another model than the query embedder.
-    async fn retrieve(&self, query: &str) -> eros::Result<Vec<Retrieved>>;
+    async fn retrieve(&self, query: &str, scope: &ChunkScope) -> eros::Result<Vec<Retrieved>>;
 
     /// [`Retriever::retrieve`], with the glossary expansion it searched with. A retriever that does not expand
     /// questions returns an empty expansion.
@@ -51,9 +58,9 @@ pub trait Retriever: Send + Sync {
     /// # Errors
     ///
     /// As [`Retriever::retrieve`].
-    async fn retrieve_expanded(&self, query: &str) -> eros::Result<Retrieval> {
+    async fn retrieve_expanded(&self, query: &str, scope: &ChunkScope) -> eros::Result<Retrieval> {
         Ok(Retrieval {
-            hits: self.retrieve(query).await?,
+            hits: self.retrieve(query, scope).await?,
             expansion: Expansion::default(),
         })
     }

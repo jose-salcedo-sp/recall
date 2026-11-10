@@ -83,6 +83,9 @@ fn args(server: &MockServer, system_one: SystemOneBackendKind) -> PipelineArgs {
             system_one_account_id: None,
             system_one_key: kev.then(|| TOKEN.parse().unwrap()),
         },
+        access: recall::access::rules::AccessArgs {
+            path: recall::access::rules::DEFAULT_PATH.into(),
+        },
     }
 }
 

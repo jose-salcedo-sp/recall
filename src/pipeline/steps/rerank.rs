@@ -8,19 +8,19 @@ use futures::{StreamExt, TryStreamExt, stream};
 
 use crate::{
     config::RerankConfig,
-    domain::{ChunkId, Probability, Question},
+    domain::{AtLeastOne, ChunkId, Probability, Question},
     llm::{
         ModelRef,
         judge::{Judge, JudgeQuestion, JudgeRequest},
     },
     pipeline::{
-        Category, DeclineReason, Scored, Step, StepError,
+        Ask, Category, DeclineReason, Scored, Step, StepError,
         trace::{RerankMode, RerankRecord},
     },
     retrieval::Retrieved,
 };
 
-use super::{CONCURRENT_REQUESTS, Candidates, Reranked, judged_text, ranked};
+use super::{CONCURRENT_REQUESTS, Candidates, Reranked, enforce, judged_text, ranked, with_access};
 
 /// Recorded as the trace entry's prompt version; bump on any change to the relevance question.
 pub const RERANK_PROMPT_VERSION: &str = "rerank-v2";
@@ -137,6 +137,21 @@ impl<TCategory: Category> Step for Rerank<TCategory> {
     }
 
     async fn run(
+        &self,
+        ask: &Ask,
+        input: Candidates,
+    ) -> Result<Scored<Reranked, RerankRecord>, StepError> {
+        let (hits, access) = enforce(ask.access(), input.0.into_vec());
+        let result = match AtLeastOne::try_from(hits) {
+            Ok(hits) => self.rerank(ask.question(), Candidates(hits)).await,
+            Err(_) => Err(StepError::decline(DeclineReason::NoSources)),
+        };
+        with_access(result, access)
+    }
+}
+
+impl<TCategory> Rerank<TCategory> {
+    async fn rerank(
         &self,
         question: &Question,
         input: Candidates,
@@ -324,7 +339,7 @@ mod tests {
 
     async fn rerank(rerank: Rerank<Open>, hits: Vec<Retrieved>) -> Scored<Reranked, RerankRecord> {
         rerank
-            .run(&Question::new("q"), candidates(hits))
+            .run(&Ask::unrestricted("q"), candidates(hits))
             .await
             .unwrap()
     }
@@ -407,7 +422,10 @@ mod tests {
     async fn a_probability_outside_zero_to_one_declines_as_invalid_output() {
         for bad in ["p=1.7", "p=-0.3", "p=NaN"] {
             let error = judged(1, 25, by_text())
-                .run(&Question::new("q"), candidates(vec![hit("a", bad, 0.9)]))
+                .run(
+                    &Ask::unrestricted("q"),
+                    candidates(vec![hit("a", bad, 0.9)]),
+                )
                 .await
                 .err()
                 .unwrap();

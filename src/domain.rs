@@ -67,7 +67,7 @@ impl fmt::Display for RunId {
 }
 
 /// Who asked: the user mapped from an API bearer key.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct UserId(pub String);
 
@@ -341,8 +341,9 @@ pub struct ChunkRef {
     pub version: ChunkVersion,
 }
 
-/// How widely a chunk may be shown once the security phase enforces [`Labels`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// How widely a chunk may be shown, ordered from least to most restricted: a grant with a clearance reads every tier
+/// up to it ([`crate::access::ChunkGrant`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Sensitivity {
     /// No restriction.
@@ -380,10 +381,10 @@ impl TryFrom<&str> for Sensitivity {
     }
 }
 
-/// Recorded on every chunk; enforced only in the security phase.
+/// Recorded on every chunk and enforced on every read through [`crate::access::ChunkScope`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Labels {
-    /// Principals inherited from the source ACL (groups, users, or channel membership).
+    /// Principal ids or role names that may read, inherited from the source ACL; empty means no ACL restriction.
     pub acl: Vec<String>,
     /// The tenant the content concerns, if any; `None` means visible to every tenant.
     pub tenant: Option<String>,

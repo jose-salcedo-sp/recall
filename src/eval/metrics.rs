@@ -11,6 +11,7 @@ use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    access::Principal,
     config::PipelineConfig,
     domain::{CategoryKind, ChunkId, ChunkRef, Provenance},
     pipeline::{
@@ -165,6 +166,7 @@ impl Progress for () {
 /// Runs finish in any order; `Results` keeps the golden set's order.
 pub async fn evaluate(
     answerer: &dyn Answerer,
+    principal: &Principal,
     golden: Vec<GoldenQuestion>,
     concurrency: usize,
     progress: &dyn Progress,
@@ -173,7 +175,7 @@ pub async fn evaluate(
         .map(|(index, golden)| async move {
             progress.started(&golden);
             let start = Instant::now();
-            let report = answerer.answer(golden.question.clone()).await;
+            let report = answerer.answer(principal, golden.question.clone()).await;
             let run = EvalRun::new(golden, report);
             progress.finished(&run, start.elapsed());
             (index, run)

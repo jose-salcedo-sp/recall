@@ -22,11 +22,12 @@ pub use self::{
 };
 
 use crate::{
+    access::{Access, AccessDecision},
     domain::{AtLeastOne, Chunk},
     retrieval::Retrieved,
 };
 
-use super::{Open, Seq, trace::RankedChunk};
+use super::{Open, Scored, Seq, StepError, trace::RankedChunk};
 
 /// Kev's smaller models are validated to 8,192 tokens; longer text is judged on its beginning.
 const MAX_STATE_CHARS: usize = 16_000;
@@ -66,6 +67,36 @@ impl Reranked {
     /// Each kept match followed by its context chunks, matches best first. May be empty.
     pub fn sources(&self) -> &[Retrieved] {
         &self.0
+    }
+
+    /// The sources `access` admits, in order, and one decision per source.
+    fn enforce(self, access: &Access) -> (Self, Vec<AccessDecision>) {
+        let (kept, decisions) = enforce(access, self.0);
+        (Self(kept), decisions)
+    }
+}
+
+/// Keeps the hits `access` admits, in order, with one decision per hit. Every step that reads chunks calls it on its
+/// input, so a chunk outside the run's scope never reaches a judge, the LLM, a citation or the report.
+fn enforce(access: &Access, hits: Vec<Retrieved>) -> (Vec<Retrieved>, Vec<AccessDecision>) {
+    let decisions = access.chunks().check(hits.iter().map(|hit| &hit.chunk));
+    let kept = hits
+        .into_iter()
+        .zip(&decisions)
+        .filter(|(_, check)| check.decision.is_allowed())
+        .map(|(hit, _)| hit)
+        .collect();
+    (kept, decisions)
+}
+
+/// Attaches the step's access checks to its result, whether it passed or halted.
+fn with_access<TOutput, TRecord>(
+    result: Result<Scored<TOutput, TRecord>, StepError>,
+    access: Vec<AccessDecision>,
+) -> Result<Scored<TOutput, TRecord>, StepError> {
+    match result {
+        Ok(scored) => Ok(scored.with_access(access)),
+        Err(error) => Err(error.with_access(access)),
     }
 }
 

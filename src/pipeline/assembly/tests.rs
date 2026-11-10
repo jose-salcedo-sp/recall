@@ -11,6 +11,7 @@ fn ports(judge: Option<Arc<dyn Judge>>) -> Ports {
         embedding: None,
         explain: Arc::new(ScriptedChat::replying(Vec::<String>::new())),
         judge,
+        authorizer: Arc::new(crate::access::fakes::StaticAuthorizer::tester()),
     }
 }
 

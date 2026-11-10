@@ -2,7 +2,8 @@
 //! `docs/design.md` section 4.
 //!
 //! This module owns HTTP: authentication, wire types, error bodies and markdown rendering. It answers through the
-//! [`Answerer`] port and persists every run through [`RunStore`] before responding.
+//! [`Answerer`] port on behalf of the authenticated [`crate::access::Principal`], persists every run through [`RunStore`] before
+//! responding, and lets the [`Authorizer`] decide who reads a persisted run.
 
 pub mod auth;
 pub mod error;
@@ -31,6 +32,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{
+    access::{Authorizer, RunAccess},
     domain::{RunId, UserId},
     pipeline::{
         answerer::{PipelineAnswerer, PipelineArgs},
@@ -40,7 +42,7 @@ use crate::{
 };
 
 use self::{
-    auth::{AdminUsers, ApiKeys, User},
+    auth::{ApiKeys, Caller},
     error::ApiError,
     openai::{ChatRequest, Chunk, Completion, ModelList, RunSummary},
 };
@@ -57,10 +59,7 @@ pub struct Args {
     /// Per-user bearer keys: `key:user_id` pairs, comma-separated.
     #[arg(long, env = "RECALL_API_KEYS", hide_env_values = true)]
     pub api_keys: ApiKeys,
-    /// User ids that may read any persisted run, comma-separated.
-    #[arg(long, env = "RECALL_ADMIN_USERS", default_value = "")]
-    pub admin_users: AdminUsers,
-    /// Models and tunables.
+    /// Models, tunables and the access policy, which also decides who reads persisted runs.
     #[command(flatten)]
     pub pipeline: PipelineArgs,
 }
@@ -74,8 +73,8 @@ pub struct AppState {
     pub runs: Arc<dyn RunStore>,
     /// Bearer keys and the users they map to.
     pub keys: Arc<ApiKeys>,
-    /// Users who may read any run.
-    pub admins: Arc<AdminUsers>,
+    /// Decides who reads a persisted run; the same policy the answerer authorizes runs by.
+    pub authorizer: Arc<dyn Authorizer>,
 }
 
 /// The API routes, each behind a bearer key. An unknown path gets an OpenAI-style 404 without authentication.
@@ -98,10 +97,10 @@ pub async fn run(args: Args) -> eros::Result<()> {
     let answerer = PipelineAnswerer::from_args(pool.clone(), &args.pipeline).await?;
     tracing::info!(plan = ?answerer.plan(), "pipeline assembled");
     let state = AppState {
+        authorizer: answerer.authorizer(),
         answerer: Arc::new(answerer),
         runs: Arc::new(PgRunStore::new(pool.clone())),
         keys: Arc::new(args.api_keys),
-        admins: Arc::new(args.admin_users),
     };
     let listener = tokio::net::TcpListener::bind(&args.bind)
         .await
@@ -138,21 +137,22 @@ async fn shutdown_signal() {
     }
 }
 
-async fn models(_: User) -> Json<ModelList> {
+async fn models(_: Caller) -> Json<ModelList> {
     Json(ModelList::recall())
 }
 
 async fn chat_completions(
     State(state): State<AppState>,
-    User(user): User,
+    Caller(principal): Caller,
     body: Result<Json<ChatRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(request) = body.map_err(|rejection| ApiError::bad_request(rejection.body_text()))?;
     let question = request.question()?;
 
-    let report = state.answerer.answer(question).await;
+    let report = state.answerer.answer(&principal, question).await;
     let run_id = report.id;
-    if let Err(error) = state.runs.save(&user, &report).await {
+    let user = principal.id();
+    if let Err(error) = state.runs.save(user, &report).await {
         tracing::error!(%run_id, error = format!("{error:#?}"), "run not persisted");
         return Err(ApiError::internal(
             "run_not_persisted",
@@ -213,23 +213,43 @@ impl From<StoredRun> for RunView {
     }
 }
 
+/// A run the reader may not read looks like one that does not exist. A reader of its own runs only sees no denied
+/// access check, since one names a chunk it may not know exists.
 async fn get_run(
     State(state): State<AppState>,
-    User(user): User,
+    Caller(principal): Caller,
     Path(id): Path<String>,
 ) -> Result<Json<RunView>, ApiError> {
     let not_found = || ApiError::not_found("Run not found.");
     let run_id = Uuid::parse_str(&id)
         .map(RunId::from)
         .map_err(|_| not_found())?;
+    let access = state.authorizer.access(&principal).await.map_err(|error| {
+        tracing::error!(%run_id, error = format!("{error:#?}"), "access not decided");
+        ApiError::internal("authorizer_unavailable", "Access could not be decided.")
+    })?;
     let run = state.runs.get(run_id).await.map_err(|error| {
         tracing::error!(%run_id, error = format!("{error:#?}"), "run not loaded");
         ApiError::internal("run_store_unavailable", "The run could not be loaded.")
     })?;
-    match run {
-        Some(run) if run.user == user || state.admins.contains(&user) => Ok(Json(run.into())),
-        _ => Err(not_found()),
+    let Some(mut run) = run else {
+        return Err(not_found());
+    };
+    let decision = access.runs().decide(&principal, &run.user);
+    tracing::info!(
+        %run_id,
+        reader = principal.id().0,
+        policy = ?state.authorizer.policy(),
+        ?decision,
+        "run read"
+    );
+    if !decision.is_allowed() {
+        return Err(not_found());
     }
+    if !matches!(access.runs(), RunAccess::Any { .. }) {
+        run.report.trace = run.report.trace.without_denials();
+    }
+    Ok(Json(run.into()))
 }
 
 async fn unknown_endpoint() -> ApiError {

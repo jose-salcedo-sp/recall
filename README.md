@@ -16,7 +16,9 @@ The core is domain-free. Corpora, answering rules, golden sets and front ends be
 - **Audit**: every run, answered, declined or failed, is persisted with its trace: each step's model, prompt version, score and raw output, every admission screen and every claim verdict. `GET /v1/runs/{id}` returns it.
 - **Evaluate**: `recall eval` scores a golden set per step (classification, recall@50, hit@5, precision, decline and failure rates, citation validity, faithfulness), gates against a baseline, and re-tunes thresholds from recorded scores.
 
-Not built yet: Answer for `choice` and `ranking` (they take the `open` path); permission enforcement over the recorded labels.
+- **Access control**: every run is asked on behalf of a principal; an `Authorizer` port compiles its roles into the chunks it may read, retrieval filters by it in SQL, and every step rechecks its sources, so a chunk the caller may not read never reaches a judge, the LLM, a citation or a decline. Decisions are in the trace.
+
+Not built yet: Answer for `choice` and `ranking` (they take the `open` path).
 
 ## How a question is answered
 
@@ -103,7 +105,7 @@ curl -s localhost:8080/v1/chat/completions \
   -d '{"model": "recall", "messages": [{"role": "user", "content": "Which table maps users to roles?"}]}'
 ```
 
-The answer is in `choices[0].message.content`. The top-level `provenance` object carries the run id, outcome, and citations. Use `GET /v1/runs/{id}` for the full trace (admins listed in `RECALL_ADMIN_USERS` can read any run).
+The answer is in `choices[0].message.content`. The top-level `provenance` object carries the run id, outcome, and citations. Use `GET /v1/runs/{id}` for the full trace; the access policy decides whose runs a user may read.
 
 ### Running fully locally
 
@@ -189,7 +191,11 @@ A check that names a judge never runs as a quieter one: with `RECALL_SYSTEM_ONE_
 
 `verify.publish` is `"decline"` (the default and shipped: any failed claim declines the run) or `"strip"` (failed claims are left out and the rest published; the run declines only when none passes). Every verdict is in the Verify trace record, and `recall eval` reports the share of judged claims that are supported as `faithfulness`.
 
-See `.env.example`. Key variables: `DATABASE_URL`, `RECALL_API_KEYS`, `RECALL_ADMIN_USERS`, `RECALL_DOCS_DIR`, `RECALL_DOCS_BASE_URL`, `RECALL_DOCS_AUTHORITATIVE` / `RECALL_DOCS_EVIDENCE` / `RECALL_DOCS_SKIP` (which paths are authoritative, which are supporting evidence, and which are left out), and the model backends below.
+### Access control
+
+[`config/access.json`](config/access.json), or the file `RECALL_ACCESS` names, is required by `serve`, `ingest` and `eval`. It defines roles (a sensitivity `clearance`, the `tenants` they read, and whose `runs`), the roles `everyone` holds, `members` per user id, and `labels` rules that relabel documents at ingestion by document-id prefix. A chunk is readable when its ACL is empty or names the user or one of its roles, and one of its roles clears its sensitivity and tenant; anything else, including a user the policy does not know, is denied. `recall eval run` and `recall eval retrieval` ask as `--as` (`RECALL_EVAL_AS`). The model is in [the design](docs/design.md#8-access-control).
+
+See `.env.example`. Key variables: `DATABASE_URL`, `RECALL_API_KEYS`, `RECALL_ACCESS`, `RECALL_DOCS_DIR`, `RECALL_DOCS_BASE_URL`, `RECALL_DOCS_AUTHORITATIVE` / `RECALL_DOCS_EVIDENCE` / `RECALL_DOCS_SKIP` (which paths are authoritative, which are supporting evidence, and which are left out), and the model backends below.
 
 Each model port names its backend, with no default. A backend's missing or unparsable setting (a URL is checked when parsed), or a setting it does not use, is a startup error naming the variable. Keys are never printed.
 

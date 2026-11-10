@@ -23,7 +23,12 @@ use std::{
 use chrono::Utc;
 
 use crate::{
+    access::{
+        Principal,
+        rules::{AccessArgs, RulePolicy},
+    },
     config::ConfigArgs,
+    domain::UserId,
     llm::{self, backend::EmbedArgs},
     pipeline::{
         answerer::{PipelineAnswerer, PipelineArgs},
@@ -74,6 +79,30 @@ pub struct RetrievalCommand {
     /// The query embedder; must match the corpus's model.
     #[command(flatten)]
     pub embed: EmbedArgs,
+    /// The access policy retrieval runs under.
+    #[command(flatten)]
+    pub access: AccessArgs,
+}
+
+/// Who eval asks as. There is no implicit superuser: every question runs with this principal's access, so a golden
+/// set measures what that principal can be answered.
+#[derive(Clone, Debug, clap::Args)]
+pub struct AsArgs {
+    /// The user id every golden question is asked as; the access policy decides what it may read.
+    #[arg(
+        long = "as",
+        env = "RECALL_EVAL_AS",
+        value_name = "USER",
+        value_parser = clap::builder::NonEmptyStringValueParser::new()
+    )]
+    pub user: String,
+}
+
+impl AsArgs {
+    /// The principal, with no asserted roles.
+    pub fn principal(&self) -> Principal {
+        Principal::new(UserId(self.user.clone()))
+    }
 }
 
 /// `recall eval run` options.
@@ -109,6 +138,9 @@ pub struct RunArgs {
     /// metrics are recomputed from its runs of the same questions, so a subset is compared like for like.
     #[arg(long = "question", value_name = "ID", value_delimiter = ',')]
     pub questions: Vec<String>,
+    /// Who the questions are asked as.
+    #[command(flatten)]
+    pub asking: AsArgs,
 }
 
 /// `recall eval tune` options.
@@ -159,7 +191,8 @@ pub async fn run(args: Args) -> eros::Result<()> {
                 retrieval: config.retrieval.clone(),
             };
             let retriever = HybridRetriever::new(pool, embedder, config.retrieval);
-            run_retrieval(Arc::new(retriever), args.files, Some(setup)).await
+            let authorizer = RulePolicy::new(args.access.load()?);
+            run_retrieval(Arc::new(retriever), &authorizer, args.files, Some(setup)).await
         }
         Command::Tune(args) => run_tune(&args),
     }
@@ -195,7 +228,15 @@ pub async fn run_golden(
         }));
     }
     let bar = progress::Bar::new(golden.len(), args.concurrency);
-    let mut results = metrics::evaluate(answerer.as_ref(), golden, args.concurrency, &bar).await;
+    let principal = args.asking.principal();
+    let mut results = metrics::evaluate(
+        answerer.as_ref(),
+        &principal,
+        golden,
+        args.concurrency,
+        &bar,
+    )
+    .await;
     bar.finish();
     results.setup = setup.map(|setup| RunSetup {
         finished_at: Some(Utc::now()),

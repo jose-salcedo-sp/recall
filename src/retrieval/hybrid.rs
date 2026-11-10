@@ -9,6 +9,11 @@
 //!
 //! Before searching, the question gains the words of the glossary rows it matches ([`super::glossary`]); both the
 //! full-text query and the embedded query use the expanded text.
+//!
+//! Every query that reads chunks (glossary, full text, vector, neighbours) filters by the asker's [`ChunkScope`] in
+//! SQL, so a chunk outside it is never ranked, never added as context and never expands a question. The vector side
+//! scans HNSW iteratively, so a filter that rejects most nearest neighbours still fills its candidate count. BM25's
+//! corpus statistics cover every current chunk; they shape scores, not which chunks come back.
 
 use std::{collections::HashMap, fmt, sync::Arc};
 
@@ -16,14 +21,34 @@ use async_trait::async_trait;
 use eros::{Context, error};
 use pgvector::Vector;
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgPool, Postgres, Transaction, types::Json};
 
 use crate::{
+    access::{ChunkScope, TenantScope},
     domain::{Chunk, ChunkId, ChunkRef, ChunkVersion, DocumentId, Labels, Sensitivity, SourceName},
     llm::{EmbedPurpose, Embedder, ModelRef},
 };
 
 use super::{Relevance, Retrieval, Retrieved, Retriever, glossary::Glossary};
+
+/// SQL for "chunk `c` is admitted by the scope bound at `$members` and `$grants`" ([`ScopeParams`]): the same rule
+/// as [`ChunkScope::decide`]. A macro, so each query stays one literal.
+macro_rules! in_scope {
+    ($members:literal, $grants:literal) => {
+        concat!(
+            "(cardinality(c.acl) = 0 OR c.acl && $",
+            $members,
+            "::text[])
+             AND EXISTS (
+                 SELECT 1 FROM jsonb_to_recordset($",
+            $grants,
+            "::jsonb)
+                     AS g(sensitivities text[], any_tenant boolean, tenants text[])
+                 WHERE c.sensitivity = ANY(g.sensitivities)
+                   AND (c.tenant IS NULL OR g.any_tenant OR c.tenant = ANY(g.tenants)))"
+        )
+    };
+}
 
 /// Retrieval knobs; `recall eval` tunes them.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -228,22 +253,27 @@ impl HybridRetriever {
         Ok(!found.is_empty())
     }
 
-    /// The current chunks of the configured glossary documents, parsed; empty when expansion is off.
+    /// The readable current chunks of the configured glossary documents, parsed; empty when expansion is off.
     #[eros::context("reading the glossary")]
-    async fn glossary(&self) -> eros::Result<Glossary> {
+    async fn glossary(&self, scope: &ScopeParams) -> eros::Result<Glossary> {
         let config = &self.config.expansion;
         if config.documents.is_empty() || config.max_terms == 0 {
             return Ok(Glossary::default());
         }
         let documents: Vec<&str> = config.documents.iter().map(|id| id.0.as_str()).collect();
-        let rows: Vec<(String, String, String)> = sqlx::query_as(
-            "SELECT id, version, text FROM chunks
-             WHERE superseded_at IS NULL AND document_id = ANY($1)
-             ORDER BY array_position($1, document_id), ordinal",
-        )
-        .bind(&documents)
-        .fetch_all(&self.pool)
-        .await?;
+        let query = concat!(
+            "SELECT id, version, text FROM chunks c
+             WHERE superseded_at IS NULL AND document_id = ANY($1) AND ",
+            in_scope!(2, 3),
+            "
+             ORDER BY array_position($1, document_id), ordinal"
+        );
+        let rows: Vec<(String, String, String)> = sqlx::query_as(query)
+            .bind(&documents)
+            .bind(&scope.members)
+            .bind(&scope.grants)
+            .fetch_all(&self.pool)
+            .await?;
         Ok(Glossary::parse(rows.iter().map(|(id, version, text)| {
             let source = ChunkRef {
                 id: ChunkId(id.clone()),
@@ -261,6 +291,7 @@ impl HybridRetriever {
         tx: &mut Transaction<'_, Postgres>,
         question: &str,
         prose: &str,
+        scope: &ScopeParams,
     ) -> eros::Result<Vec<ChunkId>> {
         if self.config.full_text_candidates == 0 {
             return Ok(Vec::new());
@@ -278,7 +309,7 @@ impl HybridRetriever {
         // path match. Its lexemes are OR-ed as quoted tsquery operands: quotes double and backslashes escape.
         // BM25 uses Lucene's idf. A lexeme new since the last stats refresh counts as in no chunk (the highest idf).
         // With no current chunks at the last refresh, every chunk counts as average length.
-        let ids: Vec<String> = sqlx::query_scalar(
+        let query = concat!(
             "WITH terms AS (
                  SELECT tsvector_to_array(to_tsvector('english', $1)) AS terms
              ),
@@ -313,19 +344,25 @@ impl HybridRetriever {
              ) bm25
              WHERE c.superseded_at IS NULL
                AND (c.fts_prose @@ q.prose OR c.fts_tokens @@ q.tokens)
+               AND ",
+            in_scope!(7, 8),
+            "
              ORDER BY length(c.fts_tokens) - length(ts_delete(c.fts_tokens, $3::text[])) DESC,
                       bm25.score DESC,
                       c.id
-             LIMIT $4",
-        )
-        .bind(prose)
-        .bind(identifier_query)
-        .bind(&identifiers)
-        .bind(i64::try_from(self.config.full_text_candidates)?)
-        .bind(self.config.bm25.k1())
-        .bind(self.config.bm25.b())
-        .fetch_all(&mut **tx)
-        .await?;
+             LIMIT $4"
+        );
+        let ids: Vec<String> = sqlx::query_scalar(query)
+            .bind(prose)
+            .bind(identifier_query)
+            .bind(&identifiers)
+            .bind(i64::try_from(self.config.full_text_candidates)?)
+            .bind(self.config.bm25.k1())
+            .bind(self.config.bm25.b())
+            .bind(&scope.members)
+            .bind(&scope.grants)
+            .fetch_all(&mut **tx)
+            .await?;
         Ok(ids.into_iter().map(ChunkId).collect())
     }
 
@@ -334,31 +371,42 @@ impl HybridRetriever {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         embedding: Vec<f32>,
+        scope: &ScopeParams,
     ) -> eros::Result<Vec<ChunkId>> {
         // HNSW returns at most `ef_search` rows, and pgvector's default (40) is below the default candidate count.
+        // The scope filters after the index scan, so the scan continues until enough rows pass it.
         let ef_search = (2 * self.config.vector_candidates).clamp(40, 1000);
-        sqlx::query("SELECT set_config('hnsw.ef_search', $1, true)")
-            .bind(ef_search.to_string())
-            .execute(&mut **tx)
-            .await?;
-        let ids: Vec<String> = sqlx::query_scalar(
-            "SELECT id FROM chunks WHERE superseded_at IS NULL ORDER BY embedding <=> $1 LIMIT $2",
+        sqlx::query(
+            "SELECT set_config('hnsw.ef_search', $1, true), set_config('hnsw.iterative_scan', 'strict_order', true)",
         )
-        .bind(Vector::from(embedding))
-        .bind(i64::try_from(self.config.vector_candidates)?)
-        .fetch_all(&mut **tx)
+        .bind(ef_search.to_string())
+        .execute(&mut **tx)
         .await?;
+        let query = concat!(
+            "SELECT id FROM chunks c WHERE superseded_at IS NULL AND ",
+            in_scope!(3, 4),
+            " ORDER BY embedding <=> $1 LIMIT $2"
+        );
+        let ids: Vec<String> = sqlx::query_scalar(query)
+            .bind(Vector::from(embedding))
+            .bind(i64::try_from(self.config.vector_candidates)?)
+            .bind(&scope.members)
+            .bind(&scope.grants)
+            .fetch_all(&mut **tx)
+            .await?;
         Ok(ids.into_iter().map(ChunkId).collect())
     }
 
-    /// Current rows for `hits`, plus the adjacent current chunks (by ordinal) of each hit's document.
+    /// Current rows for `hits`, plus the adjacent current chunks (by ordinal) of each hit's document that the scope
+    /// admits.
     #[eros::context("fetching retrieved chunks")]
     async fn fetch_with_neighbours(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         hits: &[String],
+        scope: &ScopeParams,
     ) -> eros::Result<Vec<ChunkRow>> {
-        Ok(sqlx::query_as(
+        let query = concat!(
             "WITH pages AS (
                  SELECT c.document_id, c.ordinal
                  FROM chunks c
@@ -378,26 +426,36 @@ impl HybridRetriever {
              SELECT c.id, c.version, c.document_id, d.source, d.title, c.heading, c.url, c.text,
                     c.authoritative, c.acl, c.tenant, c.sensitivity, c.ordinal
              FROM chunks c JOIN documents d ON d.id = c.document_id
-             WHERE c.superseded_at IS NULL AND (c.id = ANY($1) OR c.id IN (SELECT id FROM neighbours))",
-        )
-        .bind(hits)
-        .fetch_all(&mut **tx)
-        .await?)
+             WHERE c.superseded_at IS NULL AND (c.id = ANY($1) OR c.id IN (SELECT id FROM neighbours))
+               AND ",
+            in_scope!(2, 3),
+            ""
+        );
+        Ok(sqlx::query_as(query)
+            .bind(hits)
+            .bind(&scope.members)
+            .bind(&scope.grants)
+            .fetch_all(&mut **tx)
+            .await?)
     }
 }
 
 #[async_trait]
 impl Retriever for HybridRetriever {
-    async fn retrieve(&self, query: &str) -> eros::Result<Vec<Retrieved>> {
-        Ok(self.retrieve_expanded(query).await?.hits)
+    async fn retrieve(&self, query: &str, scope: &ChunkScope) -> eros::Result<Vec<Retrieved>> {
+        Ok(self.retrieve_expanded(query, scope).await?.hits)
     }
 
-    async fn retrieve_expanded(&self, query: &str) -> eros::Result<Retrieval> {
-        if query.trim().is_empty() || !self.check_embedding_model().await? {
+    async fn retrieve_expanded(&self, query: &str, scope: &ChunkScope) -> eros::Result<Retrieval> {
+        if query.trim().is_empty()
+            || scope.grants().is_empty()
+            || !self.check_embedding_model().await?
+        {
             return Ok(Retrieval::default());
         }
+        let scope = ScopeParams::new(scope);
         let expansion = self
-            .glossary()
+            .glossary(&scope)
             .await?
             .expand(query, self.config.expansion.max_terms);
         let expanded = expansion.apply(query);
@@ -416,21 +474,60 @@ impl Retriever for HybridRetriever {
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             .execute(&mut *tx)
             .await?;
-        let full_text = self.full_text_candidates(&mut tx, query, &expanded).await?;
+        let full_text = self
+            .full_text_candidates(&mut tx, query, &expanded, &scope)
+            .await?;
         let vector = match embedding {
-            Some(embedding) => self.vector_candidates(&mut tx, embedding).await?,
+            Some(embedding) => self.vector_candidates(&mut tx, embedding, &scope).await?,
             None => Vec::new(),
         };
         let mut fused = reciprocal_rank_fusion(&[&full_text, &vector], self.config.rrf_k);
         fused.truncate(self.config.fused_limit);
         let ids: Vec<String> = fused.iter().map(|(id, _)| id.0.clone()).collect();
-        let rows = self.fetch_with_neighbours(&mut tx, &ids).await?;
+        let rows = self.fetch_with_neighbours(&mut tx, &ids, &scope).await?;
         tx.commit().await?;
 
         Ok(Retrieval {
             hits: expand(&fused, rows, self.config.max_chunks_per_document)?,
             expansion,
         })
+    }
+}
+
+/// A [`ChunkScope`] as query parameters: its ACL members, and one row per grant for [`in_scope`].
+struct ScopeParams {
+    members: Vec<String>,
+    grants: Json<Vec<GrantRow>>,
+}
+
+#[derive(Serialize)]
+struct GrantRow {
+    sensitivities: Vec<&'static str>,
+    any_tenant: bool,
+    tenants: Vec<String>,
+}
+
+impl ScopeParams {
+    fn new(scope: &ChunkScope) -> Self {
+        let grants = scope
+            .grants()
+            .iter()
+            .map(|grant| {
+                let (any_tenant, tenants) = match grant.tenants() {
+                    TenantScope::Any => (true, Vec::new()),
+                    TenantScope::Only(tenants) => (false, tenants.iter().cloned().collect()),
+                };
+                GrantRow {
+                    sensitivities: grant.sensitivities().map(|s| s.as_str()).collect(),
+                    any_tenant,
+                    tenants,
+                }
+            })
+            .collect();
+        Self {
+            members: scope.members().iter().cloned().collect(),
+            grants: Json(grants),
+        }
     }
 }
 

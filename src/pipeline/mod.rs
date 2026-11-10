@@ -99,11 +99,12 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    access::{Access, AccessDecision, Authorizer, Principal},
     domain::{CategoryKind, Probability, Question, RunId},
     llm::ModelRef,
 };
 
-use self::trace::{StepOutcome, Trace, TraceEntry, TraceRecord};
+use self::trace::{AuthorizeRecord, StepOutcome, Trace, TraceEntry, TraceRecord};
 
 /// A question category as a type. Implemented by [`Unclassified`] and one marker per [`CategoryKind`].
 pub trait Category: Send + Sync + 'static {
@@ -140,25 +141,141 @@ category!(Boolean, Choice, Ranking, Open);
 #[derive(Clone, Copy, Debug)]
 pub struct Asked;
 
+/// [`Halted::at`] when the policy could not say what the principal may read.
+pub const AUTHORIZE: &str = "authorize";
+
+/// Who asked what, and what they may read: fixed for the whole run and seen by every step, so any step can enforce
+/// access. Built by [`Run::authorize`], which asks the [`Authorizer`] and records its answer.
+#[derive(Clone, Debug)]
+pub struct Ask {
+    question: Question,
+    principal: Principal,
+    access: Access,
+}
+
+impl Ask {
+    /// `access` is what the policy gave `principal`.
+    pub fn new(question: Question, principal: Principal, access: Access) -> Self {
+        Self {
+            question,
+            principal,
+            access,
+        }
+    }
+
+    /// The question asked.
+    pub fn question(&self) -> &Question {
+        &self.question
+    }
+
+    /// Who asked.
+    pub fn principal(&self) -> &Principal {
+        &self.principal
+    }
+
+    /// What they may read; steps check every chunk they touch against [`Access::chunks`].
+    pub fn access(&self) -> &Access {
+        &self.access
+    }
+
+    /// `question` asked by [`crate::access::fakes::tester`] with unrestricted access, for tests whose subject is
+    /// not access.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn unrestricted(question: impl Into<String>) -> Self {
+        Self::new(
+            Question::new(question),
+            crate::access::fakes::tester(),
+            crate::access::fakes::unrestricted(),
+        )
+    }
+}
+
 /// One question's progress through the pipeline. `TCategory` is a [`Category`] marker and `TState` is the last
 /// step's output, so a step applies only where its input type matches.
 pub struct Run<TCategory, TState> {
     id: RunId,
-    question: Question,
+    ask: Ask,
     state: TState,
     trace: Trace,
     category: PhantomData<TCategory>,
 }
 
 impl Run<Unclassified, Asked> {
-    /// A fresh run with a new [`RunId`] and an empty trace.
-    pub fn new(question: Question) -> Self {
+    /// A fresh run with a new [`RunId`] and an empty trace, for an `ask` whose access is already decided.
+    pub fn new(ask: Ask) -> Self {
         Self {
             id: RunId::new(),
-            question,
+            ask,
             state: Asked,
             trace: Trace::default(),
             category: PhantomData,
+        }
+    }
+
+    /// A fresh run for `principal`, with the access `authorizer` gives it as the first trace entry.
+    ///
+    /// # Errors
+    ///
+    /// [`Halted`] at [`AUTHORIZE`], failed, when the authorizer errors: the run reads nothing it was not granted.
+    pub async fn authorize(
+        question: Question,
+        principal: Principal,
+        authorizer: &dyn Authorizer,
+    ) -> Result<Self, Halted> {
+        let started_at = Utc::now();
+        let started = Instant::now();
+        let result = authorizer.access(&principal).await;
+        let duration_ms = started.elapsed().as_millis() as u64;
+        let record = |access: Option<Access>| {
+            Some(TraceRecord::Authorize(AuthorizeRecord {
+                principal: principal.clone(),
+                policy: authorizer.policy(),
+                access,
+            }))
+        };
+        let entry = |outcome, record| TraceEntry {
+            step: AUTHORIZE.to_owned(),
+            group: None,
+            started_at,
+            duration_ms,
+            model: None,
+            prompt_version: None,
+            outcome,
+            record,
+            access: Vec::new(),
+        };
+        let mut trace = Trace::default();
+        match result {
+            Ok(access) => {
+                trace.push(entry(
+                    StepOutcome::Passed {
+                        score: None,
+                        threshold: None,
+                    },
+                    record(Some(access.clone())),
+                ));
+                Ok(Self {
+                    trace,
+                    ..Self::new(Ask::new(question, principal, access))
+                })
+            }
+            Err(error) => {
+                let error = format!("{error:#?}");
+                trace.push(entry(
+                    StepOutcome::Failed {
+                        error: error.clone(),
+                    },
+                    record(None),
+                ));
+                Err(Halted {
+                    id: RunId::new(),
+                    question,
+                    trace,
+                    category: None,
+                    at: AUTHORIZE,
+                    halt: Halt::Failed { error },
+                })
+            }
         }
     }
 }
@@ -183,10 +300,11 @@ pub trait Step: Send + Sync {
     }
 
     /// Does the step's work. A domain decline returns [`StepError::decline`] with the record attached; any other
-    /// error is a failure.
+    /// error is a failure. A step that touches chunks checks them against [`Ask::access`] and returns the decisions
+    /// with [`Scored::with_access`] or [`StepError::with_access`].
     fn run(
         &self,
-        question: &Question,
+        ask: &Ask,
         input: Self::Input,
     ) -> impl Future<Output = Result<Scored<Self::Output, Self::Record>, StepError>> + Send;
 }
@@ -203,6 +321,8 @@ pub struct Scored<TOutput, TRecord> {
     pub model: Option<ModelRef>,
     /// Version of the prompt sent to `model`.
     pub prompt_version: Option<&'static str>,
+    /// The access checks the step made, one per chunk, in order.
+    pub access: Vec<AccessDecision>,
 }
 
 impl<TOutput, TRecord> Scored<TOutput, TRecord> {
@@ -214,7 +334,13 @@ impl<TOutput, TRecord> Scored<TOutput, TRecord> {
             score: None,
             model: None,
             prompt_version: None,
+            access: Vec::new(),
         }
+    }
+
+    /// Sets [`Scored::access`].
+    pub fn with_access(self, access: Vec<AccessDecision>) -> Self {
+        Self { access, ..self }
     }
 
     /// Sets [`Scored::score`].
@@ -262,6 +388,8 @@ pub struct StepError {
     pub model: Option<ModelRef>,
     /// Version of the prompt sent to `model`.
     pub prompt_version: Option<&'static str>,
+    /// The access checks the step made before it stopped.
+    pub access: Vec<AccessDecision>,
 }
 
 /// Whether a [`StepError`] is a domain decline or a failure; the run's status follows from it.
@@ -281,7 +409,13 @@ impl StepError {
             record: None,
             model: None,
             prompt_version: None,
+            access: Vec::new(),
         }
+    }
+
+    /// Sets [`StepError::access`].
+    pub fn with_access(self, access: Vec<AccessDecision>) -> Self {
+        Self { access, ..self }
     }
 
     /// Attaches the trace record, so the raw model output survives a decline.
@@ -309,6 +443,7 @@ impl<E: Into<eros::ErrorUnion>> From<E> for StepError {
             record: None,
             model: None,
             prompt_version: None,
+            access: Vec::new(),
         }
     }
 }
@@ -358,7 +493,12 @@ impl<TCategory: Category, TState: Send> Run<TCategory, TState> {
 
     /// The question asked.
     pub fn question(&self) -> &Question {
-        &self.question
+        &self.ask.question
+    }
+
+    /// Who asked what, and what they may read.
+    pub fn ask(&self) -> &Ask {
+        &self.ask
     }
 
     /// The last step's output.
@@ -373,7 +513,7 @@ impl<TCategory: Category, TState: Send> Run<TCategory, TState> {
 
     /// Ends the run, for building its report.
     pub fn into_parts(self) -> (RunId, Question, TState, Trace) {
-        (self.id, self.question, self.state, self.trace)
+        (self.id, self.ask.question, self.state, self.trace)
     }
 
     /// Times the step, appends its trace entry, checks its threshold, and continues or halts.
@@ -388,24 +528,24 @@ impl<TCategory: Category, TState: Send> Run<TCategory, TState> {
     {
         let Self {
             id,
-            question,
+            ask,
             state,
             mut trace,
             ..
         } = self;
-        let (entry, result) = execute(step, &question, state, None).await;
+        let (entry, result) = execute(step, &ask, state, None).await;
         trace.push(entry);
         match result {
             Ok(output) => Ok(Run {
                 id,
-                question,
+                ask,
                 state: output,
                 trace,
                 category: PhantomData,
             }),
             Err(halt) => Err(Halted {
                 id,
-                question,
+                question: ask.question,
                 trace,
                 category: TCategory::KIND,
                 at: TStep::NAME,
@@ -433,20 +573,20 @@ impl<TCategory: Category, TState: Send> Run<TCategory, TState> {
     {
         let Self {
             id,
-            question,
+            ask,
             state,
             mut trace,
             ..
         } = self;
         let ((left_entry, left_result), (right_entry, right_result)) = futures::join!(
-            execute(left, &question, state.clone(), Some(group)),
-            execute(right, &question, state, Some(group)),
+            execute(left, &ask, state.clone(), Some(group)),
+            execute(right, &ask, state, Some(group)),
         );
         trace.push(left_entry);
         trace.push(right_entry);
         let halted = |trace, at, halt| Halted {
             id,
-            question: question.clone(),
+            question: ask.question.clone(),
             trace,
             category: TCategory::KIND,
             at,
@@ -455,7 +595,7 @@ impl<TCategory: Category, TState: Send> Run<TCategory, TState> {
         match (left_result, right_result) {
             (Ok(left), Ok(right)) => Ok(Run {
                 id,
-                question: question.clone(),
+                ask: ask.clone(),
                 state: (left, right),
                 trace,
                 category: PhantomData,
@@ -469,7 +609,7 @@ impl<TCategory: Category, TState: Send> Run<TCategory, TState> {
     pub(crate) fn map<TNext: Send>(self, f: impl FnOnce(TState) -> TNext) -> Run<TCategory, TNext> {
         Run {
             id: self.id,
-            question: self.question,
+            ask: self.ask,
             state: f(self.state),
             trace: self.trace,
             category: PhantomData,
@@ -480,7 +620,7 @@ impl<TCategory: Category, TState: Send> Run<TCategory, TState> {
     pub(crate) fn classified<TNext: Category>(self) -> Run<TNext, TState> {
         Run {
             id: self.id,
-            question: self.question,
+            ask: self.ask,
             state: self.state,
             trace: self.trace,
             category: PhantomData,
@@ -490,17 +630,17 @@ impl<TCategory: Category, TState: Send> Run<TCategory, TState> {
 
 async fn execute<TStep: Step>(
     step: &TStep,
-    question: &Question,
+    ask: &Ask,
     input: TStep::Input,
     group: Option<&'static str>,
 ) -> (TraceEntry, Result<TStep::Output, Halt>) {
     let started_at = Utc::now();
     let started = Instant::now();
-    let result = step.run(question, input).await;
+    let result = step.run(ask, input).await;
     let duration_ms = started.elapsed().as_millis() as u64;
     let threshold = step.threshold();
 
-    let entry = |outcome, record, model, prompt_version: Option<&'static str>| TraceEntry {
+    let entry = |outcome, record, model, prompt_version: Option<&'static str>, access| TraceEntry {
         step: TStep::NAME.to_owned(),
         group: group.map(str::to_owned),
         started_at,
@@ -509,6 +649,7 @@ async fn execute<TStep: Step>(
         prompt_version: prompt_version.map(str::to_owned),
         outcome,
         record,
+        access,
     };
 
     match result {
@@ -536,6 +677,7 @@ async fn execute<TStep: Step>(
                 Some(scored.record.into()),
                 scored.model,
                 scored.prompt_version,
+                scored.access,
             );
             match halt {
                 None => (entry, Ok(scored.output)),
@@ -559,6 +701,7 @@ async fn execute<TStep: Step>(
                     error.record,
                     error.model,
                     error.prompt_version,
+                    error.access,
                 ),
                 Err(halt),
             )
@@ -613,7 +756,7 @@ impl<TStep: Step> Pipeline for TStep {
 /// Composes two pipelines; only a valid pipeline when the first one's output is the second one's input.
 ///
 /// ```compile_fail,E0599
-/// use recall::{domain::Question, pipeline::{trace::VerifyRecord, *}};
+/// use recall::pipeline::{trace::VerifyRecord, *};
 ///
 /// struct A;
 /// struct B;
@@ -626,7 +769,7 @@ impl<TStep: Step> Pipeline for TStep {
 ///     type Output = A;
 ///     type Record = VerifyRecord;
 ///
-///     async fn run(&self, _: &Question, _: B) -> Result<Scored<A, VerifyRecord>, StepError> {
+///     async fn run(&self, _: &Ask, _: B) -> Result<Scored<A, VerifyRecord>, StepError> {
 ///         unimplemented!()
 ///     }
 /// }

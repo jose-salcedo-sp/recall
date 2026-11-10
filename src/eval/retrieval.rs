@@ -15,10 +15,11 @@ use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    access::{Access, Authorizer, Principal},
     domain::CategoryKind,
     llm::ModelRef,
     pipeline::{
-        Asked, Step, StepErrorKind,
+        Ask, Asked, Step, StepErrorKind,
         report::RunReport,
         steps::Retrieve,
         trace::{RetrieveRecord, TraceRecord},
@@ -53,6 +54,9 @@ pub struct RetrievalArgs {
     /// Run only these golden question ids (repeatable, or comma-separated).
     #[arg(long = "question", value_name = "ID", value_delimiter = ',')]
     pub questions: Vec<String>,
+    /// Who the questions are asked as.
+    #[command(flatten)]
+    pub asking: super::AsArgs,
 }
 
 /// The `recall eval retrieval` output file.
@@ -270,13 +274,18 @@ impl Comparison {
 /// Runs `Retrieve` on every golden question, at most `concurrency` at a time, and scores the results.
 pub async fn evaluate(
     retriever: Arc<dyn Retriever>,
+    principal: &Principal,
+    access: &Access,
     golden: Vec<GoldenQuestion>,
     concurrency: usize,
 ) -> Vec<RetrievalRun> {
     let retrieve = Retrieve::new(retriever);
     let retrieve = &retrieve;
     let mut runs: Vec<(usize, RetrievalRun)> = stream::iter(golden.into_iter().enumerate())
-        .map(|(index, golden)| async move { (index, retrieve_one(retrieve, golden).await) })
+        .map(|(index, golden)| async move {
+            let ask = Ask::new(golden.question.clone(), principal.clone(), access.clone());
+            (index, retrieve_one(retrieve, &ask, golden).await)
+        })
         .buffer_unordered(concurrency.max(1))
         .collect()
         .await;
@@ -284,9 +293,9 @@ pub async fn evaluate(
     runs.into_iter().map(|(_, run)| run).collect()
 }
 
-async fn retrieve_one(retrieve: &Retrieve, golden: GoldenQuestion) -> RetrievalRun {
+async fn retrieve_one(retrieve: &Retrieve, ask: &Ask, golden: GoldenQuestion) -> RetrievalRun {
     let start = Instant::now();
-    let outcome = match retrieve.run(&golden.question, Asked).await {
+    let outcome = match retrieve.run(ask, Asked).await {
         Ok(scored) => RetrievalOutcome::Retrieved(scored.record),
         Err(error) => match (error.kind, error.record) {
             (_, Some(TraceRecord::Retrieve(record))) => RetrievalOutcome::Retrieved(record),
@@ -414,13 +423,16 @@ impl BaselineRecords {
 ///
 /// # Errors
 ///
-/// When a file cannot be read, parsed or written, a selected question id is unknown, the baseline did not run a
-/// selected question, or any question lost recall against it.
+/// When the authorizer fails, a file cannot be read, parsed or written, a selected question id is unknown, the
+/// baseline did not run a selected question, or any question lost recall against it.
 pub async fn run_retrieval(
     retriever: Arc<dyn Retriever>,
+    authorizer: &dyn Authorizer,
     args: RetrievalArgs,
     setup: Option<RetrievalSetup>,
 ) -> eros::Result<()> {
+    let principal = args.asking.principal();
+    let access = authorizer.access(&principal).await?;
     let golden = super::select(super::read_golden(&args.golden)?, &args.questions)?;
     let baseline = match args.baseline.as_deref() {
         Some(path) => Some((path, read_baseline(path)?)),
@@ -436,7 +448,7 @@ pub async fn run_retrieval(
         }));
     }
     let start = Instant::now();
-    let runs = evaluate(retriever, golden, args.concurrency).await;
+    let runs = evaluate(retriever, &principal, &access, golden, args.concurrency).await;
     let elapsed = start.elapsed();
     let comparison = baseline
         .map(|(path, records)| compare(&runs, &records, &path.display().to_string()))

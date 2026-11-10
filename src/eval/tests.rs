@@ -13,6 +13,10 @@ use super::{
     *,
 };
 use crate::{
+    access::{
+        Principal,
+        fakes::{StaticAuthorizer, tester},
+    },
     config::{PerCategory, StepName},
     domain::{
         AtLeastOne, CategoryKind, ChunkId, ChunkRef, ChunkVersion, Cited, Probability, Provenance,
@@ -54,6 +58,12 @@ fn ranked(ids: &[&str]) -> Vec<RankedChunk> {
         .collect()
 }
 
+fn tester_args() -> AsArgs {
+    AsArgs {
+        user: tester().id().0.clone(),
+    }
+}
+
 fn entry(step: &str, outcome: StepOutcome, record: Option<TraceRecord>) -> TraceEntry {
     TraceEntry {
         step: step.into(),
@@ -64,6 +74,7 @@ fn entry(step: &str, outcome: StepOutcome, record: Option<TraceRecord>) -> Trace
         prompt_version: None,
         outcome,
         record,
+        access: Vec::new(),
     }
 }
 
@@ -227,7 +238,7 @@ impl Scripted {
 
 #[async_trait]
 impl Answerer for Scripted {
-    async fn answer(&self, question: Question) -> RunReport {
+    async fn answer(&self, _principal: &Principal, question: Question) -> RunReport {
         self.0[question.as_str()].clone()
     }
 }
@@ -305,7 +316,7 @@ fn fixture() -> Vec<(GoldenQuestion, RunReport)> {
 
 async fn evaluate_fixture(runs: &[(GoldenQuestion, RunReport)]) -> Results {
     let golden = runs.iter().map(|(golden, _)| golden.clone()).collect();
-    evaluate(&Scripted::new(runs), golden, 2, &()).await
+    evaluate(&Scripted::new(runs), &tester(), golden, 2, &()).await
 }
 
 fn metric(value: f64, n: usize) -> Metric {
@@ -593,7 +604,7 @@ async fn progress_sees_every_run_and_results_keep_golden_order() {
     let ids: Vec<String> = golden.iter().map(|g| g.id.clone()).collect();
     let progress = RecordingProgress::default();
 
-    let results = evaluate(&Scripted::new(&runs), golden, 3, &progress).await;
+    let results = evaluate(&Scripted::new(&runs), &tester(), golden, 3, &progress).await;
 
     let mut started = progress.started.into_inner().unwrap();
     let mut finished = progress.finished.into_inner().unwrap();
@@ -635,7 +646,7 @@ async fn canned_failures_count_only_toward_failure_rate() {
         outcome: failed("pipeline"),
     };
     let golden = fixture().into_iter().map(|(golden, _)| golden).collect();
-    let results = evaluate(&answerer, golden, 3, &()).await;
+    let results = evaluate(&answerer, &tester(), golden, 3, &()).await;
     let overall = &results.metrics.overall;
     assert_metric(overall.failure_rate, metric(1.0, 5));
     assert_metric(overall.decline_rate, metric(0.0, 5));
@@ -762,6 +773,7 @@ async fn run_command_writes_results_and_gates_on_the_baseline_file() {
         baseline,
         concurrency: 2,
         questions: vec![],
+        asking: tester_args(),
     };
 
     run_golden(
@@ -841,6 +853,7 @@ async fn one_question_runs_alone_and_is_gated_against_the_same_question() {
         baseline,
         concurrency: 2,
         questions: questions.iter().map(|id| (*id).to_owned()).collect(),
+        asking: tester_args(),
     };
     run_golden(
         Arc::new(Scripted::new(&runs)),
@@ -906,6 +919,7 @@ async fn golden_parse_errors_surface_through_the_run_command() {
             baseline: None,
             concurrency: 1,
             questions: vec![],
+            asking: tester_args(),
         },
         None,
     )
@@ -1172,6 +1186,7 @@ async fn retrieval_command_scores_matches_and_diffs_each_question_against_a_base
         baseline,
         concurrency: 2,
         questions: vec![],
+        asking: tester_args(),
     };
     let retriever = |chunks: Vec<crate::domain::Chunk>| Arc::new(KeywordRetriever { chunks });
 
@@ -1193,6 +1208,7 @@ async fn retrieval_command_scores_matches_and_diffs_each_question_against_a_base
 
     run_retrieval(
         retriever(chunks.clone()),
+        &StaticAuthorizer::tester(),
         args("first.json", Some(dir.join("full.json"))),
         None,
     )
@@ -1216,6 +1232,7 @@ async fn retrieval_command_scores_matches_and_diffs_each_question_against_a_base
     // A retrieval results file is a baseline too; losing `sheet` from the corpus loses its recall and fails.
     let error = run_retrieval(
         retriever(vec![chunks[0].clone(), chunks[2].clone()]),
+        &StaticAuthorizer::tester(),
         args("second.json", Some(dir.join("first.json"))),
         None,
     )
@@ -1235,6 +1252,7 @@ async fn retrieval_command_scores_matches_and_diffs_each_question_against_a_base
     // A selection must be in the baseline; this one is.
     run_retrieval(
         retriever(chunks),
+        &StaticAuthorizer::tester(),
         RetrievalArgs {
             questions: vec!["sheet".into()],
             ..args("third.json", Some(dir.join("first.json")))

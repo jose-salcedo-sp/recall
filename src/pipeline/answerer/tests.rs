@@ -2,7 +2,12 @@ use serde_json::json;
 
 use super::*;
 use crate::{
-    domain::ChunkId,
+    access::{
+        Access,
+        fakes::{FailingAuthorizer, StaticAuthorizer, tester},
+        rules::AccessConfig,
+    },
+    domain::{ChunkId, Labels, Sensitivity, UserId},
     llm::{
         fakes::ScriptedChat,
         judge::{FnJudge, JudgeQuestion, RawJudgement},
@@ -16,7 +21,7 @@ use crate::{
             TraceRecord,
         },
     },
-    retrieval::fakes::KeywordRetriever,
+    retrieval::fakes::{FailingRetriever, KeywordRetriever, LeakyRetriever},
 };
 
 const QUESTION: &str = "Which table maps users to roles?";
@@ -53,11 +58,14 @@ fn answerer(chunks: Vec<Chunk>, chat: &Arc<ScriptedChat>) -> PipelineAnswerer {
     PipelineAnswerer::new(
         Arc::new(KeywordRetriever { chunks }),
         Arc::<ScriptedChat>::clone(chat),
+        Arc::new(StaticAuthorizer::tester()),
     )
 }
 
 async fn ask(chunks: Vec<Chunk>, chat: &Arc<ScriptedChat>) -> RunReport {
-    answerer(chunks, chat).answer(Question::new(QUESTION)).await
+    answerer(chunks, chat)
+        .answer(&tester(), Question::new(QUESTION))
+        .await
 }
 
 fn steps(report: &RunReport) -> Vec<(&str, Option<&str>)> {
@@ -111,6 +119,7 @@ async fn answers_with_citations_numbered_by_first_use() {
     assert_eq!(
         steps(&report),
         [
+            ("authorize", None),
             ("classify", Some("classify_retrieve")),
             ("retrieve", Some("classify_retrieve")),
             ("rerank", None),
@@ -118,7 +127,7 @@ async fn answers_with_citations_numbered_by_first_use() {
             ("verify", None),
         ]
     );
-    let explain = &report.trace.entries()[3];
+    let explain = &report.trace.entries()[4];
     assert_eq!(explain.prompt_version.as_deref(), Some(PROMPT_VERSION));
     assert_eq!(explain.model, Some(chat.model()));
     assert!(matches!(
@@ -248,6 +257,7 @@ async fn an_empty_corpus_declines_without_calling_the_model() {
     assert_eq!(
         steps(&report),
         [
+            ("authorize", None),
             ("classify", Some("classify_retrieve")),
             ("retrieve", Some("classify_retrieve")),
         ]
@@ -255,29 +265,24 @@ async fn an_empty_corpus_declines_without_calling_the_model() {
     assert!(chat.requests().is_empty());
 }
 
-struct BrokenRetriever;
-
-#[async_trait]
-impl Retriever for BrokenRetriever {
-    async fn retrieve(&self, _query: &str) -> eros::Result<Vec<Retrieved>> {
-        eros::bail!("connection refused")
-    }
-}
-
 #[tokio::test]
 async fn retriever_error_fails_the_run() {
     let chat = Arc::new(ScriptedChat::replying(Vec::<String>::new()));
-    let answerer =
-        PipelineAnswerer::new(Arc::new(BrokenRetriever), Arc::<ScriptedChat>::clone(&chat));
+    let answerer = PipelineAnswerer::new(
+        Arc::new(FailingRetriever),
+        Arc::<ScriptedChat>::clone(&chat),
+        Arc::new(StaticAuthorizer::tester()),
+    );
 
-    let report = answerer.answer(Question::new(QUESTION)).await;
+    let report = answerer.answer(&tester(), Question::new(QUESTION)).await;
 
     assert!(matches!(
         &report.outcome,
-        Outcome::Failed { at, error } if at == "retrieve" && error.contains("connection refused")
+        Outcome::Failed { at, error } if at == "retrieve" && error.contains("pool timed out")
     ));
+    assert_eq!(report.trace.entries()[1].step, "classify");
     assert!(matches!(
-        report.trace.entries()[0].outcome,
+        report.trace.entries()[1].outcome,
         StepOutcome::Passed { .. }
     ));
 }
@@ -324,7 +329,7 @@ async fn explain_sends_the_configured_max_tokens() {
         answerer(corpus(), &chat)
             .with_config(PipelineConfig::parse(config).unwrap())
             .unwrap()
-            .answer(Question::new(QUESTION))
+            .answer(&tester(), Question::new(QUESTION))
             .await;
 
         assert_eq!(chat.requests()[0].max_tokens, max_tokens, "{config}");
@@ -405,7 +410,7 @@ async fn ask_kev(kev: FakeKev, chat: &Arc<ScriptedChat>, config: &str) -> RunRep
         .with_judge(kev.judge())
         .with_config(PipelineConfig::parse(config).unwrap())
         .unwrap()
-        .answer(Question::new(YES_NO))
+        .answer(&tester(), Question::new(YES_NO))
         .await
 }
 
@@ -433,7 +438,13 @@ async fn a_boolean_question_gets_the_judge_s_verdict_and_the_llm_s_reasons() {
     assert_eq!(
         names,
         [
-            "classify", "retrieve", "rerank", "answer", "explain", "verify"
+            "authorize",
+            "classify",
+            "retrieve",
+            "rerank",
+            "answer",
+            "explain",
+            "verify"
         ]
     );
     let request = &chat.requests()[0];
@@ -562,7 +573,7 @@ async fn the_reranker_asks_the_judge_about_each_match() {
             .with_config(PipelineConfig::parse(config).unwrap())
             .unwrap();
         let models = answerer.models();
-        let report = answerer.answer(Question::new(QUESTION)).await;
+        let report = answerer.answer(&tester(), Question::new(QUESTION)).await;
 
         let rerank = report
             .trace
@@ -620,7 +631,7 @@ async fn admission_and_the_support_check_run_on_the_judge_when_configured() {
         .unwrap();
     let models = answerer.models();
 
-    let report = answerer.answer(Question::new(QUESTION)).await;
+    let report = answerer.answer(&tester(), Question::new(QUESTION)).await;
 
     assert!(
         matches!(report.outcome, Outcome::Answered(_)),
@@ -631,7 +642,13 @@ async fn admission_and_the_support_check_run_on_the_judge_when_configured() {
     assert_eq!(
         names,
         [
-            "classify", "retrieve", "rerank", "admit", "explain", "verify"
+            "authorize",
+            "classify",
+            "retrieve",
+            "rerank",
+            "admit",
+            "explain",
+            "verify"
         ]
     );
     let TraceRecord::Admit(admit) = record(&report, "admit") else {
@@ -685,7 +702,7 @@ async fn the_plan_and_each_step_s_record_say_what_ran() {
         }
     );
 
-    let report = answerer.answer(Question::new(QUESTION)).await;
+    let report = answerer.answer(&tester(), Question::new(QUESTION)).await;
 
     assert!(matches!(report.outcome, Outcome::Answered(_)));
     assert!(matches!(
@@ -715,4 +732,280 @@ async fn the_plan_and_each_step_s_record_say_what_ran() {
             support: SupportMode::Judged,
         }
     );
+}
+
+// Access control: no chunk the principal may not read reaches the LLM, a citation, or a decline's sources.
+
+const POLICY: &str = r#"{
+    "roles": {
+        "reader": { "clearance": "internal", "runs": "own" },
+        "acme": { "clearance": "internal", "tenants": ["acme"] },
+        "maintainer": { "clearance": "confidential", "tenants": "any", "runs": "any" }
+    },
+    "everyone": ["reader"],
+    "members": { "jose": ["maintainer"], "ana": ["acme"] }
+}"#;
+
+fn policy() -> Arc<RulePolicy> {
+    Arc::new(RulePolicy::new(AccessConfig::parse(POLICY).unwrap()))
+}
+
+fn labelled(locator: &str, text: &str, labels: Labels) -> Chunk {
+    Chunk {
+        labels,
+        ..chunk(locator, "Schema tables", text)
+    }
+}
+
+/// The best match for the question, but confidential.
+fn secret() -> Chunk {
+    labelled(
+        "role-users-secret",
+        "ROLE_USERS maps users to roles; the admin override is ROLE_ROOT.",
+        Labels {
+            acl: vec![],
+            tenant: None,
+            sensitivity: Sensitivity::Confidential,
+        },
+    )
+}
+
+fn acme_only() -> Chunk {
+    labelled(
+        "acme-roles",
+        "At acme, a table maps users to roles per plant.",
+        Labels {
+            acl: vec![],
+            tenant: Some("acme".into()),
+            sensitivity: Sensitivity::Internal,
+        },
+    )
+}
+
+fn hr_only() -> Chunk {
+    labelled(
+        "hr-roles",
+        "HR maps users to roles in the payroll table.",
+        Labels {
+            acl: vec!["hr".into()],
+            tenant: None,
+            sensitivity: Sensitivity::Public,
+        },
+    )
+}
+
+fn labelled_corpus() -> Vec<Chunk> {
+    vec![role_users(), secret(), acme_only(), hr_only(), login02()]
+}
+
+fn principal(id: &str) -> Principal {
+    Principal::new(UserId(id.into()))
+}
+
+/// One claim per chunk of the corpus, each citing only that chunk, as a model would that tried to cite everything.
+fn cite_everything() -> String {
+    let claims: Vec<_> = labelled_corpus()
+        .iter()
+        .map(|chunk| json!({ "text": format!("{} says so.", chunk.id.0), "chunk_ids": [chunk.id] }))
+        .collect();
+    reply(&json!(claims))
+}
+
+fn strip() -> PipelineConfig {
+    PipelineConfig::parse(r#"{"verify": {"publish": "strip"}}"#).unwrap()
+}
+
+/// Every chunk id the report or the model saw: the prompt, the citation schema, citations and decline sources.
+fn exposed(report: &RunReport, chat: &ScriptedChat) -> Vec<ChunkId> {
+    let corpus = labelled_corpus();
+    let requests = chat.requests();
+    let in_prompt = corpus.iter().filter(|chunk| {
+        requests.iter().any(|request| {
+            request.user.contains(&chunk.text)
+                || request
+                    .json_schema
+                    .as_ref()
+                    .is_some_and(|schema| schema.to_string().contains(&chunk.id.0))
+        })
+    });
+    let citations = match &report.outcome {
+        Outcome::Answered(answer) => answer.citations.clone(),
+        Outcome::Declined { sources, .. } => sources.clone(),
+        Outcome::Failed { .. } => vec![],
+    };
+    in_prompt
+        .map(|chunk| chunk.id.clone())
+        .chain(citations.into_iter().map(|citation| citation.chunk.id))
+        .collect()
+}
+
+#[tokio::test]
+async fn no_principal_sees_a_chunk_its_access_denies() {
+    for id in ["eve", "ana", "jose", "stranger"] {
+        for kind in ["scoped", "leaky"] {
+            let chat = Arc::new(ScriptedChat::replying([cite_everything()]));
+            let chunks = labelled_corpus();
+            let retriever: Arc<dyn Retriever> = match kind {
+                "scoped" => Arc::new(KeywordRetriever { chunks }),
+                _ => Arc::new(LeakyRetriever { chunks }),
+            };
+            let authorizer = policy();
+            let answerer = PipelineAnswerer::new(
+                retriever,
+                Arc::<ScriptedChat>::clone(&chat),
+                Arc::clone(&authorizer) as Arc<dyn Authorizer>,
+            )
+            .with_config(strip())
+            .unwrap();
+            let principal = principal(id);
+            let access = authorizer.access(&principal).await.unwrap();
+
+            let report = answerer.answer(&principal, Question::new(QUESTION)).await;
+
+            let corpus = labelled_corpus();
+            for exposed in exposed(&report, &chat) {
+                let chunk = corpus.iter().find(|chunk| chunk.id == exposed).unwrap();
+                assert!(
+                    access.chunks().admits(&chunk.labels),
+                    "{id} ({kind}) saw {}",
+                    exposed.0
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_citation_of_a_denied_chunk_is_stripped_and_never_shown() {
+    let chat = Arc::new(ScriptedChat::replying([reply(&json!([
+        { "text": "ROLE_USERS maps users to roles.", "chunk_ids": [role_users().id] },
+        { "text": "The override is ROLE_ROOT.", "chunk_ids": [secret().id] },
+    ]))]));
+    let answerer = PipelineAnswerer::new(
+        Arc::new(LeakyRetriever {
+            chunks: labelled_corpus(),
+        }),
+        Arc::<ScriptedChat>::clone(&chat),
+        policy(),
+    )
+    .with_config(strip())
+    .unwrap();
+
+    let report = answerer
+        .answer(&principal("eve"), Question::new(QUESTION))
+        .await;
+
+    let Outcome::Answered(answer) = &report.outcome else {
+        panic!("expected an answer, got {:?}", report.outcome);
+    };
+    let cited: Vec<_> = answer.citations.iter().map(|c| &c.chunk.id).collect();
+    assert_eq!(cited, [&role_users().id]);
+    assert_eq!(answer.why.len(), 1);
+    assert!(!chat.requests()[0].user.contains("ROLE_ROOT"));
+    let TraceRecord::Verify(verify) = record(&report, "verify") else {
+        panic!("expected the verify record");
+    };
+    assert_eq!(verify.unknown_citations, [secret().id]);
+    let retrieve = report
+        .trace
+        .entries()
+        .iter()
+        .find(|entry| entry.step == "retrieve")
+        .unwrap();
+    let denied: Vec<_> = retrieve
+        .access
+        .iter()
+        .filter(|check| !check.decision.is_allowed())
+        .map(|check| &check.chunk.id)
+        .collect();
+    assert_eq!(denied, [&secret().id, &acme_only().id, &hr_only().id]);
+    for step in ["rerank", "explain", "verify"] {
+        let entry = report
+            .trace
+            .entries()
+            .iter()
+            .find(|e| e.step == step)
+            .unwrap();
+        assert!(!entry.access.is_empty(), "{step} records its checks");
+        assert!(
+            entry.access.iter().all(|check| check.decision.is_allowed()),
+            "{step}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_principal_with_no_access_declines_without_calling_the_model() {
+    let chat = Arc::new(ScriptedChat::replying(Vec::<String>::new()));
+    let answerer = PipelineAnswerer::new(
+        Arc::new(LeakyRetriever {
+            chunks: labelled_corpus(),
+        }),
+        Arc::<ScriptedChat>::clone(&chat),
+        Arc::new(StaticAuthorizer::default()),
+    );
+
+    let report = answerer
+        .answer(&principal("eve"), Question::new(QUESTION))
+        .await;
+
+    assert!(matches!(
+        &report.outcome,
+        Outcome::Declined { at, reason: DeclineReason::NoSources, sources, .. }
+            if at == "retrieve" && sources.is_empty()
+    ));
+    let TraceRecord::Authorize(authorize) = record(&report, "authorize") else {
+        panic!("expected the authorize record");
+    };
+    assert_eq!(authorize.access, Some(Access::none()));
+    assert!(chat.requests().is_empty());
+}
+
+#[tokio::test]
+async fn a_policy_that_cannot_answer_fails_the_run_before_retrieval() {
+    let chat = Arc::new(ScriptedChat::replying(Vec::<String>::new()));
+    let answerer = PipelineAnswerer::new(
+        Arc::new(KeywordRetriever { chunks: corpus() }),
+        Arc::<ScriptedChat>::clone(&chat),
+        Arc::new(FailingAuthorizer),
+    );
+
+    let report = answerer.answer(&tester(), Question::new(QUESTION)).await;
+
+    assert!(matches!(
+        &report.outcome,
+        Outcome::Failed { at, error } if at == "authorize" && error.contains("policy service")
+    ));
+    assert_eq!(steps(&report), [("authorize", None)]);
+    assert!(chat.requests().is_empty());
+}
+
+#[tokio::test]
+async fn a_boolean_verdict_is_judged_only_on_readable_sources() {
+    let chat = Arc::new(ScriptedChat::replying([verdict_reply(false)]));
+    let judge = FakeKev {
+        category: "boolean",
+        certainty: 0.9,
+        yes: 0.2,
+    }
+    .judge();
+    let answerer = PipelineAnswerer::new(
+        Arc::new(LeakyRetriever {
+            chunks: labelled_corpus(),
+        }),
+        Arc::<ScriptedChat>::clone(&chat),
+        policy(),
+    )
+    .with_judge(Arc::<FnJudge>::clone(&judge));
+
+    answerer
+        .answer(&principal("eve"), Question::new(YES_NO))
+        .await;
+
+    for request in judge.requests() {
+        for denied in [secret(), acme_only(), hr_only()] {
+            assert!(!request.text.contains(&denied.text), "{}", denied.id.0);
+        }
+    }
+    assert!(judge.requests().len() > 1, "the judge answered the verdict");
 }

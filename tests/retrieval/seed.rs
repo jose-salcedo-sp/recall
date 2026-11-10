@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use pgvector::Vector;
 use recall::{
-    domain::{ChunkId, DocumentId, SourceName},
+    domain::{ChunkId, DocumentId, Sensitivity, SourceName},
     llm::{EMBEDDING_DIM, EmbedPurpose, Embedder, ModelRef, fakes::HashEmbedder},
     retrieval::Retrieved,
 };
@@ -61,7 +61,11 @@ pub struct SeedChunk {
     model: ModelRef,
     version: String,
     superseded: bool,
+    sensitivity: Sensitivity,
 }
+
+/// The ACL every seeded chunk carries.
+pub const ACL_GROUP: &str = "group:arm";
 
 impl SeedChunk {
     /// A current chunk embedded with `HashEmbedder` over its text.
@@ -76,6 +80,7 @@ impl SeedChunk {
             model: HashEmbedder.model(),
             version: "v1".into(),
             superseded: false,
+            sensitivity: Sensitivity::Internal,
         }
     }
 
@@ -105,6 +110,11 @@ impl SeedChunk {
         self
     }
 
+    pub fn sensitivity(mut self, sensitivity: Sensitivity) -> Self {
+        self.sensitivity = sensitivity;
+        self
+    }
+
     pub async fn insert(self, pool: &PgPool) -> ChunkId {
         let id = ChunkId::new(&self.document, &self.locator);
         let embedding = match self.embedding {
@@ -115,7 +125,7 @@ impl SeedChunk {
             "INSERT INTO chunks (id, version, document_id, ordinal, heading, url, text, authoritative, acl,
                                  tenant, sensitivity, embedding, embedding_model, embedding_model_version,
                                  superseded_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, false, '{group:arm}', NULL, 'internal', $8, $9, $10,
+             VALUES ($1, $2, $3, $4, $5, $6, $7, false, ARRAY[$12], NULL, $13, $8, $9, $10,
                      CASE WHEN $11 THEN now() END)",
         )
         .bind(&id.0)
@@ -129,6 +139,8 @@ impl SeedChunk {
         .bind(&self.model.id)
         .bind(&self.model.version)
         .bind(self.superseded)
+        .bind(ACL_GROUP)
+        .bind(self.sensitivity.as_str())
         .execute(pool)
         .await
         .expect("insert chunk");
