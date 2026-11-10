@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 
 use super::{
     ChatModel, ChatRequest, ChatResponse, EMBEDDING_DIM, EmbedPurpose, Embedder, ModelRef,
+    judge::{Judge, JudgeQuestion, JudgeRequest, Judgements, RawJudgement},
     system_one::{DecisionRequest, DecisionResponse, SystemOne},
 };
 
@@ -140,5 +141,53 @@ impl SystemOne for ScriptedSystemOne {
             .expect("lock poisoned: a test thread panicked while holding it")
             .pop_front()
             .unwrap_or_else(|| Err(eros::error!("ScriptedSystemOne has no responses left")))
+    }
+}
+
+type Answer = dyn Fn(&str, &JudgeQuestion) -> RawJudgement + Send + Sync;
+
+/// Answers each question with a function of the text and the question, and records every request it received.
+pub struct FnJudge {
+    answer: Box<Answer>,
+    requests: Mutex<Vec<JudgeRequest>>,
+}
+
+impl FnJudge {
+    /// `answer` is called once per question, in order.
+    pub fn new(
+        answer: impl Fn(&str, &JudgeQuestion) -> RawJudgement + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            answer: Box::new(answer),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Every request received so far, in order.
+    pub fn requests(&self) -> Vec<JudgeRequest> {
+        self.requests
+            .lock()
+            .expect("lock poisoned: a test thread panicked while holding it")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl Judge for FnJudge {
+    fn model(&self) -> ModelRef {
+        ModelRef::new("fake-fn-judge", "1")
+    }
+
+    async fn judge(&self, request: JudgeRequest) -> eros::Result<Judgements> {
+        let answers = request
+            .questions
+            .iter()
+            .map(|question| (self.answer)(&request.text, question))
+            .collect();
+        self.requests
+            .lock()
+            .expect("lock poisoned: a test thread panicked while holding it")
+            .push(request);
+        Ok(Judgements::new(answers))
     }
 }

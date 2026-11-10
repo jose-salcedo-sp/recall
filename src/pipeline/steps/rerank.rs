@@ -17,14 +17,12 @@ use crate::{
     retrieval::Retrieved,
 };
 
-use super::{Candidates, MAX_STATE_CHARS, Reranked, ranked};
+use super::{CONCURRENT_REQUESTS, Candidates, Reranked, judged_text, ranked};
 
 /// Recorded as the trace entry's prompt version; bump on any change to the relevance question.
 pub const RERANK_PROMPT_VERSION: &str = "rerank-v2";
 
 const QUESTION_ID: &str = "relevant";
-/// Requests in flight at once; the server batches them.
-const CONCURRENT_REQUESTS: usize = 8;
 /// Reciprocal rank fusion constant, as in hybrid retrieval.
 const RRF_K: f32 = 60.0;
 
@@ -112,23 +110,9 @@ impl<TCategory> Default for Rerank<TCategory> {
     }
 }
 
-fn state(hit: &Retrieved) -> String {
-    let chunk = &hit.chunk;
-    let heading = chunk
-        .heading
-        .as_deref()
-        .map(|heading| format!(" > {heading}"))
-        .unwrap_or_default();
-    let text = match chunk.text.char_indices().nth(MAX_STATE_CHARS) {
-        Some((end, _)) => &chunk.text[..end],
-        None => &chunk.text,
-    };
-    format!("{}{heading}\n\n{text}", chunk.title)
-}
-
 fn request(question: &Question, hit: &Retrieved) -> DecisionRequest {
     DecisionRequest {
-        state: state(hit),
+        state: judged_text(&hit.chunk),
         model: String::new(),
         questions: BTreeMap::from([(
             QUESTION_ID.to_owned(),
@@ -298,6 +282,7 @@ mod tests {
             fakes::ScriptedSystemOne,
             system_one::{DecisionAnswer, DecisionResponse, SystemOne},
         },
+        pipeline::steps::MAX_STATE_CHARS,
         pipeline::{Open, StepErrorKind, steps::fixtures::chunk},
         retrieval::Relevance,
     };
@@ -568,7 +553,7 @@ mod tests {
             score: Relevance(1.0),
             context_for: None,
         };
-        let state = state(&long);
+        let state = judged_text(&long.chunk);
         assert!(state.starts_with("Roles > long\n\n"));
         assert_eq!(state.chars().filter(|c| *c == 'x').count(), MAX_STATE_CHARS);
     }

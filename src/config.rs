@@ -145,8 +145,12 @@ pub struct PipelineConfig {
     pub classify: ClassifyConfig,
     /// Who judges the matches, and how many are kept.
     pub rerank: RerankConfig,
+    /// Whether `Admit` screens the reranked sources, and its cutoffs.
+    pub admit: AdmitConfig,
     /// The "why" LLM's token budget.
     pub explain: ExplainConfig,
+    /// How `Verify` checks each claim against the sources it cites, and what it publishes when one fails.
+    pub verify: VerifyConfig,
     /// The shape of a `drew eval tune` candidate's `thresholds`.
     pub thresholds: Thresholds,
     /// Overrides `thresholds` for runs classified into that category.
@@ -167,6 +171,106 @@ pub struct ClassifyConfig {
 pub struct ExplainConfig {
     /// Upper bound on the tokens Explain's model generates, reasoning included on a reasoning model.
     pub max_tokens: MaxTokens,
+}
+
+/// [`PipelineConfig::admit`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AdmitConfig {
+    /// Who screens the sources.
+    pub judge: AdmitJudge,
+}
+
+/// Who screens the reranked sources before `Explain` sees them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmitJudge {
+    /// No screening: every reranked source reaches `Explain`, and the run has no `admit` step.
+    #[default]
+    None,
+    /// System One answers four yes/no questions per match, when System One is configured; without it the run has
+    /// no `admit` step.
+    SystemOne(AdmissionCutoffs),
+}
+
+/// The cutoffs `Admit` routes a match by, applied in field order: an injection or an irrelevant match is excluded,
+/// a match contradicting the question's premise is kept as a conflict, and the rest are kept only with evidence.
+/// Uncalibrated until an eval run fits them.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AdmissionCutoffs {
+    /// Above this probability that the text tries to change the assistant's instructions, the source is excluded.
+    pub injection_max: Probability,
+    /// Below this probability that the text addresses the question's subject, the match is excluded.
+    pub relevant_min: Probability,
+    /// Above this probability that the text contradicts the question's premise, the match is kept as a conflict.
+    pub contradicts_min: Probability,
+    /// At or above this probability that the text states something usable in a direct answer, the match is kept.
+    pub evidence_min: Probability,
+}
+
+impl Default for AdmissionCutoffs {
+    fn default() -> Self {
+        let p = |value| Probability::new(value).expect("the default cutoffs are in 0..=1");
+        Self {
+            injection_max: p(0.7),
+            relevant_min: p(0.45),
+            contradicts_min: p(0.7),
+            evidence_min: p(0.55),
+        }
+    }
+}
+
+/// [`PipelineConfig::verify`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VerifyConfig {
+    /// What a claim must pass besides citing this run's sources.
+    pub support: SupportCheck,
+    /// What `Verify` does with a claim that fails.
+    pub publish: PublishPolicy,
+}
+
+/// How `Verify` checks a claim against the chunks it cites. Every mode first requires a citation and only this
+/// run's sources.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupportCheck {
+    /// Citations only: a claim passes when it cites this run's sources.
+    #[default]
+    Membership,
+    /// Also: every span in backticks or double quotes appears in a cited chunk. No model call.
+    Quotes,
+    /// Also the quote check, then System One judges whether a cited chunk supports the claim, when System One is
+    /// configured; without it, `quotes`.
+    SystemOne(SupportCutoff),
+}
+
+/// [`SupportCheck::SystemOne`].
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SupportCutoff {
+    /// A claim is supported when a cited chunk "supports" it with at least this probability.
+    pub min_support: Probability,
+}
+
+impl Default for SupportCutoff {
+    fn default() -> Self {
+        Self {
+            min_support: Probability::new(0.75).expect("the default cutoff is in 0..=1"),
+        }
+    }
+}
+
+/// What `Verify` publishes when a claim fails its checks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublishPolicy {
+    /// Any failed claim declines the run.
+    #[default]
+    Decline,
+    /// Failed claims are left out and the rest published; the run declines only when none passes.
+    Strip,
 }
 
 /// Explain's chat `max_tokens`, in `1..=`[`MaxTokens::MAX`].

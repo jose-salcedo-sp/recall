@@ -1,13 +1,15 @@
 //! Model clients behind ports: [`Embedder`] for embeddings and [`ChatModel`] for the "why" LLM (Bedrock, or any
-//! OpenAI-compatible server such as Ollama or Workers AI), and [`system_one::SystemOne`] for the "what" (Kev,
-//! system-one.dev, or Clef on Workers AI). This module owns wire formats, timeouts and backend selection; prompts
-//! belong to the pipeline steps that send them.
+//! OpenAI-compatible server such as Ollama or Workers AI), [`system_one::SystemOne`] for the "what" (Kev,
+//! system-one.dev, or Clef on Workers AI), and [`judge::Judge`] for the provenance checks of `Admit` and `Verify`.
+//! This module owns wire formats, timeouts and backend selection; prompts belong to the pipeline steps that send
+//! them.
 
 pub mod backend;
 pub mod bedrock_chat;
 pub mod bedrock_embed;
 #[cfg(any(test, feature = "testing"))]
 pub mod fakes;
+pub mod judge;
 pub mod openai;
 pub mod system_one;
 pub mod workers_ai;

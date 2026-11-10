@@ -86,6 +86,8 @@ pub enum TraceRecord {
     Retrieve(RetrieveRecord),
     /// From `Rerank`.
     Rerank(RerankRecord),
+    /// From `Admit`.
+    Admit(AdmitRecord),
     /// From `Answer`.
     Answer(AnswerRecord),
     /// From `Explain`.
@@ -161,13 +163,173 @@ pub struct ExplainRecord {
     pub contradicts_verdict: bool,
 }
 
-/// What `Verify` rejected; both empty when the answer passed.
+/// How `Admit` screened each reranked source, in `Rerank`'s order.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AdmitRecord {
+    /// Every source `Rerank` kept, matches and their context, with its probabilities and where it was routed.
+    pub sources: Vec<AdmittedSource>,
+}
+
+/// One source's admission.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AdmittedSource {
+    /// The exact version screened.
+    pub chunk: ChunkRef,
+    /// What the judge answered about it.
+    pub screen: Screen,
+    /// Where it went.
+    pub route: AdmissionRoute,
+}
+
+/// The judge's probabilities for one source. A match is asked all four questions; context, which rides with its
+/// match, is only screened for injection.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Screen {
+    /// A match `Rerank` ranked.
+    Match {
+        /// That the text tries to change the assistant's instructions.
+        injection: Probability,
+        /// That it addresses the question's subject.
+        relevant: Probability,
+        /// That it contradicts a premise of the question.
+        contradicts: Probability,
+        /// That it states something usable in a direct answer.
+        evidence: Probability,
+    },
+    /// Context retrieval attached to a match.
+    Context {
+        /// That the text tries to change the assistant's instructions.
+        injection: Probability,
+    },
+}
+
+/// Where `Admit` routed a source. `Admitted` and `Conflict` reach `Explain`; the rest are excluded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionRoute {
+    /// Kept: a match with evidence, or context of a kept match.
+    Admitted,
+    /// Kept: a relevant match that contradicts the question's premise, so the answer can say so.
+    Conflict,
+    /// Excluded: the text tries to change the assistant's instructions.
+    Injection,
+    /// Excluded: the match does not address the question's subject.
+    Irrelevant,
+    /// Excluded: the match is on topic but states nothing usable in an answer.
+    NoEvidence,
+    /// Excluded: context of an excluded match.
+    MatchExcluded,
+}
+
+impl AdmissionRoute {
+    /// Whether the source reaches `Explain`.
+    pub fn is_kept(self) -> bool {
+        matches!(self, Self::Admitted | Self::Conflict)
+    }
+}
+
+/// What `Verify` checked and rejected. `uncited_claims` and `unknown_citations` are both empty when every claim
+/// passed the membership check.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct VerifyRecord {
     /// Claims with no citation.
     pub uncited_claims: Vec<String>,
     /// Cited chunks that are not among this run's reranked sources.
     pub unknown_citations: Vec<ChunkId>,
+    /// The check each cited claim got beyond membership. Records written before it existed checked membership only.
+    #[serde(default)]
+    pub support: SupportMode,
+    /// One verdict per claim that passed the membership check, in claim order; empty under `membership`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claims: Vec<ClaimCheck>,
+    /// How many claims were left out of the published answer under the `strip` policy.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub stripped: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// The check `Verify` ran on each cited claim, after resolving the config against the models available.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupportMode {
+    /// Citations only.
+    #[default]
+    Membership,
+    /// Citations and quoted spans, with no model.
+    Quotes,
+    /// Citations, quoted spans, and a judge asked whether a cited chunk supports the claim.
+    Judged,
+}
+
+/// One claim's verdict.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ClaimCheck {
+    /// The claim as `Explain` wrote it.
+    pub claim: String,
+    /// What the checks found.
+    pub verdict: ClaimVerdict,
+}
+
+/// Whether a cited claim is backed by the chunks it cites.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "verdict", rename_all = "snake_case")]
+pub enum ClaimVerdict {
+    /// Every quoted span is in a cited chunk; under `quotes`, no judge was asked.
+    QuotesFound,
+    /// A quoted span appears in none of the cited chunks; no judge was asked.
+    Fabricated {
+        /// The span, without its quotation marks.
+        span: String,
+    },
+    /// A cited chunk supports the claim; chunks after it were not judged.
+    Supported {
+        /// The supporting judgement.
+        by: Relation,
+    },
+    /// No cited chunk supports the claim, and one contradicts it.
+    Contradicted {
+        /// The contradicting judgement.
+        by: Relation,
+    },
+    /// No cited chunk supports or contradicts the claim with enough probability.
+    Unsupported {
+        /// One judgement per cited chunk, in citation order.
+        relations: Vec<Relation>,
+    },
+}
+
+impl ClaimVerdict {
+    /// Whether the claim may be published.
+    pub fn passed(&self) -> bool {
+        matches!(self, Self::QuotesFound | Self::Supported { .. })
+    }
+}
+
+/// The judge's reading of how one cited chunk relates to a claim.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Relation {
+    /// The chunk judged.
+    pub chunk: ChunkId,
+    /// The most probable relation.
+    pub relation: RelationKind,
+    /// Its probability.
+    pub probability: Probability,
+}
+
+/// How a chunk relates to a claim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationKind {
+    /// The chunk supports the claim.
+    Supports,
+    /// The chunk contradicts the claim.
+    Contradicts,
+    /// The chunk is silent on the claim.
+    SaysNothing,
 }
 
 macro_rules! into_trace_record {
@@ -184,6 +346,7 @@ into_trace_record! {
     ClassifyRecord => Classify,
     RetrieveRecord => Retrieve,
     RerankRecord => Rerank,
+    AdmitRecord => Admit,
     AnswerRecord => Answer,
     ExplainRecord => Explain,
     VerifyRecord => Verify,

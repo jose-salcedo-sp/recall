@@ -7,7 +7,7 @@ use crate::{
     pipeline::{
         DeclineReason,
         steps::{PROMPT_VERSION, fixtures::chunk},
-        trace::{StepOutcome, TraceRecord},
+        trace::{ClaimCheck, ClaimVerdict, StepOutcome, SupportMode, TraceRecord},
     },
     retrieval::fakes::KeywordRetriever,
 };
@@ -610,4 +610,129 @@ async fn the_reranker_asks_system_one_about_each_match() {
             assert_eq!(calls, 1, "{config}: only Classify calls System One");
         }
     }
+}
+
+/// Answers every question of every request: `open` for the category, a low probability for the injection and
+/// contradiction screens and a high one for the others, and `supports` for a relation.
+struct ProvenanceKev;
+
+#[async_trait]
+impl SystemOne for ProvenanceKev {
+    fn model(&self) -> ModelRef {
+        ModelRef::new("provenance-kev", "1")
+    }
+
+    async fn decide(
+        &self,
+        request: crate::llm::system_one::DecisionRequest,
+    ) -> eros::Result<crate::llm::system_one::DecisionResponse> {
+        use std::collections::BTreeMap;
+
+        use crate::llm::system_one::{Decision, DecisionAnswer, DecisionResponse};
+
+        let answers = request
+            .questions
+            .into_iter()
+            .map(|(id, decision)| {
+                let answer = match decision {
+                    Decision::Choice { criteria, .. } => {
+                        let chosen = if id == "category" { "open" } else { "supports" };
+                        DecisionAnswer::Choice {
+                            choice: chosen.into(),
+                            confidence: 0.9,
+                            probabilities: criteria
+                                .0
+                                .into_iter()
+                                .map(|(option, _)| {
+                                    let p = if option == chosen { 0.9 } else { 0.05 };
+                                    (option, p)
+                                })
+                                .collect(),
+                        }
+                    }
+                    Decision::Noul { instructions } => {
+                        let low = instructions.contains("instructions")
+                            || instructions.contains("conflict");
+                        DecisionAnswer::Noul {
+                            noul: if low { 0.05 } else { 0.9 },
+                        }
+                    }
+                    Decision::Score { .. } => DecisionAnswer::Noul { noul: 0.0 },
+                };
+                (id, answer)
+            })
+            .collect::<BTreeMap<_, _>>();
+        Ok(DecisionResponse { answers })
+    }
+}
+
+const PROVENANCE: &str =
+    r#"{"admit": {"judge": {"system_one": {}}}, "verify": {"support": {"system_one": {}}}}"#;
+
+#[tokio::test]
+async fn admission_and_the_support_check_run_on_system_one_when_configured() {
+    let agr = agr_users();
+    let chat = Arc::new(ScriptedChat::replying([reply(&json!([
+        { "text": "AGR_USERS maps users to roles.", "chunk_ids": [agr.id] },
+    ]))]));
+    let answerer = answerer(corpus(), &chat)
+        .with_system_one(Arc::new(ProvenanceKev))
+        .with_config(PipelineConfig::parse(PROVENANCE).unwrap());
+    let models = answerer.models();
+
+    let report = answerer.answer(Question::new(QUESTION)).await;
+
+    assert!(
+        matches!(report.outcome, Outcome::Answered(_)),
+        "{:?}",
+        report.outcome
+    );
+    let names: Vec<_> = steps(&report).into_iter().map(|(step, _)| step).collect();
+    assert_eq!(
+        names,
+        [
+            "classify", "retrieve", "rerank", "admit", "explain", "verify"
+        ]
+    );
+    let TraceRecord::Admit(admit) = record(&report, "admit") else {
+        panic!("expected the admit record");
+    };
+    assert!(!admit.sources.is_empty());
+    assert!(admit.sources.iter().all(|source| source.route.is_kept()));
+    let TraceRecord::Verify(verify) = record(&report, "verify") else {
+        panic!("expected the verify record");
+    };
+    assert_eq!(verify.support, SupportMode::Judged);
+    assert!(matches!(
+        verify.claims[..],
+        [ClaimCheck {
+            verdict: ClaimVerdict::Supported { .. },
+            ..
+        }]
+    ));
+    let judge = Some(ModelRef::new("provenance-kev", "1"));
+    assert_eq!(models.admit, judge);
+    assert_eq!(models.verify, judge);
+}
+
+#[tokio::test]
+async fn without_system_one_admission_is_skipped_and_support_falls_back_to_quotes() {
+    let agr = agr_users();
+    let chat = Arc::new(ScriptedChat::replying([reply(&json!([
+        { "text": "`AGR_USERS` maps users to roles.", "chunk_ids": [agr.id] },
+    ]))]));
+    let answerer =
+        answerer(corpus(), &chat).with_config(PipelineConfig::parse(PROVENANCE).unwrap());
+    let models = answerer.models();
+
+    let report = answerer.answer(Question::new(QUESTION)).await;
+
+    assert!(matches!(report.outcome, Outcome::Answered(_)));
+    assert!(!steps(&report).iter().any(|(step, _)| *step == "admit"));
+    let TraceRecord::Verify(verify) = record(&report, "verify") else {
+        panic!("expected the verify record");
+    };
+    assert_eq!(verify.support, SupportMode::Quotes);
+    assert_eq!(models.admit, None);
+    assert_eq!(models.verify, None);
 }

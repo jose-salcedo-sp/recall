@@ -1,4 +1,5 @@
-//! The real `Answerer`: classify and retrieve in parallel, join on the category, then drive its pipeline.
+//! The real `Answerer`: classify and retrieve in parallel, join on the category, rerank and, when configured, admit
+//! the sources, then drive the category's pipeline.
 
 use std::{collections::HashSet, sync::Arc};
 
@@ -7,11 +8,12 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 use crate::{
-    config::{ConfigArgs, PipelineConfig, StepName},
+    config::{AdmitConfig, AdmitJudge, ConfigArgs, PipelineConfig, StepName},
     domain::{CategoryKind, Chunk, Provenance, Question, RunId},
     llm::{
         self, ChatModel, ModelRef,
         backend::{ChatArgs, EmbedArgs, SystemOneArgs},
+        judge::{Judge, SystemOneJudge},
         system_one::SystemOne,
     },
     retrieval::{Retrieved, Retriever, hybrid::HybridRetriever},
@@ -21,8 +23,8 @@ use super::{
     Boolean, Category, Choice, Halt, Halted, Open, Pipeline, Ranking, Run, Seq, Unclassified,
     report::{Answer, Answerer, Citation, Outcome, RunReport, Verdict},
     steps::{
-        Answer as AnswerStep, Candidates, Classify, Decisive, Explain, OpenEnded, Rerank, Reranked,
-        Retrieve, Verified, Verify,
+        Admit, Answer as AnswerStep, Candidates, Classify, Decisive, Explain, OpenEnded, Rerank,
+        Reranked, Retrieve, Verified, Verify,
     },
     trace::Trace,
 };
@@ -53,7 +55,7 @@ pub struct PipelineArgs {
     /// The `Explain` LLM.
     #[command(flatten)]
     pub chat: ChatArgs,
-    /// System One, for `Classify`, `Answer`, and `Rerank` when `rerank.judge` names it.
+    /// System One, for `Classify`, `Answer`, and `Rerank`, `Admit` and `Verify` when their config names it.
     #[command(flatten)]
     pub system_one: SystemOneArgs,
 }
@@ -71,6 +73,13 @@ pub struct Models {
     /// is not configured. Also `None` in files written before it was recorded, whose config says who judged.
     #[serde(default)]
     pub rerank: Option<ModelRef>,
+    /// The `Admit` judge. `None`: runs have no `admit` step, because `admit.judge` is `none` or System One is not
+    /// configured. Also `None` in files written before admission existed.
+    #[serde(default)]
+    pub admit: Option<ModelRef>,
+    /// The `Verify` support judge. `None`: claims are checked by membership, or quoted spans, only.
+    #[serde(default)]
+    pub verify: Option<ModelRef>,
 }
 
 /// The production [`Answerer`]: builds every step and pipeline once, then answers questions concurrently.
@@ -83,6 +92,8 @@ pub struct PipelineAnswerer {
     retrieve: Retrieve,
     rerank_open: Rerank<Open>,
     rerank_boolean: Rerank<Boolean>,
+    admit_open: Option<Admit<Open>>,
+    admit_boolean: Option<Admit<Boolean>>,
     open: OpenEnded,
     boolean: Decisive<Boolean>,
 }
@@ -107,6 +118,9 @@ impl PipelineAnswerer {
         system_one: Option<Arc<dyn SystemOne>>,
     ) -> Self {
         let threshold = |category, step| config.threshold(category, step);
+        let judge = system_one.as_ref().map(|system_one| {
+            Arc::new(SystemOneJudge::new(Arc::clone(system_one))) as Arc<dyn Judge>
+        });
         Self {
             classify: Classify::new(system_one.clone())
                 .with_min_confidence(config.classify.min_confidence),
@@ -121,9 +135,11 @@ impl PipelineAnswerer {
                 threshold(CategoryKind::Boolean, StepName::Rerank),
                 system_one.clone(),
             ),
+            admit_open: admit(&config.admit, judge.as_ref()),
+            admit_boolean: admit(&config.admit, judge.as_ref()),
             open: Seq(
                 Explain::new(Arc::clone(&explain), config.explain.max_tokens),
-                Verify::new(),
+                Verify::from_config(&config.verify, judge.clone()),
             ),
             boolean: Seq(
                 AnswerStep::new(
@@ -132,7 +148,7 @@ impl PipelineAnswerer {
                 ),
                 Seq(
                     Explain::new(Arc::clone(&explain), config.explain.max_tokens),
-                    Verify::new(),
+                    Verify::from_config(&config.verify, judge),
                 ),
             ),
             config,
@@ -142,7 +158,7 @@ impl PipelineAnswerer {
         }
     }
 
-    /// Classify and Answer on System One, and Rerank when `rerank.judge` names it.
+    /// Classify and Answer on System One, and Rerank, Admit and Verify's support check when their config names it.
     pub fn with_system_one(self, system_one: Arc<dyn SystemOne>) -> Self {
         Self::build(
             self.config,
@@ -180,12 +196,14 @@ impl PipelineAnswerer {
                 .as_ref()
                 .map(|system_one| system_one.model()),
             rerank: self.rerank_open.judged_by(),
+            admit: self.admit_open.as_ref().map(Admit::judged_by),
+            verify: self.open.1.judged_by(),
         }
     }
 
     /// Hybrid retrieval and `Explain` on Bedrock or OpenAI-compatible servers; `Classify` and `Answer` on System
-    /// One when configured, and `Rerank` too when `rerank.judge` names it. Every tunable comes from the pipeline
-    /// config file.
+    /// One when configured, and `Rerank`, `Admit` and `Verify`'s support check too when their config names it.
+    /// Every tunable comes from the pipeline config file.
     ///
     /// # Errors
     ///
@@ -215,13 +233,16 @@ impl PipelineAnswerer {
         let category = run.state().0;
         let run: Run<Unclassified, Candidates> = run.map(|(_, candidates)| candidates);
         let classified = match category {
-            CategoryKind::Boolean => Classified::Boolean(
-                run.classified::<Boolean>()
+            CategoryKind::Boolean => {
+                let run = run
+                    .classified::<Boolean>()
                     .then(&self.rerank_boolean)
-                    .await?,
-            ),
+                    .await?;
+                Classified::Boolean(admitted(run, self.admit_boolean.as_ref()).await?)
+            }
             CategoryKind::Choice | CategoryKind::Ranking | CategoryKind::Open => {
-                Classified::Open(run.classified::<Open>().then(&self.rerank_open).await?)
+                let run = run.classified::<Open>().then(&self.rerank_open).await?;
+                Classified::Open(admitted(run, self.admit_open.as_ref()).await?)
             }
         };
         Ok((category, classified))
@@ -266,6 +287,28 @@ impl Answerer for PipelineAnswerer {
         };
         report.category = Some(category);
         report
+    }
+}
+
+/// `Admit` for the config's judge; `None` when admission is off or no judge is configured.
+fn admit<TCategory>(
+    config: &AdmitConfig,
+    judge: Option<&Arc<dyn Judge>>,
+) -> Option<Admit<TCategory>> {
+    match config.judge {
+        AdmitJudge::None => None,
+        AdmitJudge::SystemOne(cutoffs) => judge.map(|judge| Admit::new(Arc::clone(judge), cutoffs)),
+    }
+}
+
+/// The reranked run, screened by `admit` when the pipeline has that step.
+async fn admitted<TCategory: Category>(
+    run: Run<TCategory, Reranked>,
+    admit: Option<&Admit<TCategory>>,
+) -> Result<Run<TCategory, Reranked>, Halted> {
+    match admit {
+        Some(admit) => run.then(admit).await,
+        None => Ok(run),
     }
 }
 

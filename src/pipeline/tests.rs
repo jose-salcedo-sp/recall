@@ -70,7 +70,7 @@ impl Step for Refuse {
             StepError::decline(DeclineReason::InvalidModelOutput("not json".into()))
                 .with_record(VerifyRecord {
                     uncited_claims: vec!["raw".into()],
-                    unknown_citations: vec![],
+                    ..VerifyRecord::default()
                 })
                 .with_model(ModelRef::new("refuser", "1"), "refuse-v1"),
         )
@@ -78,10 +78,7 @@ impl Step for Refuse {
 }
 
 fn empty_record() -> VerifyRecord {
-    VerifyRecord {
-        uncited_claims: vec![],
-        unknown_citations: vec![],
-    }
+    VerifyRecord::default()
 }
 
 fn open_run() -> Run<Open, Asked> {
