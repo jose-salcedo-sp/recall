@@ -9,7 +9,7 @@ The core is domain-free. Corpora, answering rules, golden sets and front ends be
 
 ## What it does
 
-- **Ingest**: a `Source` port returns document snapshots; chunks are content-addressed (`ChunkRef {id, version}`), so a trace stays reproducible after the corpus changes. A markdown-directory connector ships.
+- **Ingest**: a `Source` port returns document snapshots; chunks are content-addressed (`ChunkRef {id, version}`), so a trace stays reproducible after the corpus changes. A markdown-directory connector ships; any other connector names itself and plugs in through `ingest::run_with` without a core or schema change.
 - **Retrieve**: hybrid full-text (BM25 over prose, exact identifier tokens) and vector search in Postgres with pgvector, fused by reciprocal rank, with neighbouring sections as context and optional glossary expansion.
 - **Decide and explain**: a decision model (System One) classifies the question and answers yes/no questions with calibrated probabilities; an LLM writes the answer as claims whose citations are constrained to this run's chunks.
 - **Provenance checks**: a vendor-neutral `Judge` port screens sources before they reach the LLM (injection, relevance, contradiction, evidence) and checks each claim against the chunks it cites (quoted spans, then supports / contradicts / says nothing). Failed claims decline the run or are stripped.
@@ -202,7 +202,7 @@ Each model port names its backend, with no default. A backend's missing or unpar
 | Path | Contents |
 |---|---|
 | `src/domain.rs` | Shared types: questions, chunks and their versions, citations, provenance, probabilities |
-| `src/ingest/` | The `Source` port, versioning and embedding; `markdown.rs` is the markdown-directory connector |
+| `src/ingest/` | The `Source` port, its contract suite and fakes, versioning and embedding; `markdown.rs` is the markdown-directory connector |
 | `src/retrieval/` | The `Retriever` port and the hybrid Postgres retriever |
 | `src/llm/` | Model ports (`Embedder`, `ChatModel`, `SystemOne`, `Judge`), their adapters and fakes |
 | `src/pipeline/` | Typed pipeline, steps (`Classify`, `Retrieve`, `Rerank`, `Admit`, `Answer`, `Explain`, `Verify`), trace and report |

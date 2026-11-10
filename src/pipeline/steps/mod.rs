@@ -83,16 +83,17 @@ fn ranked(hits: &[Retrieved]) -> Vec<RankedChunk> {
 #[cfg(test)]
 pub(crate) mod fixtures {
     use crate::domain::{
-        Chunk, ChunkId, ChunkVersion, DocumentId, Labels, Sensitivity, SourceKind,
+        Chunk, ChunkId, ChunkVersion, DocumentId, Labels, Sensitivity, SourceName,
     };
 
     pub fn chunk(locator: &str, title: &str, text: &str) -> Chunk {
-        let document_id = DocumentId::new(SourceKind::Markdown, title);
+        let source = SourceName::from_static("markdown");
+        let document_id = DocumentId::new(&source, title);
         Chunk {
             id: ChunkId::new(&document_id, locator),
             version: ChunkVersion(format!("v-{locator}")),
             document_id,
-            source: SourceKind::Markdown,
+            source,
             title: title.into(),
             heading: Some(locator.into()),
             url: format!("https://example.test/docs/{title}#{locator}"),

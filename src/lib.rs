@@ -34,7 +34,7 @@
 //!
 //! | Port | Production adapter |
 //! |---|---|
-//! | [`ingest::Source`] | [`ingest::markdown::Connector`], the markdown directory, the only corpus source |
+//! | [`ingest::Source`] | [`ingest::markdown::Connector`], the markdown directory; a domain passes its own connectors to [`ingest::run_with`] |
 //! | [`llm::Embedder`] | Bedrock or an OpenAI-compatible server (Ollama, Workers AI), chosen by [`llm::embedder`] |
 //! | [`llm::ChatModel`] | Bedrock or an OpenAI-compatible server (Ollama, Workers AI), chosen by [`llm::explain_model`] |
 //! | [`llm::system_one::SystemOne`] | [`llm::system_one::HttpSystemOne`] (Kev, system-one.dev) or [`llm::workers_ai::WorkersAiSystemOne`], chosen by [`llm::system_one_client`] |

@@ -25,7 +25,7 @@ Guiding constraints:
 
 ## 2. Corpus and ingestion
 
-The `Source` port returns a full snapshot of documents; `ingest` versions, embeds and stores them. The shipped connector reads a directory of markdown files:
+The `Source` port returns a full snapshot of documents; `ingest` versions, embeds and stores them. A connector names itself with a `SourceName` (one or more of `a-z`, `0-9`, `_`, `-`), which prefixes its document ids (`{source}:{external_id}`) and scopes its snapshot: a snapshot supersedes only documents stored under its own name, so one ingestion rejects two connectors of one name. Neither the core nor the schema lists the names, so a domain adds a connector without editing recall: it implements `Source`, passes it to `ingest::run_with` (or `ingest`), and runs the port's contract suite (`recall::source_contract!`, `testing` feature) against it. The shipped connector reads a directory of markdown files:
 
 - Each file is one document; each ATX heading section is one chunk. Optional `RECALL_DOCS_BASE_URL` turns paths into citation links.
 - Two layers, chosen by path under the root: `RECALL_DOCS_AUTHORITATIVE` (settled answers; default the whole root) and `RECALL_DOCS_EVIDENCE` (supporting material, ingested with `authoritative = false`). `RECALL_DOCS_SKIP` leaves paths out even inside a layer. The longest listed path containing a file decides its layer; files under no listed path are not ingested. This keeps answer keys, drafts and working notes out of the corpus.

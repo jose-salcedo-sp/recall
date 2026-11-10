@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::{
-    domain::{Chunk, ChunkId, ChunkRef, ChunkVersion, DocumentId, Labels, Sensitivity, SourceKind},
+    domain::{Chunk, ChunkId, ChunkRef, ChunkVersion, DocumentId, Labels, Sensitivity, SourceName},
     llm::{EmbedPurpose, Embedder, ModelRef},
 };
 
@@ -599,8 +599,7 @@ impl TryFrom<ChunkRow> for Chunk {
     type Error = eros::ErrorUnion;
 
     fn try_from(row: ChunkRow) -> eros::Result<Self> {
-        let source = SourceKind::try_from(row.source.as_str())
-            .with_context(|| format!("chunk {}", row.id))?;
+        let source = SourceName::new(row.source).with_context(|| format!("chunk {}", row.id))?;
         let sensitivity = Sensitivity::try_from(row.sensitivity.as_str())
             .with_context(|| format!("chunk {}", row.id))?;
         Ok(Chunk {

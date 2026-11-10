@@ -10,7 +10,8 @@ mod seed;
 use std::sync::Arc;
 
 use recall::{
-    domain::{ChunkId, SourceKind},
+    domain::{ChunkId, SourceName},
+    ingest::markdown,
     llm::{Embedder, ModelRef, fakes::HashEmbedder},
     retrieval::{
         Relevance, Retrieved, Retriever,
@@ -43,7 +44,7 @@ fn position(results: &[Retrieved], id: &ChunkId) -> Option<usize> {
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn identifier_queries_match_exactly_via_full_text(pool: PgPool) {
     let chunk = async |key: &str, text: &str| {
-        let doc = document(&pool, SourceKind::Markdown, key, key).await;
+        let doc = document(&pool, &markdown::NAME, key, key).await;
         SeedChunk::new(&doc, "body", 0, text).insert(&pool).await
     };
     let a_opcode = chunk(
@@ -96,12 +97,12 @@ async fn identifier_queries_match_exactly_via_full_text(pool: PgPool) {
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn identifiers_in_headings_and_markdown_are_indexed(pool: PgPool) {
-    let page = document(&pool, SourceKind::Markdown, "10", "Tables").await;
+    let page = document(&pool, &markdown::NAME, "10", "Tables").await;
     let heading = SeedChunk::new(&page, "role-1251", 0, "Authorization values per role.")
         .heading("ROLE_1251")
         .insert(&pool)
         .await;
-    let notes = document(&pool, SourceKind::Markdown, "notes.md", "Notes").await;
+    let notes = document(&pool, &markdown::NAME, "notes.md", "Notes").await;
     let italic = SeedChunk::new(&notes, "body", 0, "check _USOBT_C_ first")
         .insert(&pool)
         .await;
@@ -116,7 +117,7 @@ async fn identifiers_in_headings_and_markdown_are_indexed(pool: PgPool) {
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn a_rare_term_outranks_repeats_of_a_common_one(pool: PgPool) {
     let chunk = async |key: &str, text: &str| {
-        let doc = document(&pool, SourceKind::Markdown, key, key).await;
+        let doc = document(&pool, &markdown::NAME, key, key).await;
         SeedChunk::new(&doc, "body", 0, text).insert(&pool).await
     };
     let rare = chunk("payroll.md", "Payroll runs at month end.").await;
@@ -144,7 +145,7 @@ async fn a_rare_term_outranks_repeats_of_a_common_one(pool: PgPool) {
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn tsquery_syntax_in_a_question_is_plain_text(pool: PgPool) {
-    let doc = document(&pool, SourceKind::Markdown, "obrien.md", "Owners").await;
+    let doc = document(&pool, &markdown::NAME, "obrien.md", "Owners").await;
     let id = SeedChunk::new(&doc, "body", 0, "O'Brien owns the built-in roles.")
         .insert(&pool)
         .await;
@@ -158,7 +159,7 @@ async fn tsquery_syntax_in_a_question_is_plain_text(pool: PgPool) {
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn prose_query_hits_via_vectors(pool: PgPool) {
     let question = "how do I take away someone's access when they quit";
-    let doc = document(&pool, SourceKind::Markdown, "note-7.md", "Leavers").await;
+    let doc = document(&pool, &markdown::NAME, "note-7.md", "Leavers").await;
     // Stands in for a semantic embedding: the chunk shares no stem with the question, only meaning.
     let leavers = SeedChunk::new(
         &doc,
@@ -173,7 +174,7 @@ async fn prose_query_hits_via_vectors(pool: PgPool) {
         ("note-8.md", "Transport roles between clients with SCC1."),
         ("note-9.md", "Payroll cluster tables are read with macros."),
     ] {
-        let doc = document(&pool, SourceKind::Markdown, key, key).await;
+        let doc = document(&pool, &markdown::NAME, key, key).await;
         SeedChunk::new(&doc, "body", 0, text).insert(&pool).await;
     }
 
@@ -195,7 +196,7 @@ async fn fusion_orders_by_reciprocal_rank(pool: PgPool) {
     let query = "A_OPCODE authorization check";
     let q = embed(query).await;
     let chunk = async |key: &str, text: &str, cosine: f32| {
-        let doc = document(&pool, SourceKind::Markdown, key, key).await;
+        let doc = document(&pool, &markdown::NAME, key, key).await;
         SeedChunk::new(&doc, "body", 0, text)
             .embedding(similar_to(&q, cosine))
             .insert(&pool)
@@ -237,7 +238,7 @@ async fn fusion_orders_by_reciprocal_rank(pool: PgPool) {
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn superseded_versions_are_never_returned(pool: PgPool) {
-    let page = document(&pool, SourceKind::Markdown, "20", "Start authorization").await;
+    let page = document(&pool, &markdown::NAME, "20", "Start authorization").await;
     SeedChunk::new(&page, "intro", 0, "Intro, old wording.")
         .version("old-intro")
         .superseded()
@@ -265,7 +266,7 @@ async fn superseded_versions_are_never_returned(pool: PgPool) {
     .version("new-check")
     .insert(&pool)
     .await;
-    let gone = document(&pool, SourceKind::Markdown, "deleted.md", "Deleted file").await;
+    let gone = document(&pool, &markdown::NAME, "deleted.md", "Deleted file").await;
     let deleted = SeedChunk::new(&gone, "body", 0, "A_OPCODE in a deleted file.")
         .superseded()
         .insert(&pool)
@@ -286,7 +287,7 @@ async fn superseded_versions_are_never_returned(pool: PgPool) {
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn hits_expand_to_neighbouring_sections(pool: PgPool) {
-    let page = document(&pool, SourceKind::Markdown, "30", "OP24 guide").await;
+    let page = document(&pool, &markdown::NAME, "30", "OP24 guide").await;
     let mut sections = Vec::new();
     for (ordinal, text) in [
         "Overview of proposal values.",
@@ -304,7 +305,7 @@ async fn hits_expand_to_neighbouring_sections(pool: PgPool) {
             .await;
         sections.push(section);
     }
-    let sparse = document(&pool, SourceKind::Markdown, "31", "Sparse").await;
+    let sparse = document(&pool, &markdown::NAME, "31", "Sparse").await;
     let first = SeedChunk::new(&sparse, "a", 0, "Background.")
         .insert(&pool)
         .await;
@@ -338,7 +339,7 @@ async fn hits_expand_to_neighbouring_sections(pool: PgPool) {
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn expansion_dedupes_and_caps_per_page(pool: PgPool) {
-    let page = document(&pool, SourceKind::Markdown, "40", "Start checks").await;
+    let page = document(&pool, &markdown::NAME, "40", "Start checks").await;
     let mut sections = Vec::new();
     for (ordinal, text) in [
         "Overview of the start check.",
@@ -381,20 +382,14 @@ async fn expansion_dedupes_and_caps_per_page(pool: PgPool) {
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn adjacent_hits_expand_and_single_section_files_stand_alone(pool: PgPool) {
-    let guide = document(
-        &pool,
-        SourceKind::Markdown,
-        "import-fails.md",
-        "Import fails",
-    )
-    .await;
+    let guide = document(&pool, &markdown::NAME, "import-fails.md", "Import fails").await;
     let symptom = SeedChunk::new(&guide, "symptom", 0, "Import fails on the role upload.")
         .insert(&pool)
         .await;
     let cause = SeedChunk::new(&guide, "cause", 1, "Cause: OP24 data was missing.")
         .insert(&pool)
         .await;
-    let faq = document(&pool, SourceKind::Markdown, "op24-faq.md", "OP24 FAQ").await;
+    let faq = document(&pool, &markdown::NAME, "op24-faq.md", "OP24 FAQ").await;
     let answer = SeedChunk::new(&faq, "body", 0, "Is OP24 transported? Yes.")
         .insert(&pool)
         .await;
@@ -424,7 +419,7 @@ async fn adjacent_hits_expand_and_single_section_files_stand_alone(pool: PgPool)
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn chunks_are_fully_populated(pool: PgPool) {
-    let page = document(&pool, SourceKind::Markdown, "50", "Role design").await;
+    let page = document(&pool, &markdown::NAME, "50", "Role design").await;
     let id = SeedChunk::new(
         &page,
         "naming",
@@ -444,7 +439,7 @@ async fn chunks_are_fully_populated(pool: PgPool) {
     assert_eq!(chunk.id, id);
     assert_eq!(chunk.version.0, "v1");
     assert_eq!(chunk.document_id, page);
-    assert_eq!(chunk.source, SourceKind::Markdown);
+    assert_eq!(chunk.source, markdown::NAME);
     assert_eq!(chunk.title, "Role design");
     assert_eq!(chunk.heading.as_deref(), Some("Naming"));
     assert_eq!(chunk.url, "https://example.test/markdown:50#naming");
@@ -455,7 +450,7 @@ async fn chunks_are_fully_populated(pool: PgPool) {
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn mismatched_embedding_model_is_refused(pool: PgPool) {
     let titan = ModelRef::new("amazon.titan-embed-text-v2", "2");
-    let doc = document(&pool, SourceKind::Markdown, "note-12.md", "Roles").await;
+    let doc = document(&pool, &markdown::NAME, "note-12.md", "Roles").await;
     SeedChunk::new(&doc, "old", 0, "ROLE_USERS old vectors.")
         .model(titan.clone())
         .superseded()
@@ -487,7 +482,7 @@ async fn mismatched_embedding_model_is_refused(pool: PgPool) {
 async fn empty_corpus_and_blank_query_return_nothing(pool: PgPool) {
     let retriever = retriever(&pool, HybridConfig::default());
     assert!(retriever.retrieve("ROLE_USERS").await.unwrap().is_empty());
-    let doc = document(&pool, SourceKind::Markdown, "note-13.md", "Roles").await;
+    let doc = document(&pool, &markdown::NAME, "note-13.md", "Roles").await;
     SeedChunk::new(&doc, "body", 0, "ROLE_USERS")
         .insert(&pool)
         .await;
@@ -497,7 +492,7 @@ async fn empty_corpus_and_blank_query_return_nothing(pool: PgPool) {
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn vector_side_uses_hnsw_beyond_its_default_ef_search(pool: PgPool) {
     for i in 0..60 {
-        let doc = document(&pool, SourceKind::Markdown, &format!("V-{i}"), "filler").await;
+        let doc = document(&pool, &markdown::NAME, &format!("V-{i}"), "filler").await;
         SeedChunk::new(&doc, "body", 0, &format!("note {i} on payroll"))
             .insert(&pool)
             .await;
@@ -533,36 +528,36 @@ async fn vector_side_uses_hnsw_beyond_its_default_ef_search(pool: PgPool) {
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn recall_at_k_on_fixture_set(pool: PgPool) {
-    let chunk = async |source: SourceKind, key: &str, text: &str| {
+    let chunk = async |source: &SourceName, key: &str, text: &str| {
         let doc = document(&pool, source, key, key).await;
         SeedChunk::new(&doc, "body", 0, text).insert(&pool).await
     };
     let start = chunk(
-        SourceKind::Markdown,
+        &markdown::NAME,
         "60",
         "The kernel checks A_OPCODE before any transaction starts.",
     )
     .await;
     let assignments = chunk(
-        SourceKind::Markdown,
+        &markdown::NAME,
         "61",
         "ROLE_USERS lists which users hold which roles, with validity dates.",
     )
     .await;
     let proposals = chunk(
-        SourceKind::Markdown,
+        &markdown::NAME,
         "note-20.md",
         "OP24 proposal values feed ROLEADM when roles are built.",
     )
     .await;
     let tables = chunk(
-        SourceKind::Markdown,
+        &markdown::NAME,
         "tables.md",
         "A_TABLE_GRP protects table maintenance by authorization group.",
     )
     .await;
     let leavers = chunk(
-        SourceKind::Markdown,
+        &markdown::NAME,
         "leavers.md",
         "Leavers are locked first, then their roles are removed.",
     )
@@ -571,7 +566,7 @@ async fn recall_at_k_on_fixture_set(pool: PgPool) {
         .into_iter()
         .enumerate()
     {
-        chunk(SourceKind::Markdown, &format!("note-3{i}.md"), text).await;
+        chunk(&markdown::NAME, &format!("note-3{i}.md"), text).await;
     }
     let golden: [(&str, &[&ChunkId]); 5] = [
         ("Is A_OPCODE checked at transaction start?", &[&start]),
@@ -604,7 +599,7 @@ async fn recall_at_k_on_fixture_set(pool: PgPool) {
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn a_glossary_synonym_retrieves_its_target(pool: PgPool) {
-    let lexicon = document(&pool, SourceKind::Markdown, "LEXICON.md", "Lexicon").await;
+    let lexicon = document(&pool, &markdown::NAME, "LEXICON.md", "Lexicon").await;
     let row = SeedChunk::new(
         &lexicon,
         "generations",
@@ -614,7 +609,7 @@ async fn a_glossary_synonym_retrieves_its_target(pool: PgPool) {
     )
     .insert(&pool)
     .await;
-    let doc = document(&pool, SourceKind::Markdown, "change.md", "Change").await;
+    let doc = document(&pool, &markdown::NAME, "change.md", "Change").await;
     let target = SeedChunk::new(
         &doc,
         "body",

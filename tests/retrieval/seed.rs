@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use pgvector::Vector;
 use recall::{
-    domain::{ChunkId, DocumentId, SourceKind},
+    domain::{ChunkId, DocumentId, SourceName},
     llm::{EMBEDDING_DIM, EmbedPurpose, Embedder, ModelRef, fakes::HashEmbedder},
     retrieval::Retrieved,
 };
@@ -12,7 +12,7 @@ use sqlx::PgPool;
 
 pub async fn document(
     pool: &PgPool,
-    source: SourceKind,
+    source: &SourceName,
     external_id: &str,
     title: &str,
 ) -> DocumentId {
