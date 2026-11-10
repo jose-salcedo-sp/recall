@@ -1,0 +1,13 @@
+[profile.default]
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.default.overrides]]
+# HNSW search is approximate: over 60 near-identical vectors it can return fewer than the 50 asked for.
+filter = 'test(vector_side_uses_hnsw_beyond_its_default_ef_search)'
+retries = 2
+
+[profile.ci]
+fail-fast = false
+
+[profile.ci.junit]
+path = "junit.xml"

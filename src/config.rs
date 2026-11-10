@@ -1,141 +1,903 @@
-use std::time::Duration;
+//! Every pipeline tunable in one JSON file (`config/recall.json`), so `recall eval` can print and record what it ran with.
 
-/// Knobs from plan.md. Local admission is CPU Laya; fitted cutoffs transfer,
-/// `max_inflight` does not.
-#[derive(Debug, Clone)]
-pub struct Config {
-    pub bind_addr: String,
-    pub database_url: String,
-    pub embedder_url: String,
-    pub embedding_model: String,
-    pub embedding_dim: usize,
-    pub system_one_url: String,
-    pub generator_url: String,
-    pub generator_model: String,
+use std::{
+    collections::BTreeMap,
+    fmt, fs,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
-    pub service_token: Option<String>,
-    pub persist_asks: bool,
-    pub index_writes_enabled: bool,
+use serde::{Deserialize, Serialize};
 
-    pub retrieve_k: i32,
-    pub admit_batch_size: usize,
-    pub injection_max: f64,
-    pub contradicts_min: f64,
-    pub relevant_min: f64,
-    pub evidence_min: f64,
-    pub admit_thresholds_calibrated: bool,
-    pub max_citations: usize,
-    pub max_inflight: usize,
-    pub kind_confidence_min: f64,
-    pub cite_confidence_min: f64,
-    pub verify_regen_max: u32,
+use crate::{
+    domain::{CategoryKind, Probability},
+    retrieval::hybrid::HybridConfig,
+};
 
-    pub embed_timeout: Duration,
-    pub index_timeout: Duration,
-    pub admit_timeout: Duration,
-    pub ask_timeout: Duration,
-    pub stage_ping_interval: Duration,
+/// Read when neither `--config` nor `RECALL_CONFIG` names a file; relative to the working directory.
+pub const DEFAULT_PATH: &str = "config/recall.json";
+
+/// A step whose score `Run::then` checks against a threshold. `classify` has `classify.min_confidence` instead,
+/// which falls back to `open` rather than declining; `explain` and `verify` are not scored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(into = "&'static str", try_from = "String")]
+pub enum StepName {
+    /// [`crate::pipeline::steps::Rerank`], scored by the best kept match's probability.
+    Rerank,
+    /// [`crate::pipeline::steps::Answer`], scored by the verdict's confidence.
+    Answer,
 }
 
-fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+impl StepName {
+    /// Every variant, in declaration order.
+    pub const ALL: [Self; 2] = [Self::Rerank, Self::Answer];
+
+    /// The step's `Step::NAME`, as recorded in the trace.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rerank => "rerank",
+            Self::Answer => "answer",
+        }
+    }
 }
 
-fn env_str(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
+impl fmt::Display for StepName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
-impl Config {
-    pub fn from_env() -> Self {
+impl From<StepName> for &'static str {
+    fn from(step: StepName) -> Self {
+        step.as_str()
+    }
+}
+
+/// A step name with no threshold, rejected when parsing a config or tune candidate.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "no threshold applies to step `{0}`; thresholded steps are {steps} (classify uses classify.min_confidence)",
+    steps = StepName::ALL.map(StepName::as_str).join(", ")
+)]
+pub struct UnknownStep(String);
+
+impl FromStr for StepName {
+    type Err = UnknownStep;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|step| step.as_str() == name)
+            .ok_or_else(|| UnknownStep(name.to_owned()))
+    }
+}
+
+impl TryFrom<String> for StepName {
+    type Error = UnknownStep;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        name.parse()
+    }
+}
+
+/// Minimum score per thresholded step. A step not listed has no threshold.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Thresholds(BTreeMap<StepName, Probability>);
+
+impl Thresholds {
+    /// `None` when the step is not listed, so it has no threshold.
+    pub fn get(&self, step: StepName) -> Option<Probability> {
+        self.0.get(&step).copied()
+    }
+
+    /// No step is listed.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl FromIterator<(StepName, Probability)> for Thresholds {
+    fn from_iter<T: IntoIterator<Item = (StepName, Probability)>>(iter: T) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
+/// Where to load the [`PipelineConfig`] from.
+#[derive(Clone, Debug, Default, clap::Args)]
+pub struct ConfigArgs {
+    /// Pipeline configuration JSON. Unset: `config/recall.json` when it exists, else built-in defaults.
+    #[arg(long = "config", env = "RECALL_CONFIG")]
+    pub path: Option<PathBuf>,
+}
+
+impl ConfigArgs {
+    /// Loads and validates the config. An empty `RECALL_CONFIG`, as in `.env.example`, counts as unset.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be read, is not valid JSON, has unknown keys, or fails [`PipelineConfig::parse`]'s checks.
+    pub fn load(&self) -> eros::Result<PipelineConfig> {
+        match self
+            .path
+            .as_ref()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            Some(path) => PipelineConfig::read(path),
+            None if Path::new(DEFAULT_PATH).exists() => {
+                PipelineConfig::read(Path::new(DEFAULT_PATH))
+            }
+            None => {
+                tracing::warn!("no {DEFAULT_PATH} and no --config; using built-in defaults");
+                Ok(PipelineConfig::default())
+            }
+        }
+    }
+}
+
+/// Every pipeline tunable. Missing keys take their defaults; unknown keys are rejected.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PipelineConfig {
+    /// Hybrid search tunables.
+    pub retrieval: HybridConfig,
+    /// When a classification is confident enough to leave the `open` path.
+    pub classify: ClassifyConfig,
+    /// Who judges the matches, and how many are kept.
+    pub rerank: RerankConfig,
+    /// Whether `Admit` screens the reranked sources, and its cutoffs.
+    pub admit: AdmitConfig,
+    /// The "why" LLM's token budget.
+    pub explain: ExplainConfig,
+    /// How `Verify` checks each claim against the sources it cites, and what it publishes when one fails.
+    pub verify: VerifyConfig,
+    /// The shape of a `recall eval tune` candidate's `thresholds`.
+    pub thresholds: Thresholds,
+    /// Overrides `thresholds` for runs classified into that category.
+    pub per_category: PerCategory,
+}
+
+/// [`PipelineConfig::classify`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClassifyConfig {
+    /// Below this probability, a `boolean`, `choice` or `ranking` classification falls back to `open`.
+    pub min_confidence: Option<Probability>,
+}
+
+/// [`PipelineConfig::explain`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExplainConfig {
+    /// Upper bound on the tokens Explain's model generates, reasoning included on a reasoning model.
+    pub max_tokens: MaxTokens,
+    /// A domain's answering rules, added to Explain's system prompt after the generic ones; `None` for none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<Instructions>,
+}
+
+/// Operator-written answering rules for one domain: trimmed and non-empty. Trusted config, never ingested text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "String", try_from = "String")]
+pub struct Instructions(String);
+
+impl Instructions {
+    /// # Errors
+    ///
+    /// [`BlankInstructions`] when `text` is empty or only whitespace.
+    pub fn new(text: &str) -> Result<Self, BlankInstructions> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(BlankInstructions);
+        }
+        Ok(Self(text.to_owned()))
+    }
+
+    /// The rules, trimmed.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for Instructions {
+    type Error = BlankInstructions;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        Self::new(&text)
+    }
+}
+
+impl From<Instructions> for String {
+    fn from(instructions: Instructions) -> Self {
+        instructions.0
+    }
+}
+
+/// Blank `explain.instructions`; leave the key out instead.
+#[derive(Debug, thiserror::Error)]
+#[error("explain.instructions is blank; leave it out for no domain rules")]
+pub struct BlankInstructions;
+
+/// [`PipelineConfig::admit`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AdmitConfig {
+    /// Who screens the sources.
+    pub judge: AdmitJudge,
+}
+
+/// Who screens the reranked sources before `Explain` sees them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmitJudge {
+    /// No screening: every reranked source reaches `Explain`, and the run has no `admit` step.
+    #[default]
+    None,
+    /// System One answers four yes/no questions per match, when System One is configured; without it the run has
+    /// no `admit` step.
+    SystemOne(AdmissionCutoffs),
+}
+
+/// The cutoffs `Admit` routes a match by, applied in field order: an injection or an irrelevant match is excluded,
+/// a match contradicting the question's premise is kept as a conflict, and the rest are kept only with evidence.
+/// Uncalibrated until an eval run fits them.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AdmissionCutoffs {
+    /// Above this probability that the text tries to change the assistant's instructions, the source is excluded.
+    pub injection_max: Probability,
+    /// Below this probability that the text addresses the question's subject, the match is excluded.
+    pub relevant_min: Probability,
+    /// Above this probability that the text contradicts the question's premise, the match is kept as a conflict.
+    pub contradicts_min: Probability,
+    /// At or above this probability that the text states something usable in a direct answer, the match is kept.
+    pub evidence_min: Probability,
+}
+
+impl Default for AdmissionCutoffs {
+    fn default() -> Self {
+        let p = |value| Probability::new(value).expect("the default cutoffs are in 0..=1");
         Self {
-            bind_addr: env_str("BIND_ADDR", "0.0.0.0:8000"),
-            database_url: env_str("DATABASE_URL", ""),
-            embedder_url: env_str("EMBEDDER_URL", "https://api.openai.com"),
-            embedding_model: env_str("NEXUS_EMBEDDING_MODEL", "text-embedding-3-small"),
-            embedding_dim: env_or("EMBEDDING_DIM", 1536),
-            system_one_url: env_str("SYSTEM_ONE_URL", "http://localhost:8082"),
-            generator_url: env_str("GENERATOR_URL", "http://localhost:8080"),
-            generator_model: env_str("GENERATOR_MODEL", "local"),
+            injection_max: p(0.7),
+            relevant_min: p(0.45),
+            contradicts_min: p(0.7),
+            evidence_min: p(0.55),
+        }
+    }
+}
 
-            service_token: std::env::var("RECALL_SERVICE_TOKEN")
-                .ok()
-                .filter(|s| !s.trim().is_empty()),
-            persist_asks: env_or("PERSIST_ASKS", false),
-            index_writes_enabled: env_or("INDEX_WRITES_ENABLED", false),
+/// [`PipelineConfig::verify`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VerifyConfig {
+    /// What a claim must pass besides citing this run's sources.
+    pub support: SupportCheck,
+    /// What `Verify` does with a claim that fails.
+    pub publish: PublishPolicy,
+}
 
-            retrieve_k: env_or("RETRIEVE_K", 64),
-            admit_batch_size: env_or("ADMIT_BATCH_SIZE", 32),
-            // Provisional local-Laya cutoffs until phase 6 fits a PR curve.
-            injection_max: env_or("INJECTION_MAX", 0.70),
-            contradicts_min: env_or("CONTRADICTS_MIN", 0.70),
-            relevant_min: env_or("RELEVANT_MIN", 0.10),
-            evidence_min: env_or("EVIDENCE_MIN", 0.10),
-            admit_thresholds_calibrated: env_or("ADMIT_THRESHOLDS_CALIBRATED", false),
-            max_citations: env_or("MAX_CITATIONS", 4),
-            max_inflight: env_or("MAX_INFLIGHT", 4),
-            kind_confidence_min: env_or("KIND_CONFIDENCE_MIN", 0.8),
-            // P(chosen relate class). 0.75 keeps a clear paraphrase (~0.79) and
-            // drops a weak argmax (~0.46). Laya's entropy "confidence" is not this number.
-            cite_confidence_min: env_or("CITE_CONFIDENCE_MIN", 0.75),
-            verify_regen_max: env_or("VERIFY_REGEN_MAX", 1),
+/// How `Verify` checks a claim against the chunks it cites. Every mode first requires a citation and only this
+/// run's sources.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupportCheck {
+    /// Citations only: a claim passes when it cites this run's sources.
+    #[default]
+    Membership,
+    /// Also: every span in backticks or double quotes appears in a cited chunk. No model call.
+    Quotes,
+    /// Also the quote check, then System One judges whether a cited chunk supports the claim, when System One is
+    /// configured; without it, `quotes`.
+    SystemOne(SupportCutoff),
+}
 
-            embed_timeout: Duration::from_millis(env_or("EMBED_TIMEOUT_MS", 5_000)),
-            index_timeout: Duration::from_millis(env_or("INDEX_TIMEOUT_MS", 5_000)),
-            admit_timeout: Duration::from_millis(env_or("ADMIT_TIMEOUT_MS", 50_000)),
-            ask_timeout: Duration::from_millis(env_or("ASK_TIMEOUT_MS", 60_000)),
-            stage_ping_interval: Duration::from_millis(env_or("STAGE_PING_INTERVAL_MS", 15_000)),
+/// [`SupportCheck::SystemOne`].
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SupportCutoff {
+    /// A claim is supported when a cited chunk "supports" it with at least this probability.
+    pub min_support: Probability,
+}
+
+impl Default for SupportCutoff {
+    fn default() -> Self {
+        Self {
+            min_support: Probability::new(0.75).expect("the default cutoff is in 0..=1"),
+        }
+    }
+}
+
+/// What `Verify` publishes when a claim fails its checks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublishPolicy {
+    /// Any failed claim declines the run.
+    #[default]
+    Decline,
+    /// Failed claims are left out and the rest published; the run declines only when none passes.
+    Strip,
+}
+
+/// Explain's chat `max_tokens`, in `1..=`[`MaxTokens::MAX`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "u32", try_from = "u32")]
+pub struct MaxTokens(u32);
+
+impl MaxTokens {
+    /// Enough for Explain's answer on a model that does not reason, such as `qwen3:14b` in Ollama.
+    pub const DEFAULT: Self = Self(2048);
+    /// The largest accepted budget. Above it a value is a typo, and no Explain model answers in more.
+    pub const MAX: u32 = 65_536;
+
+    /// # Errors
+    ///
+    /// When `tokens` is 0 or over [`MaxTokens::MAX`].
+    pub fn new(tokens: u32) -> Result<Self, InvalidMaxTokens> {
+        if (1..=Self::MAX).contains(&tokens) {
+            Ok(Self(tokens))
+        } else {
+            Err(InvalidMaxTokens(tokens))
         }
     }
 
-    pub fn validate(&self) -> anyhow::Result<()> {
-        if self.database_url.trim().is_empty() {
-            anyhow::bail!("DATABASE_URL is required (Nexus session pooler, role recall_search)");
+    /// The budget.
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl Default for MaxTokens {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl From<MaxTokens> for u32 {
+    fn from(tokens: MaxTokens) -> Self {
+        tokens.0
+    }
+}
+
+impl TryFrom<u32> for MaxTokens {
+    type Error = InvalidMaxTokens;
+
+    fn try_from(tokens: u32) -> Result<Self, Self::Error> {
+        Self::new(tokens)
+    }
+}
+
+/// A `max_tokens` outside `1..=`[`MaxTokens::MAX`].
+#[derive(Debug, thiserror::Error)]
+#[error("explain.max_tokens must be between 1 and {max}, got {0}", max = MaxTokens::MAX)]
+pub struct InvalidMaxTokens(u32);
+
+/// [`PipelineConfig::rerank`]: `0 < top_k`, and `top_k <= candidates` when System One judges.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "RawRerankConfig")]
+pub struct RerankConfig {
+    top_k: usize,
+    judge: RerankJudge,
+    evidence_rank_penalty: usize,
+}
+
+/// Who judges the matches `Rerank` orders. Classify and Answer use System One either way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RerankJudge {
+    /// No model: matches keep retrieval order, with the evidence penalty, and the step is unscored.
+    #[default]
+    None,
+    /// System One judges the best matches by fused score, when System One is configured.
+    SystemOne(SystemOneJudge),
+}
+
+/// [`RerankJudge::SystemOne`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SystemOneJudge {
+    /// Best matches by fused retrieval score that System One judges.
+    pub candidates: usize,
+}
+
+/// A rerank config that breaks [`RerankConfig`]'s invariants.
+#[derive(Debug, thiserror::Error)]
+pub enum InvalidRerankConfig {
+    /// `top_k` is 0.
+    #[error("rerank.top_k must be at least 1")]
+    NothingKept,
+    /// System One judges fewer matches than are kept.
+    #[error("rerank.top_k ({top_k}) exceeds the {candidates} candidates System One judges")]
+    MoreKeptThanJudged {
+        /// Matches kept.
+        top_k: usize,
+        /// Matches judged.
+        candidates: usize,
+    },
+    /// The flat `candidates` of configs written before `judge`.
+    #[error(
+        r#"rerank.candidates applies only to the System One judge; write "judge": {{"system_one": {{"candidates": {0}}}}}, or "judge": "none""#
+    )]
+    CandidatesWithoutJudge(usize),
+    /// `"judge": "system_one"`, which leaves out how many matches it judges.
+    #[error(
+        r#"rerank.judge "system_one" needs its candidates; write "judge": {{"system_one": {{"candidates": 25}}}}"#
+    )]
+    SystemOneWithoutCandidates,
+    /// Neither `"none"` nor `{"system_one": {"candidates": N}}`.
+    #[error("rerank.judge: {0}")]
+    Judge(serde_json::Error),
+}
+
+impl RerankConfig {
+    /// # Errors
+    ///
+    /// When `top_k` is 0, or exceeds the System One judge's `candidates`.
+    pub fn new(
+        top_k: usize,
+        judge: RerankJudge,
+        evidence_rank_penalty: usize,
+    ) -> Result<Self, InvalidRerankConfig> {
+        if top_k == 0 {
+            return Err(InvalidRerankConfig::NothingKept);
         }
-        if self.service_token.is_none() {
-            anyhow::bail!(
-                "RECALL_SERVICE_TOKEN is required: /v1/ask* and /v1/asks/* must not be \
-                 reachable unauthenticated. Set it to the token issued to Nexus."
-            );
+        match judge {
+            RerankJudge::SystemOne(SystemOneJudge { candidates }) if candidates < top_k => {
+                Err(InvalidRerankConfig::MoreKeptThanJudged { top_k, candidates })
+            }
+            RerankJudge::None | RerankJudge::SystemOne(_) => Ok(Self {
+                top_k,
+                judge,
+                evidence_rank_penalty,
+            }),
         }
-        let tls_ok = [
-            "sslmode=require",
-            "sslmode=verify-ca",
-            "sslmode=verify-full",
-        ]
-        .iter()
-        .any(|m| self.database_url.contains(m));
-        if !tls_ok && !env_or("ALLOW_INSECURE_DB", false) {
-            anyhow::bail!(
-                "DATABASE_URL must set sslmode=require (or verify-ca/verify-full) so the \
-                 pooler connection cannot fall back to plaintext. For the local Compose \
-                 Postgres only, set ALLOW_INSECURE_DB=true."
-            );
-        }
-        if !tls_ok {
-            tracing::warn!(
-                "ALLOW_INSECURE_DB is set: the database connection is not using TLS. \
-                 This must never be set against Nexus."
-            );
-        }
-        if self.database_url.contains("service_role") {
-            anyhow::bail!("refusing to run as service_role; use the recall_search role");
-        }
-        Ok(())
     }
 
-    pub fn warn_if_uncalibrated(&self) {
-        if !self.admit_thresholds_calibrated {
-            tracing::warn!(
-                injection_max = self.injection_max,
-                contradicts_min = self.contradicts_min,
-                relevant_min = self.relevant_min,
-                evidence_min = self.evidence_min,
-                "ADMIT_THRESHOLDS_CALIBRATED is false: filter cutoffs are cookbook \
-                 placeholders, not a fitted PR curve. See plan.md Phase 6."
+    /// Matches kept for `Answer` and `Explain`.
+    pub fn top_k(&self) -> usize {
+        self.top_k
+    }
+
+    /// Who judges the matches.
+    pub fn judge(&self) -> RerankJudge {
+        self.judge
+    }
+
+    /// An evidence (non-authoritative) match is ranked as if this many places lower.
+    pub fn evidence_rank_penalty(&self) -> usize {
+        self.evidence_rank_penalty
+    }
+}
+
+impl Default for RerankConfig {
+    fn default() -> Self {
+        Self {
+            top_k: 5,
+            judge: RerankJudge::None,
+            evidence_rank_penalty: 10,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawRerankConfig {
+    top_k: usize,
+    judge: serde_json::Value,
+    evidence_rank_penalty: usize,
+    candidates: Option<usize>,
+}
+
+impl Default for RawRerankConfig {
+    fn default() -> Self {
+        let config = RerankConfig::default();
+        Self {
+            top_k: config.top_k,
+            judge: serde_json::to_value(config.judge)
+                .expect("a judge is plain data, which always serializes"),
+            evidence_rank_penalty: config.evidence_rank_penalty,
+            candidates: None,
+        }
+    }
+}
+
+impl TryFrom<RawRerankConfig> for RerankConfig {
+    type Error = InvalidRerankConfig;
+
+    fn try_from(raw: RawRerankConfig) -> Result<Self, Self::Error> {
+        if let Some(candidates) = raw.candidates {
+            return Err(InvalidRerankConfig::CandidatesWithoutJudge(candidates));
+        }
+        if raw.judge == "system_one" {
+            return Err(InvalidRerankConfig::SystemOneWithoutCandidates);
+        }
+        let judge = serde_json::from_value(raw.judge).map_err(InvalidRerankConfig::Judge)?;
+        Self::new(raw.top_k, judge, raw.evidence_rank_penalty)
+    }
+}
+
+/// Threshold overrides per category; a step a category does not list uses [`PipelineConfig::thresholds`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PerCategory {
+    /// For [`CategoryKind::Boolean`] runs.
+    #[serde(skip_serializing_if = "Thresholds::is_empty")]
+    pub boolean: Thresholds,
+    /// For [`CategoryKind::Choice`] runs.
+    #[serde(skip_serializing_if = "Thresholds::is_empty")]
+    pub choice: Thresholds,
+    /// For [`CategoryKind::Ranking`] runs.
+    #[serde(skip_serializing_if = "Thresholds::is_empty")]
+    pub ranking: Thresholds,
+    /// For [`CategoryKind::Open`] runs.
+    #[serde(skip_serializing_if = "Thresholds::is_empty")]
+    pub open: Thresholds,
+}
+
+impl PerCategory {
+    fn get(&self, category: CategoryKind) -> &Thresholds {
+        match category {
+            CategoryKind::Boolean => &self.boolean,
+            CategoryKind::Choice => &self.choice,
+            CategoryKind::Ranking => &self.ranking,
+            CategoryKind::Open => &self.open,
+        }
+    }
+
+    /// The category's override, else `general`. A run with no category uses `general`.
+    pub fn threshold(
+        &self,
+        general: &Thresholds,
+        category: Option<CategoryKind>,
+        step: StepName,
+    ) -> Option<Probability> {
+        category
+            .and_then(|category| self.get(category).get(step))
+            .or_else(|| general.get(step))
+    }
+}
+
+impl PipelineConfig {
+    /// Reads and parses the file at `path`.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be read, or as [`PipelineConfig::parse`].
+    pub fn read(path: &Path) -> eros::Result<Self> {
+        read(path)
+    }
+
+    /// Parses JSON and checks invariants across fields.
+    ///
+    /// # Errors
+    ///
+    /// On invalid JSON, an unknown key, a probability outside `0..=1`, an unthresholded step name, an
+    /// [`InvalidRerankConfig`], or an [`InvalidMaxTokens`].
+    pub fn parse(text: &str) -> eros::Result<Self> {
+        Ok(serde_json::from_str(text)?)
+    }
+
+    /// The category's override, else the general threshold.
+    pub fn threshold(&self, category: CategoryKind, step: StepName) -> Option<Probability> {
+        self.per_category
+            .threshold(&self.thresholds, Some(category), step)
+    }
+}
+
+// `#[eros::context]` on an associated function without `self` calls its inner function unqualified.
+#[eros::context("reading pipeline config {}", path.display())]
+fn read(path: &Path) -> eros::Result<PipelineConfig> {
+    let text = fs::read_to_string(path)?;
+    PipelineConfig::parse(&text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::retrieval::hybrid::Bm25;
+
+    #[test]
+    fn shipped_config_parses() {
+        let config = PipelineConfig::parse(include_str!("../config/recall.json")).unwrap();
+        assert!(config.classify.min_confidence.is_some());
+        assert!(
+            config
+                .threshold(CategoryKind::Boolean, StepName::Answer)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn an_empty_path_is_unset_and_a_missing_one_is_an_error() {
+        let empty = ConfigArgs {
+            path: Some(PathBuf::new()),
+        };
+        assert!(empty.load().is_ok());
+        let missing = ConfigArgs {
+            path: Some("no/such/recall.json".into()),
+        };
+        assert!(missing.load().is_err());
+    }
+
+    #[test]
+    fn empty_object_is_the_defaults() {
+        assert_eq!(
+            PipelineConfig::parse("{}").unwrap(),
+            PipelineConfig::default()
+        );
+    }
+
+    #[test]
+    fn category_override_wins_over_the_general_threshold() {
+        let config = PipelineConfig::parse(
+            r#"{"thresholds": {"answer": 0.6}, "per_category": {"boolean": {"answer": 0.8}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.threshold(CategoryKind::Boolean, StepName::Answer),
+            Some(Probability::new(0.8).unwrap())
+        );
+        assert_eq!(
+            config.threshold(CategoryKind::Open, StepName::Answer),
+            Some(Probability::new(0.6).unwrap())
+        );
+        assert_eq!(config.threshold(CategoryKind::Open, StepName::Rerank), None);
+    }
+
+    #[test]
+    fn typos_and_unthresholded_steps_are_rejected() {
+        for bad in [
+            r#"{"thresold": {}}"#,
+            r#"{"rerank": {"top": 5}}"#,
+            r#"{"thresholds": {"classify": 0.5}}"#,
+            r#"{"per_category": {"boolean": {"explain": 0.5}}}"#,
+        ] {
+            assert!(PipelineConfig::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_rerank_judge_is_none_or_system_one_with_its_candidates() {
+        let config = PipelineConfig::parse(include_str!("../config/recall.json")).unwrap();
+        assert_eq!(config.rerank.judge(), RerankJudge::None);
+        assert_eq!(RerankConfig::default().judge(), RerankJudge::None);
+        let config = PipelineConfig::parse(
+            r#"{"rerank": {"top_k": 5, "judge": {"system_one": {"candidates": 25}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.rerank.judge(),
+            RerankJudge::SystemOne(SystemOneJudge { candidates: 25 })
+        );
+        assert_eq!(
+            PipelineConfig::parse(r#"{"rerank": {"judge": "none", "top_k": 50}}"#)
+                .unwrap()
+                .rerank
+                .top_k(),
+            50
+        );
+    }
+
+    #[test]
+    fn invalid_rerank_judges_are_rejected_on_every_load_path() {
+        for (bad, says) in [
+            (
+                r#"{"rerank": {"candidates": 25}}"#,
+                r#""judge": {"system_one": {"candidates": 25}}"#,
+            ),
+            (
+                r#"{"rerank": {"judge": "none", "candidates": 25}}"#,
+                "applies only to the System One judge",
+            ),
+            (
+                r#"{"rerank": {"top_k": 10, "judge": {"system_one": {"candidates": 5}}}}"#,
+                "rerank.top_k (10) exceeds the 5 candidates",
+            ),
+            (
+                r#"{"rerank": {"top_k": 0}}"#,
+                "rerank.top_k must be at least 1",
+            ),
+            (r#"{"rerank": {"judge": "kev"}}"#, "unknown variant `kev`"),
+            (
+                r#"{"rerank": {"judge": "system_one"}}"#,
+                r#"needs its candidates; write "judge": {"system_one": {"candidates": 25}}"#,
+            ),
+            (
+                r#"{"rerank": {"judge": {"system_one": {}}}}"#,
+                "missing field `candidates`",
+            ),
+            (
+                r#"{"rerank": {"judge": {"system_one": {"candidates": 25, "top_k": 5}}}}"#,
+                "unknown field `top_k`",
+            ),
+        ] {
+            let error = format!("{:#}", PipelineConfig::parse(bad).unwrap_err());
+            assert!(error.contains(says), "{bad}: {error}");
+            assert!(
+                serde_json::from_str::<PipelineConfig>(bad).is_err(),
+                "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn a_misspelled_step_is_rejected_by_name() {
+        for (bad, key) in [
+            (r#"{"thresholds": {"anser": 0.7}}"#, "anser"),
+            (
+                r#"{"per_category": {"boolean": {"rerankk": 0.7}}}"#,
+                "rerankk",
+            ),
+        ] {
+            let error = format!("{:#}", PipelineConfig::parse(bad).unwrap_err());
+            assert!(error.contains(&format!("`{key}`")), "{error}");
+        }
+    }
+
+    #[test]
+    fn step_names_match_the_steps_they_threshold() {
+        use crate::pipeline::{
+            Boolean, Open, Step,
+            steps::{Answer, Rerank},
+        };
+        assert_eq!(StepName::Rerank.as_str(), <Rerank<Open> as Step>::NAME);
+        assert_eq!(StepName::Answer.as_str(), <Answer<Boolean> as Step>::NAME);
+    }
+
+    #[test]
+    fn shipped_config_round_trips() {
+        let config = PipelineConfig::parse(include_str!("../config/recall.json")).unwrap();
+        let text = serde_json::to_string(&config).unwrap();
+        assert_eq!(PipelineConfig::parse(&text).unwrap(), config);
+    }
+
+    #[test]
+    fn probabilities_outside_zero_to_one_are_rejected_on_every_load_path() {
+        for bad in [
+            r#"{"thresholds": {"answer": 1.5}}"#,
+            r#"{"thresholds": {"rerank": -0.1}}"#,
+            r#"{"thresholds": {"answer": 1e39}}"#,
+            r#"{"per_category": {"boolean": {"answer": 1.01}}}"#,
+            r#"{"classify": {"min_confidence": 1.2}}"#,
+            r#"{"classify": {"min_confidence": -0.5}}"#,
+        ] {
+            assert!(PipelineConfig::parse(bad).is_err(), "{bad}");
+            assert!(
+                serde_json::from_str::<PipelineConfig>(bad).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(PipelineConfig::parse(r#"{"thresholds": {"answer": 1.0}}"#).is_ok());
+    }
+
+    #[test]
+    fn the_hosted_config_differs_from_the_shipped_one_only_in_explain_max_tokens() {
+        let shipped = PipelineConfig::parse(include_str!("../config/recall.json")).unwrap();
+        let mut hosted =
+            PipelineConfig::parse(include_str!("../config/recall-workers-ai.json")).unwrap();
+        hosted.explain.max_tokens = shipped.explain.max_tokens;
+        assert_eq!(
+            hosted, shipped,
+            "config/recall-workers-ai.json and config/recall.json differ in more than explain.max_tokens; change both \
+             files, or record the deliberate difference in this test"
+        );
+    }
+
+    #[test]
+    fn explain_max_tokens_defaults_to_2048_and_is_bounded_on_every_load_path() {
+        assert_eq!(PipelineConfig::default().explain.max_tokens.get(), 2048);
+        let shipped = PipelineConfig::parse(include_str!("../config/recall.json")).unwrap();
+        assert_eq!(shipped.explain.max_tokens, MaxTokens::DEFAULT);
+        let hosted =
+            PipelineConfig::parse(include_str!("../config/recall-workers-ai.json")).unwrap();
+        assert_eq!(hosted.explain.max_tokens.get(), 8192);
+        let max = PipelineConfig::parse(r#"{"explain": {"max_tokens": 65536}}"#).unwrap();
+        assert_eq!(max.explain.max_tokens.get(), MaxTokens::MAX);
+
+        for (bad, says) in [
+            (
+                r#"{"explain": {"max_tokens": 0}}"#,
+                "explain.max_tokens must be between 1 and 65536, got 0",
+            ),
+            (
+                r#"{"explain": {"max_tokens": 65537}}"#,
+                "explain.max_tokens must be between 1 and 65536, got 65537",
+            ),
+            (r#"{"explain": {"max_tokens": -1}}"#, "invalid value"),
+            (r#"{"explain": {"max_tokens": 2048.5}}"#, "invalid type"),
+            (r#"{"explain": {"max_token": 2048}}"#, "unknown field"),
+        ] {
+            let error = format!("{:#}", PipelineConfig::parse(bad).unwrap_err());
+            assert!(error.contains(says), "{bad}: {error}");
+            assert!(
+                serde_json::from_str::<PipelineConfig>(bad).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn admission_and_the_support_check_are_off_by_default_and_checked_on_every_load_path() {
+        let defaults = PipelineConfig::default();
+        assert_eq!(defaults.admit.judge, AdmitJudge::None);
+        assert_eq!(defaults.verify.support, SupportCheck::Membership);
+        assert_eq!(defaults.verify.publish, PublishPolicy::Decline);
+
+        let shipped = PipelineConfig::parse(include_str!("../config/recall.json")).unwrap();
+        assert_eq!(shipped.admit.judge, AdmitJudge::None);
+        assert_eq!(
+            shipped.verify.support,
+            SupportCheck::SystemOne(SupportCutoff::default())
+        );
+
+        let config = PipelineConfig::parse(
+            r#"{"admit": {"judge": {"system_one": {"evidence_min": 0.3}}}, "verify": {"support": "quotes", "publish": "strip"}}"#,
+        )
+        .unwrap();
+        let AdmitJudge::SystemOne(cutoffs) = config.admit.judge else {
+            panic!("expected the System One judge");
+        };
+        assert_eq!(cutoffs.evidence_min.get(), 0.3);
+        assert_eq!(
+            cutoffs.injection_max,
+            AdmissionCutoffs::default().injection_max
+        );
+        assert_eq!(config.verify.support, SupportCheck::Quotes);
+        assert_eq!(config.verify.publish, PublishPolicy::Strip);
+
+        for bad in [
+            r#"{"admit": {"judge": "kev"}}"#,
+            r#"{"admit": {"judge": {"system_one": {"evidence": 0.5}}}}"#,
+            r#"{"admit": {"judge": {"system_one": {"injection_max": 1.5}}}}"#,
+            r#"{"verify": {"support": {"system_one": {"min_support": -0.1}}}}"#,
+            r#"{"verify": {"publish": "regenerate"}}"#,
+            r#"{"verify": {"supports": "quotes"}}"#,
+        ] {
+            assert!(PipelineConfig::parse(bad).is_err(), "{bad}");
+            assert!(
+                serde_json::from_str::<PipelineConfig>(bad).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn explain_instructions_are_optional_and_never_blank() {
+        assert_eq!(PipelineConfig::default().explain.instructions, None);
+        let config =
+            PipelineConfig::parse(r#"{"explain": {"instructions": "  Answer for operators.  "}}"#)
+                .unwrap();
+        assert_eq!(
+            config
+                .explain
+                .instructions
+                .as_ref()
+                .map(Instructions::as_str),
+            Some("Answer for operators.")
+        );
+        for bad in [
+            r#"{"explain": {"instructions": "  "}}"#,
+            r#"{"explain": {"instructions": 3}}"#,
+        ] {
+            assert!(PipelineConfig::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn bm25_constants_are_checked_on_every_load_path() {
+        for bad in [
+            r#"{"retrieval": {"bm25": {"k1": -0.1}}}"#,
+            r#"{"retrieval": {"bm25": {"b": 1.5}}}"#,
+            r#"{"retrieval": {"bm25": {"b": -0.5}}}"#,
+            r#"{"retrieval": {"bm25": {"k1": 1e309}}}"#,
+            r#"{"retrieval": {"bm25": {"k": 1.2}}}"#,
+        ] {
+            assert!(PipelineConfig::parse(bad).is_err(), "{bad}");
+            assert!(
+                serde_json::from_str::<PipelineConfig>(bad).is_err(),
+                "{bad}"
+            );
+        }
+        let config = PipelineConfig::parse(r#"{"retrieval": {"bm25": {"b": 0.0}}}"#).unwrap();
+        assert_eq!(config.retrieval.bm25, Bm25::new(1.2, 0.0).unwrap());
     }
 }

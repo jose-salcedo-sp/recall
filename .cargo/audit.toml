@@ -1,0 +1,7 @@
+[advisories]
+ignore = [
+    # libsqlite3-sys 0.37 is in Cargo.lock only as sqlx-sqlite's dependency, which sqlx 0.9.0 pins (`=0.9.0`) and
+    # this crate never builds: `cargo tree -i libsqlite3-sys -e all --target all` is empty. Remove once sqlx moves
+    # to libsqlite3-sys >= 0.39.
+    "RUSTSEC-2026-0459",
+]

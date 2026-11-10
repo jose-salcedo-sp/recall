@@ -1,0 +1,150 @@
+name: CI
+
+# Files no build, test or doctest reads. Rust inputs outside src/ and tests/ (config/, eval/, migrations/) are
+# deliberately not listed: tests include_str! them. Safe while no check is required; a required check would stay
+# pending on a PR this filter skips.
+on:
+  pull_request:
+    paths-ignore: ["docs/**", "*.md", ".gitignore"]
+  push:
+    branches: [main]
+    paths-ignore: ["docs/**", "*.md", ".gitignore"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  MBX_VERSION: 1.25.0
+
+jobs:
+  done-checks:
+    name: Done checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      # Same image and settings as the `db` service in compose.yaml.
+      db:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: recall
+          POSTGRES_PASSWORD: recall
+          POSTGRES_DB: recall
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U recall"
+          --health-interval 2s
+          --health-retries 15
+    env:
+      DATABASE_URL: postgres://recall:recall@localhost:5433/recall
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The image leaves about 2 GB free after a build, below mbx's free-space floor (10% of the disk), where gc
+      # evicts the action store. The job uses none of these SDKs. Removing them takes 40 s to 3 min, so it runs
+      # alongside the build, and `mbx gc` waits for it.
+      - name: Free runner disk
+        run: |
+          df -h /
+          setsid bash -c 'sudo rm -rf /usr/local/lib/android /usr/share/dotnet; touch "$RUNNER_TEMP/disk-freed"' \
+            > /dev/null 2>&1 < /dev/null &
+
+      # Installs the channel and components named in rust-toolchain.toml.
+      - name: Install toolchain
+        run: rustup toolchain install && rustc --version
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-nextest@0.9.148,cargo-binstall@1.26.0,cargo-audit@0.22.2
+
+      # install-action has no mbx manifest; binstall takes the release binary and never builds from source.
+      - name: Install mbx
+        run: cargo binstall --no-confirm --disable-strategies quick-install,compile "mbx@${MBX_VERSION}"
+
+      # The GitHub cache holds 10 GB per repository and evicts the least recently used entry past that.
+      - name: Configure mbx
+        run: |
+          mbx settings set gc.max_size 3GiB
+          mbx setup --yes
+          shim="$(mbx setup --status | sed -n 's/^mbx setup is installed and current: //p')"
+          test -x "$shim"
+          dirname "$shim" >> "$GITHUB_PATH"
+
+      # Every run saves a new entry and restores the newest one for its toolchain, preferring the same Cargo.lock.
+      - name: Restore mbx cache
+        id: mbx-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/mbx
+            !~/.cache/mbx/targets
+          key: mbx-${{ env.MBX_VERSION }}-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            mbx-${{ env.MBX_VERSION }}-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}-
+            mbx-${{ env.MBX_VERSION }}-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-
+
+      - name: mbx doctor
+        run: |
+          command -v cargo
+          mbx doctor
+          mbx cache stats
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo doc
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+
+      - name: cargo nextest run
+        run: cargo nextest run --profile ci
+
+      - name: cargo test --doc
+        run: cargo test --doc
+
+      - name: cargo audit
+        run: cargo audit
+
+      - name: Upload JUnit report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+
+      - name: mbx gc
+        id: mbx-gc
+        if: ${{ !cancelled() }}
+        run: |
+          timeout 600 bash -c 'until [ -e "$RUNNER_TEMP/disk-freed" ]; do sleep 1; done'
+          df -h /
+          mbx gc
+          mbx cache stats
+          objects="$(mbx cache stats --json | jq .objects)"
+          if [ "$objects" -eq 0 ]; then
+            echo "::error::the mbx action store is empty; saving it would replace a useful cache"
+            exit 1
+          fi
+
+      - name: Save mbx cache
+        if: ${{ !cancelled() && steps.mbx-gc.outcome == 'success' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/mbx
+            !~/.cache/mbx/targets
+          key: ${{ steps.mbx-cache.outputs.cache-primary-key }}
+
+      - name: mbx stats
+        if: ${{ !cancelled() }}
+        run: mbx stats

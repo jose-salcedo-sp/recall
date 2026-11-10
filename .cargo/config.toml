@@ -1,0 +1,3 @@
+[env]
+# Overridden by an exported DATABASE_URL. Start it with `docker compose up -d --wait db`.
+DATABASE_URL = "postgres://recall:recall@localhost:5433/recall"

@@ -1,0 +1,8 @@
+target/
+.git/
+.cursor/
+.env
+.env.*
+docs/
+Dockerfile
+.dockerignore
