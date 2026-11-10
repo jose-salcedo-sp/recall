@@ -11,11 +11,14 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use reqwest::Url;
 
-use crate::domain::{ChunkDraft, Document, Labels, Sensitivity, SourceKind};
+use crate::domain::{ChunkDraft, Document, Labels, Sensitivity, SourceName};
 
 use super::Source;
 
 const INTRO: &str = "intro";
+
+/// The [`Source::name`] of the markdown connector, and the prefix of its document ids.
+pub static NAME: SourceName = SourceName::from_static("markdown");
 
 /// Where the markdown corpus is and how its paths split into layers.
 #[derive(Debug, clap::Args)]
@@ -136,7 +139,7 @@ impl Connector {
         let file_url = self.file_url(&external_id);
         let chunks = chunks(&file_url, &text, authoritative)?;
         Ok(Document {
-            source: SourceKind::Markdown,
+            source: NAME.clone(),
             external_id,
             title,
             url: file_url,
@@ -384,8 +387,8 @@ pub fn github_anchor(heading: &str) -> String {
 
 #[async_trait]
 impl Source for Connector {
-    fn kind(&self) -> SourceKind {
-        SourceKind::Markdown
+    fn name(&self) -> &SourceName {
+        &NAME
     }
 
     /// The snapshot is read with blocking file I/O, so it runs on the runtime's blocking pool.

@@ -4,7 +4,8 @@
 use std::collections::HashSet;
 
 use recall::{
-    domain::{Chunk, ChunkId, ChunkVersion, DocumentId, Labels, Sensitivity, SourceKind},
+    domain::{Chunk, ChunkId, ChunkVersion, DocumentId, Labels, Sensitivity},
+    ingest::markdown,
     retrieval::Retriever,
 };
 
@@ -12,12 +13,12 @@ const QUESTION: &str = "Which table maps users to roles?";
 
 /// One chunk in a document of its own, so no retriever adds neighbouring sections as context.
 fn chunk(name: &str, text: &str) -> Chunk {
-    let document_id = DocumentId::new(SourceKind::Markdown, &format!("{name}.md"));
+    let document_id = DocumentId::new(&markdown::NAME, &format!("{name}.md"));
     Chunk {
         id: ChunkId::new(&document_id, name),
         version: ChunkVersion("v1".into()),
         document_id,
-        source: SourceKind::Markdown,
+        source: markdown::NAME.clone(),
         title: format!("{name} notes"),
         heading: Some(name.into()),
         url: format!("https://wiki.example.test/{name}"),

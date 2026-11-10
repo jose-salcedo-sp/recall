@@ -1,4 +1,5 @@
-//! Schema constraints: check constraints accept every domain enum variant, and a chunk has one current version.
+//! Schema constraints: check constraints accept every domain enum variant and exactly the valid source names, and a
+//! chunk has one current version.
 
 #![allow(
     clippy::unwrap_used,
@@ -7,7 +8,7 @@
 
 use pgvector::Vector;
 use recall::{
-    domain::{CategoryKind, Sensitivity, SourceKind},
+    domain::{CategoryKind, Sensitivity, SourceName},
     llm::EMBEDDING_DIM,
 };
 use sqlx::PgPool;
@@ -22,11 +23,23 @@ async fn check_constraints_accept_every_enum_variant(pool: PgPool) -> sqlx::Resu
         )
         .bind(source.to_owned())
     };
-    for source in SourceKind::ALL {
-        document(source.as_str()).execute(&pool).await?;
-    }
-    for source in ["unknown", "wiki"] {
-        assert!(document(source).execute(&pool).await.is_err(), "{source}");
+    for source in [
+        "markdown",
+        "confluence",
+        "jira-cloud",
+        "db_2",
+        "",
+        "Markdown",
+        "wiki:pages",
+        "a b",
+        "doc#1",
+        "café",
+    ] {
+        assert_eq!(
+            document(source).execute(&pool).await.is_ok(),
+            SourceName::new(source).is_ok(),
+            "{source:?}"
+        );
     }
 
     let chunk = |locator: &str, sensitivity: &str| {

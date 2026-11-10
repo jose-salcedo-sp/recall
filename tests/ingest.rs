@@ -10,8 +10,12 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use recall::{
-    domain::{ChunkDraft, Document, Labels, Sensitivity, SourceKind},
-    ingest::{EmbeddingModelMismatch, Source, fakes::StaticSource, ingest},
+    domain::{ChunkDraft, Document, Labels, Sensitivity, SourceName},
+    ingest::{
+        EmbeddingModelMismatch, Source, Sources,
+        fakes::{FailingSource, StaticSource},
+        ingest, markdown,
+    },
     llm::{EmbedPurpose, Embedder, ModelRef, fakes::HashEmbedder},
     store::chunks::{ChunkStore, Stored},
 };
@@ -53,26 +57,13 @@ impl Embedder for RecordingEmbedder {
     }
 }
 
-struct FailingSource;
-
-#[async_trait]
-impl Source for FailingSource {
-    fn kind(&self) -> SourceKind {
-        SourceKind::Markdown
-    }
-
-    async fn fetch_all(&self) -> eros::Result<Vec<Document>> {
-        eros::bail!("source is down")
-    }
-}
-
 fn updated(day: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 1, day, 0, 0, 0).unwrap()
 }
 
-fn document(source: SourceKind, external_id: &str, chunks: &[(&str, &str)]) -> Document {
+fn document(source: &SourceName, external_id: &str, chunks: &[(&str, &str)]) -> Document {
     Document {
-        source,
+        source: source.clone(),
         external_id: external_id.into(),
         title: format!("Doc {external_id}"),
         url: format!("https://example.test/{external_id}"),
@@ -96,14 +87,22 @@ fn document(source: SourceKind, external_id: &str, chunks: &[(&str, &str)]) -> D
 }
 
 fn page(chunks: &[(&str, &str)]) -> Document {
-    document(SourceKind::Markdown, "roles.md", chunks)
+    document(&markdown::NAME, "roles.md", chunks)
+}
+
+fn wiki() -> SourceName {
+    SourceName::new("wiki").unwrap()
 }
 
 fn static_source(documents: Vec<Document>) -> Box<dyn Source> {
     Box::new(StaticSource {
-        kind: documents[0].source,
+        name: documents[0].source.clone(),
         documents,
     })
+}
+
+fn sources(sources: Vec<Box<dyn Source>>) -> Sources {
+    Sources::new(sources).unwrap()
 }
 
 async fn count(pool: &PgPool, filter: &str) -> i64 {
@@ -286,7 +285,7 @@ async fn duplicate_locators_are_rejected(pool: PgPool) {
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn embedding_model_mismatch_is_refused(pool: PgPool) {
-    let sources = [static_source(vec![page(&[("a", "alpha")])])];
+    let sources = sources(vec![static_source(vec![page(&[("a", "alpha")])])]);
     ingest(&pool, &HashEmbedder, &sources, false).await.unwrap();
 
     let other = RecordingEmbedder::named(ModelRef::new("amazon.titan-embed-text-v2:0", "x"));
@@ -305,13 +304,17 @@ async fn embedding_model_mismatch_is_refused(pool: PgPool) {
 async fn reembed_replaces_every_chunk_with_the_configured_model(pool: PgPool) {
     let first = static_source(vec![
         page(&[("a", "alpha"), ("b", "beta")]),
-        document(SourceKind::Markdown, "other.md", &[("c", "gamma")]),
+        document(&markdown::NAME, "other.md", &[("c", "gamma")]),
     ]);
-    ingest(&pool, &HashEmbedder, &[first], false).await.unwrap();
+    ingest(&pool, &HashEmbedder, &sources(vec![first]), false)
+        .await
+        .unwrap();
 
     let subset = static_source(vec![page(&[("a", "alpha"), ("b", "beta")])]);
     let titan = RecordingEmbedder::named(ModelRef::new("titan", "1"));
-    let reports = ingest(&pool, &titan, &[subset], true).await.unwrap();
+    let reports = ingest(&pool, &titan, &sources(vec![subset]), true)
+        .await
+        .unwrap();
 
     assert!(reports[0].error.is_none());
     assert_eq!(reports[0].documents, 1);
@@ -334,14 +337,14 @@ async fn reembed_replaces_every_chunk_with_the_configured_model(pool: PgPool) {
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn snapshot_supersedes_documents_missing_from_fetch(pool: PgPool) {
-    let sources = [static_source(vec![
+    let sources = sources(vec![static_source(vec![
         page(&[("a", "alpha")]),
-        document(SourceKind::Markdown, "removed.md", &[("intro", "gone")]),
-    ])];
+        document(&markdown::NAME, "removed.md", &[("intro", "gone")]),
+    ])]);
     ingest(&pool, &HashEmbedder, &sources, false).await.unwrap();
     assert_eq!(count(&pool, "superseded_at IS NULL").await, 2);
 
-    let sources = [static_source(vec![page(&[("a", "alpha")])])];
+    let sources = self::sources(vec![static_source(vec![page(&[("a", "alpha")])])]);
     let reports = ingest(&pool, &HashEmbedder, &sources, false).await.unwrap();
     assert_eq!(reports[0].stored.superseded, 1);
     assert_eq!(count(&pool, "superseded_at IS NULL").await, 1);
@@ -377,25 +380,21 @@ async fn ingest_refreshes_term_stats_from_current_chunks(pool: PgPool) {
     assert_eq!(term_stats(&pool, &["role"]).await, ((0, None), vec![None]));
 
     // Headings are the uppercased locators, so `role` is in every chunk.
-    let sources = [static_source(vec![
-        document(SourceKind::Markdown, "a.md", &[("role", "payroll payroll")]),
-        document(
-            SourceKind::Markdown,
-            "b.md",
-            &[("role", "role owners review")],
-        ),
-    ])];
+    let sources = self::sources(vec![static_source(vec![
+        document(&markdown::NAME, "a.md", &[("role", "payroll payroll")]),
+        document(&markdown::NAME, "b.md", &[("role", "role owners review")]),
+    ])]);
     ingest(&pool, &HashEmbedder, &sources, false).await.unwrap();
     assert_eq!(
         term_stats(&pool, &["role", "payrol", "owner"]).await,
         ((2, Some(3.5)), vec![Some(2), Some(1), Some(1)])
     );
 
-    let sources = [static_source(vec![document(
-        SourceKind::Markdown,
+    let sources = self::sources(vec![static_source(vec![document(
+        &markdown::NAME,
         "b.md",
         &[("role", "role owners review")],
-    )])];
+    )])]);
     ingest(&pool, &HashEmbedder, &sources, false).await.unwrap();
     assert_eq!(
         term_stats(&pool, &["role", "payrol", "owner"]).await,
@@ -405,21 +404,86 @@ async fn ingest_refreshes_term_stats_from_current_chunks(pool: PgPool) {
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn one_failing_source_does_not_stop_the_others(pool: PgPool) {
-    let sources = [
-        Box::new(FailingSource) as Box<dyn Source>,
+    let sources = sources(vec![
+        Box::new(FailingSource { name: wiki() }),
         static_source(vec![
-            document(SourceKind::Markdown, "a.md", &[("intro", "question")]),
-            document(SourceKind::Markdown, "b.md", &[("intro", "answer")]),
+            document(&markdown::NAME, "a.md", &[("intro", "question")]),
+            document(&markdown::NAME, "b.md", &[("intro", "answer")]),
         ]),
-    ];
+    ]);
 
     let reports = ingest(&pool, &HashEmbedder, &sources, false).await.unwrap();
 
-    assert_eq!(reports[0].source, SourceKind::Markdown);
-    assert!(format!("{:#?}", reports[0].error.as_ref().unwrap()).contains("source is down"));
-    assert_eq!(reports[1].source, SourceKind::Markdown);
+    assert_eq!(reports[0].source, wiki());
+    assert!(format!("{:#?}", reports[0].error.as_ref().unwrap()).contains("source wiki is down"));
+    assert_eq!(reports[1].source, markdown::NAME);
     assert!(reports[1].error.is_none());
     assert_eq!(reports[1].documents, 2);
     assert_eq!(reports[1].stored, stored(2, 0));
     assert_eq!(count(&pool, "superseded_at IS NULL").await, 2);
+}
+
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
+async fn a_source_named_outside_the_crate_supersedes_only_its_own_documents(pool: PgPool) {
+    let markdown = || static_source(vec![page(&[("a", "alpha")])]);
+    let wiki_pages = |pages: &[&str]| {
+        static_source(
+            pages
+                .iter()
+                .map(|page| document(&wiki(), page, &[("intro", "beta")]))
+                .collect(),
+        )
+    };
+    ingest(
+        &pool,
+        &HashEmbedder,
+        &sources(vec![markdown(), wiki_pages(&["home", "roles"])]),
+        false,
+    )
+    .await
+    .unwrap();
+
+    let reports = ingest(
+        &pool,
+        &HashEmbedder,
+        &sources(vec![wiki_pages(&["home"])]),
+        false,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(reports[0].source, wiki());
+    assert_eq!(reports[0].stored, stored(0, 1));
+    assert_eq!(
+        current(&pool)
+            .await
+            .into_iter()
+            .map(|(id, _, _)| id)
+            .collect::<Vec<_>>(),
+        ["markdown:roles.md#a", "wiki:home#intro"]
+    );
+    let source: String = sqlx::query_scalar("SELECT source FROM documents WHERE id = 'wiki:home'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(source, "wiki");
+}
+
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
+async fn a_document_under_another_source_name_fails_its_source(pool: PgPool) {
+    let mislabelled = Box::new(StaticSource {
+        name: wiki(),
+        documents: vec![page(&[("a", "alpha")])],
+    });
+
+    let reports = ingest(&pool, &HashEmbedder, &sources(vec![mislabelled]), false)
+        .await
+        .unwrap();
+
+    let error = format!("{:#?}", reports[0].error.as_ref().unwrap());
+    assert!(
+        error.contains("wiki source returned document markdown:roles.md"),
+        "{error}"
+    );
+    assert_eq!(count(&pool, "true").await, 0);
 }

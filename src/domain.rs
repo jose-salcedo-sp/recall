@@ -1,6 +1,6 @@
 //! Types shared by every module: questions, chunks, labels, provenance, and probabilities.
 
-use std::fmt;
+use std::{borrow::Cow, fmt};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -181,46 +181,108 @@ impl From<Probability> for f32 {
     }
 }
 
-/// Where a document came from. The markdown corpus is the only source.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SourceKind {
-    /// A file in the pre-audited markdown directory.
-    Markdown,
-}
+/// Which [`crate::ingest::Source`] connector a document came from: stored in `documents.source` and used as the
+/// [`DocumentId`] prefix. Open, so a connector outside this crate names itself; ingestion rejects two connectors of
+/// one name, since each one's snapshot supersedes the documents stored under its name.
+///
+/// One or more of `a-z`, `0-9`, `_` and `-`: never the `:` that ends the id prefix, and the same text in ids, logs
+/// and URLs. The schema checks the same pattern.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct SourceName(Cow<'static, str>);
 
-impl SourceKind {
-    /// Every variant, in declaration order.
-    pub const ALL: [Self; 1] = [Self::Markdown];
+/// Text rejected by [`SourceName::new`].
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error("invalid source name {0:?}: expected one or more of a-z, 0-9, `_` and `-`")]
+pub struct InvalidSourceName(pub String);
 
-    /// The serde name, also stored in `documents.source` and used as the `DocumentId` prefix.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Markdown => "markdown",
+impl SourceName {
+    /// # Errors
+    ///
+    /// [`InvalidSourceName`] when `name` is empty or has a character outside `a-z`, `0-9`, `_` and `-`.
+    pub fn new(name: impl Into<String>) -> Result<Self, InvalidSourceName> {
+        let name = name.into();
+        if is_source_name(&name) {
+            Ok(Self(Cow::Owned(name)))
+        } else {
+            Err(InvalidSourceName(name))
         }
+    }
+
+    /// A connector's fixed name. In a `const` or `static` an invalid name fails to compile.
+    ///
+    /// # Panics
+    ///
+    /// When `name` is not a valid source name; see [`SourceName::new`].
+    pub const fn from_static(name: &'static str) -> Self {
+        assert!(
+            is_source_name(name),
+            "a source name is one or more of a-z, 0-9, `_` and `-`"
+        );
+        Self(Cow::Borrowed(name))
+    }
+
+    /// The name, as stored and as the [`DocumentId`] prefix.
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
-impl TryFrom<&str> for SourceKind {
-    type Error = UnknownVariant;
-
-    fn try_from(name: &str) -> Result<Self, UnknownVariant> {
-        match name {
-            "markdown" => Ok(Self::Markdown),
-            other => Err(UnknownVariant::new("source", other)),
+const fn is_source_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if !matches!(bytes[i], b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-') {
+            return false;
         }
+        i += 1;
+    }
+    !bytes.is_empty()
+}
+
+impl TryFrom<String> for SourceName {
+    type Error = InvalidSourceName;
+
+    fn try_from(name: String) -> Result<Self, InvalidSourceName> {
+        Self::new(name)
     }
 }
 
-/// A source unit: one markdown file in the docs corpus. Format: `{source}:{external_id}`.
+impl TryFrom<&str> for SourceName {
+    type Error = InvalidSourceName;
+
+    fn try_from(name: &str) -> Result<Self, InvalidSourceName> {
+        Self::new(name)
+    }
+}
+
+impl From<SourceName> for String {
+    fn from(name: SourceName) -> String {
+        name.0.into_owned()
+    }
+}
+
+impl AsRef<str> for SourceName {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for SourceName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One document as its source identifies it. Format: `{source}:{external_id}`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct DocumentId(pub String);
 
 impl DocumentId {
-    /// `{source}:{external_id}`, with the source's [`SourceKind::as_str`] name.
-    pub fn new(source: SourceKind, external_id: &str) -> Self {
-        Self(format!("{}:{external_id}", source.as_str()))
+    /// `{source}:{external_id}`.
+    pub fn new(source: &SourceName, external_id: &str) -> Self {
+        Self(format!("{source}:{external_id}"))
     }
 }
 
@@ -329,29 +391,29 @@ pub struct Labels {
     pub sensitivity: Sensitivity,
 }
 
-/// What a source connector produces for one source unit.
+/// What a source connector produces for one unit of its corpus (a file, a page, a record).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Document {
-    /// The connector that produced it.
-    pub source: SourceKind,
-    /// Path relative to the docs root, with `/` separators.
+    /// The connector that produced it; see [`crate::ingest::Source::name`].
+    pub source: SourceName,
+    /// The connector's own stable key for the document, unique within the source.
     pub external_id: String,
-    /// The first level-1 heading, else the file stem.
+    /// Shown with every citation of its chunks.
     pub title: String,
-    /// Citation link for the whole file: `RECALL_DOCS_BASE_URL` joined with the path, else the bare path.
+    /// Citation link for the whole document.
     pub url: String,
-    /// File modification time.
+    /// When the source last changed the document.
     pub updated_at: DateTime<Utc>,
     /// Copied onto every chunk.
     pub labels: Labels,
-    /// In file order; locators are unique within the document.
+    /// In document order; locators are unique within the document.
     pub chunks: Vec<ChunkDraft>,
 }
 
 impl Document {
     /// See [`DocumentId::new`].
     pub fn id(&self) -> DocumentId {
-        DocumentId::new(self.source, &self.external_id)
+        DocumentId::new(&self.source, &self.external_id)
     }
 
     /// The id `draft` gets once stored; see [`ChunkId::new`].
@@ -360,19 +422,18 @@ impl Document {
     }
 }
 
-/// One heading section of a [`Document`], before it is versioned, embedded and stored as a [`Chunk`].
+/// One section of a [`Document`], before it is versioned, embedded and stored as a [`Chunk`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChunkDraft {
-    /// Unique within the document and stable across re-ingestion: the heading slug, or `intro` for text before
-    /// the first heading.
+    /// Unique within the document and stable across re-ingestion, so an unchanged section keeps its chunk id.
     pub locator: String,
-    /// Heading path joined with ` > `; `None` for the intro.
+    /// Where the section sits in the document, e.g. a heading path; `None` for an untitled section.
     pub heading: Option<String>,
     /// Deep link to the section.
     pub url: String,
-    /// Section body, trimmed, without its heading line.
+    /// Section body, without its heading.
     pub text: String,
-    /// In the authoritative layer: a settled answer, not supporting evidence.
+    /// A settled answer, not supporting evidence; the connector decides which.
     pub authoritative: bool,
 }
 
@@ -386,7 +447,7 @@ pub struct Chunk {
     /// The document it was cut from.
     pub document_id: DocumentId,
     /// The document's source.
-    pub source: SourceKind,
+    pub source: SourceName,
     /// The document's title.
     pub title: String,
     /// See [`ChunkDraft::heading`].
@@ -565,8 +626,42 @@ mod tests {
     }
 
     #[test]
-    fn source_text_matches_serde_and_round_trips() {
-        assert_text_matches_serde(&SourceKind::ALL, SourceKind::as_str);
+    fn source_name_accepts_lowercase_ids_and_rejects_the_rest() {
+        for good in ["markdown", "confluence", "jira-cloud", "db_2", "9"] {
+            assert_eq!(SourceName::new(good).unwrap().as_str(), good);
+        }
+        for bad in [
+            "",
+            "Markdown",
+            "wiki:pages",
+            "a b",
+            "docs/x",
+            "doc#1",
+            "café",
+        ] {
+            assert_eq!(SourceName::new(bad), Err(InvalidSourceName(bad.to_owned())));
+        }
+    }
+
+    #[test]
+    fn source_name_is_a_bare_string_and_deserialization_checks_it() {
+        let name = SourceName::from_static("wiki");
+        assert_eq!(serde_json::to_value(&name).unwrap(), "wiki");
+        assert_eq!(
+            serde_json::from_str::<SourceName>("\"wiki\"").unwrap(),
+            name
+        );
+        assert!(serde_json::from_str::<SourceName>("\"wiki:x\"").is_err());
+        assert_eq!(
+            DocumentId::new(&name, "a/b.md"),
+            DocumentId("wiki:a/b.md".into())
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "a source name is")]
+    fn from_static_rejects_an_invalid_name() {
+        let _ = SourceName::from_static("Not:Valid");
     }
 
     #[test]
@@ -584,7 +679,7 @@ mod tests {
     #[test]
     fn chunk_version_changes_with_embedding_model() {
         let document = Document {
-            source: SourceKind::Markdown,
+            source: SourceName::from_static("markdown"),
             external_id: "roles.md".into(),
             title: "Roles".into(),
             url: "https://example.test/roles.md".into(),

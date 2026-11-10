@@ -7,7 +7,7 @@ use pgvector::Vector;
 use sqlx::PgPool;
 
 use crate::{
-    domain::{ChunkDraft, ChunkVersion, Document, DocumentId, SourceKind},
+    domain::{ChunkDraft, ChunkVersion, Document, DocumentId, SourceName},
     llm::{EMBEDDING_DIM, EmbedPurpose, Embedder, ModelRef},
 };
 
@@ -288,7 +288,7 @@ impl ChunkStore {
     /// When the query fails.
     pub async fn supersede_missing_documents(
         &self,
-        source: SourceKind,
+        source: &SourceName,
         present: &[DocumentId],
     ) -> eros::Result<u64, (sqlx::Error,)> {
         let ids: Vec<&str> = present.iter().map(|d| d.0.as_str()).collect();

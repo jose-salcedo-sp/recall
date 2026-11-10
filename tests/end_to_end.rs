@@ -14,8 +14,8 @@ use axum::{
 use chrono::Utc;
 use http_body_util::BodyExt;
 use recall::{
-    domain::{ChunkDraft, Document, Labels, Sensitivity, SourceKind},
-    ingest::{Source, fakes::StaticSource, ingest},
+    domain::{ChunkDraft, Document, Labels, Sensitivity},
+    ingest::{Sources, fakes::StaticSource, ingest, markdown},
     llm::fakes::{HashEmbedder, ScriptedChat},
     pipeline::answerer::PipelineAnswerer,
     retrieval::hybrid::{HybridConfig, HybridRetriever},
@@ -28,7 +28,7 @@ use tower::ServiceExt;
 
 fn roles_page() -> Document {
     Document {
-        source: SourceKind::Markdown,
+        source: markdown::NAME.clone(),
         external_id: "roles.md".into(),
         title: "Role tables".into(),
         url: "https://wiki.example.test/roles.md".into(),
@@ -60,10 +60,10 @@ fn roles_page() -> Document {
 /// Ingest, hybrid retrieval, the pipeline, the HTTP API, and the run store, with only the models faked.
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn an_ingested_page_answers_a_question_over_http(pool: PgPool) -> eros::Result<()> {
-    let sources: Vec<Box<dyn Source>> = vec![Box::new(StaticSource {
-        kind: SourceKind::Markdown,
+    let sources = Sources::new(vec![Box::new(StaticSource {
+        name: markdown::NAME.clone(),
         documents: vec![roles_page()],
-    })];
+    })])?;
     ingest(&pool, &HashEmbedder, &sources, false).await?;
 
     let retriever = HybridRetriever::new(
