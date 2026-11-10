@@ -60,7 +60,7 @@ pub struct PipelineArgs {
     pub system_one: SystemOneArgs,
 }
 
-/// The models a pipeline calls, recorded with every `drew eval` run.
+/// The models a pipeline calls, recorded with every `recall eval` run.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Models {
     /// `None` when the retriever was built outside `from_args`.
@@ -138,7 +138,8 @@ impl PipelineAnswerer {
             admit_open: admit(&config.admit, judge.as_ref()),
             admit_boolean: admit(&config.admit, judge.as_ref()),
             open: Seq(
-                Explain::new(Arc::clone(&explain), config.explain.max_tokens),
+                Explain::new(Arc::clone(&explain), config.explain.max_tokens)
+                    .with_instructions(config.explain.instructions.clone()),
                 Verify::from_config(&config.verify, judge.clone()),
             ),
             boolean: Seq(
@@ -147,7 +148,8 @@ impl PipelineAnswerer {
                     threshold(CategoryKind::Boolean, StepName::Answer),
                 ),
                 Seq(
-                    Explain::new(Arc::clone(&explain), config.explain.max_tokens),
+                    Explain::new(Arc::clone(&explain), config.explain.max_tokens)
+                        .with_instructions(config.explain.instructions.clone()),
                     Verify::from_config(&config.verify, judge),
                 ),
             ),

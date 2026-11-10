@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use drew::llm::judge::{InvalidJudgement, Judge, JudgeOption, JudgeQuestion, JudgeRequest};
+use recall::llm::judge::{InvalidJudgement, Judge, JudgeOption, JudgeQuestion, JudgeRequest};
 
 /// What the adapter under test is set up to answer: the yes/no question's probability, and the one-of question's
 /// probability per option of [`request`], or nothing for it.
@@ -27,13 +27,13 @@ const OPTIONS: [JudgeOption; 2] = [
 
 fn request() -> JudgeRequest {
     JudgeRequest {
-        text: "AGR_USERS maps users to roles.".into(),
+        text: "ROLE_USERS maps users to roles.".into(),
         questions: vec![
             JudgeQuestion::YesNo {
                 instructions: "Does this text name a table?".into(),
             },
             JudgeQuestion::OneOf {
-                instructions: "How does this text relate to the claim: AGR_USERS stores roles"
+                instructions: "How does this text relate to the claim: ROLE_USERS stores roles"
                     .into(),
                 options: OPTIONS.to_vec(),
             },
@@ -94,7 +94,7 @@ macro_rules! judge_contract {
 mod fake {
     use std::sync::Arc;
 
-    use drew::llm::judge::{FnJudge, Judge, JudgeQuestion, RawJudgement};
+    use recall::llm::judge::{FnJudge, Judge, JudgeQuestion, RawJudgement};
 
     use super::Answers;
 
@@ -114,7 +114,7 @@ mod system_one {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use drew::llm::{
+    use recall::llm::{
         ModelRef,
         judge::{Judge, JudgeRequest, Judgements, SystemOneJudge},
         system_one::HttpSystemOne,
@@ -146,7 +146,7 @@ mod system_one {
         Mock::given(method("POST"))
             .and(path("/v1/systemone"))
             .and(body_partial_json(json!({
-                "state": "AGR_USERS maps users to roles.",
+                "state": "ROLE_USERS maps users to roles.",
                 "questions": {
                     "q0": { "type": "noul" },
                     "q1": {

@@ -1,40 +1,35 @@
-# Drew AI
+# recall
 
-Drew AI answers questions about SAP and ARM internals from **Drew Steinfatt's pre-audited markdown documentation**. Every answer cites its sources; when the sources don't support an answer, it declines instead of guessing.
+recall is a backend-agnostic provenance system in Rust. It answers questions from an ingested corpus so that every claim cites the exact chunk versions it came from, is checked against them before anything is shown, and is stored with a full trace of how it was produced. When the sources do not support an answer, it declines instead of guessing.
 
-It ships as a **developer-facing Slack bot** (Socket Mode, in `drew serve`) and an **OpenAI-compatible HTTP API**.
+The core is domain-free. Corpora, answering rules, golden sets and front ends belong to the application that uses it: a source connector, `explain.instructions` and its own config. Every model and store sits behind a port with a fake and contract tests, so a backend is an adapter, not a dependency of the pipeline.
 
-- [Design](docs/design.md): scope, pipeline model, evaluation, and milestones.
-- [Architecture diagram](docs/archify/architecture.html): open it in a browser.
+- [Design](docs/design.md): the pipeline model, ports, provenance checks, trace and evaluation.
+- [Conventions](AGENTS.md): the done checks and the coding rules.
 
-## Status
+## What it does
 
-What works today:
+- **Ingest**: a `Source` port returns document snapshots; chunks are content-addressed (`ChunkRef {id, version}`), so a trace stays reproducible after the corpus changes. A markdown-directory connector ships.
+- **Retrieve**: hybrid full-text (BM25 over prose, exact identifier tokens) and vector search in Postgres with pgvector, fused by reciprocal rank, with neighbouring sections as context and optional glossary expansion.
+- **Decide and explain**: a decision model (System One) classifies the question and answers yes/no questions with calibrated probabilities; an LLM writes the answer as claims whose citations are constrained to this run's chunks.
+- **Provenance checks**: a vendor-neutral `Judge` port screens sources before they reach the LLM (injection, relevance, contradiction, evidence) and checks each claim against the chunks it cites (quoted spans, then supports / contradicts / says nothing). Failed claims decline the run or are stripped.
+- **Audit**: every run, answered, declined or failed, is persisted with its trace: each step's model, prompt version, score and raw output, every admission screen and every claim verdict. `GET /v1/runs/{id}` returns it.
+- **Evaluate**: `recall eval` scores a golden set per step (classification, recall@50, hit@5, precision, decline and failure rates, citation validity, faithfulness), gates against a baseline, and re-tunes thresholds from recorded scores.
 
-- Batch ingestion of a markdown directory into Postgres with pgvector.
-- Hybrid retrieval (full text + vectors, reciprocal rank fusion).
-- Classify and Answer on a System One model ([Kev](https://github.com/jaredpalmer/kev)), with calibrated confidence scores; Rerank on it too when `rerank.judge` says so.
-- The `open` path end to end: retrieve, rerank, explain with an LLM, verify every citation.
-- OpenAI-compatible HTTP API, run persistence with full traces (trace on `GET /v1/runs/{id}`, not in chat responses).
-- Optional Slack bot when `SLACK_APP_TOKEN` and `SLACK_BOT_TOKEN` are set.
-- `drew eval`, and local, hosted (Cloudflare Workers AI) or Bedrock models; `drew models check` calls each one once.
-
-Yes/no questions get a verdict: Kev answers yes or no over the reranked sources, the LLM explains why, and the run declines when the sources contradict the verdict or Kev is not confident enough. A classification below `classify.min_confidence` falls back to `open`.
-
-Not built yet: Answer for `choice` and `ranking` (they take the `open` path); permission enforcement.
+Not built yet: Answer for `choice` and `ranking` (they take the `open` path); permission enforcement over the recorded labels.
 
 ## How a question is answered
 
 ```
-Classify ∥ Retrieve → Rerank → Explain → Verify
+Classify ∥ Retrieve → Rerank [→ Admit] [→ Answer] → Explain → Verify
 ```
 
 ```mermaid
 sequenceDiagram
-    actor C as Client (API or Slack)
-    participant S as drew serve
+    actor C as Client
+    participant S as recall serve
     participant P as Pipeline
-    participant K as System One (Kev)
+    participant K as System One / Judge
     participant E as Embeddings
     participant DB as Postgres + pgvector
     participant L as Explain LLM
@@ -83,20 +78,7 @@ sequenceDiagram
     S-->>C: answer with numbered citations and the run id
 ```
 
-Each step is typed, so a pipeline with steps in the wrong order does not compile. Verify rejects any claim without a citation, or citing a chunk the run did not retrieve. Every run, including declines and failures, is stored with a trace of each step's model, prompt version, score, and raw output.
-
-## Latest evaluation
-
-The benchmark is the DaaS golden set (`eval/golden/daas.jsonl`, 58 questions), run on 2026-10-19 at `e35960e` with local models: `bge-m3` embeddings, Kev 4B for System One (Classify, Rerank, Answer) and `qwen3:14b` for Explain. Config: [`config/drew.json`](config/drew.json). Full runs, traces and setup: [`eval/results/daas-2026-10-19-v3.json`](eval/results/daas-2026-10-19-v3.json). Gate later runs against it with `--baseline`.
-
-| Scope | Runs | Classify | Recall@50 | Hit@5 | Precision | Declined | Failed | Citations valid |
-|---|---|---|---|---|---|---|---|---|
-| Overall | 58 | 93.1% | 78.4% | 70.7% | 71.4% | 17.2% | 0.0% | 100.0% |
-| Boolean | 15 | 93.3% | 56.7% | 46.7% | 83.3% | 60.0% | 0.0% | 100.0% |
-| Choice | 1 | 100.0% | 100.0% | 100.0% | 0.0% | 0.0% | 0.0% | 100.0% |
-| Open | 42 | 92.9% | 85.7% | 78.6% | - | 2.4% | 0.0% | 100.0% |
-
-Every yes/no verdict Kev gave was right (5 of 5); precision also counts Q50, which was classified `open` and so has no verdict, and the choice question, which takes the `open` path until `Answer<Choice>` exists. Most yes/no questions decline at the Answer threshold (0.7) because Kev 4B's probability of yes sits between 0.3 and 0.7 on them. The first run of the day, before the Answer step and the fused Rerank, scored hit@5 36% and classification 83% ([`daas-2026-10-19.json`](eval/results/daas-2026-10-19.json)).
+Each step is typed, so a pipeline with steps in the wrong order does not compile. Verify rejects any claim without a citation or citing a chunk the run did not retrieve and, when configured, any claim whose quoted spans or judged support its cited chunks do not back. Every run, including declines and failures, is stored with a trace of each step's model, prompt version, score, raw output, admission screens and claim verdicts: the audit record.
 
 ## Running locally
 
@@ -107,32 +89,21 @@ docker compose up -d --wait db     # Postgres + pgvector on localhost:5433
 cp .env.example .env               # then fill it in, see Configuration
 set -a; source .env; set +a
 
-export DREW_DOCS_DIR=/path/to/drew-markdown   # your audited corpus
+export RECALL_DOCS_DIR=/path/to/markdown
 cargo run -- ingest
-cargo run -- serve                 # API on DREW_BIND; Slack bot if tokens are set
+cargo run -- serve                 # API on RECALL_BIND
 ```
 
 Ask a question:
 
 ```sh
 curl -s localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer sk-local-drew" \
+  -H "Authorization: Bearer sk-local-admin" \
   -H "Content-Type: application/json" \
-  -d '{"model": "drew-ai", "messages": [{"role": "user", "content": "What does AGR_USERS store?"}]}'
+  -d '{"model": "recall", "messages": [{"role": "user", "content": "Which table maps users to roles?"}]}'
 ```
 
-The answer is in `choices[0].message.content`. The top-level `drew` object carries the run id, outcome, and citations. Use `GET /v1/runs/{id}` for the full trace (admins listed in `DREW_ADMIN_USERS` can read any run).
-
-### Slack app setup
-
-1. Create a Slack app with **Socket Mode** enabled.
-2. App-level token with `connections:write` → `SLACK_APP_TOKEN` (`xapp-…`).
-3. Bot token scopes: `app_mentions:read`, `chat:write`, `im:history`.
-4. Subscribe to bot events: `app_mention`, `message.im`.
-5. Enable the App Home **Messages** tab for DMs.
-6. Set `SLACK_BOT_TOKEN` (`xoxb-…`) and restart `drew serve`.
-
-The bot replies in threads on `@mentions` and in DMs. Runs are stored as user `slack:{slack_user_id}`.
+The answer is in `choices[0].message.content`. The top-level `provenance` object carries the run id, outcome, and citations. Use `GET /v1/runs/{id}` for the full trace (admins listed in `RECALL_ADMIN_USERS` can read any run).
 
 ### Running fully locally
 
@@ -148,7 +119,7 @@ The bot replies in threads on `@mentions` and in DMs. Runs are stored as user `s
 
 - **System One (Classify): [Kev](https://github.com/jaredpalmer/kev)** on Apple Silicon via MLX.
 
-Switching embedding models requires `drew ingest --reembed`.
+Switching embedding models requires `recall ingest --reembed`.
 
 ### Running on hosted models
 
@@ -159,53 +130,54 @@ docker compose up -d --wait db-hosted   # its own database on port 5434; the hos
 set -a; source .env; set +a        # in a fresh shell, so no variable from the old block lingers
 cargo run -- models check          # one call to each model: its model id, endpoint, latency, and ok or the full error
 cargo run -- ingest                # a fresh corpus embedded by the hosted model; `db` keeps the local one
-cargo run -- eval run --golden eval/golden/daas.jsonl --out eval/results/daas-workers-ai.json --concurrency 2
-cargo run -- eval tune --results eval/results/daas-workers-ai.json --candidates candidates.json
+cargo run -- eval run --golden your-golden.jsonl --out eval/results/workers-ai.json --concurrency 2
+cargo run -- eval tune --results eval/results/workers-ai.json --candidates candidates.json
 ```
 
-`drew models check` exits non-zero when any backend fails. Each line shows the endpoint called (scheme, host and path; no keys or query), so a URL left over from another block is visible. It names Bedrock, with its AWS region and credentials provider, whenever a port is on Bedrock, so a wrong `.env` is obvious before a long run.
+`recall models check` exits non-zero when any backend fails. Each line shows the endpoint called (scheme, host and path; no keys or query), so a URL left over from another block is visible. It names Bedrock, with its AWS region and credentials provider, whenever a port is on Bedrock, so a wrong `.env` is obvious before a long run.
 
-Re-tune the thresholds: Clef Flash is calibrated differently from Kev, so the `classify.min_confidence` and `answer` thresholds in `config/drew.json` were tuned for another model's probabilities. `drew eval tune` re-applies candidate thresholds to the new run's recorded scores without calling any model; paste the best candidate into the config.
+Re-tune the thresholds: Clef Flash is calibrated differently from Kev, so the `classify.min_confidence` and `answer` thresholds in `config/recall.json` were tuned for another model's probabilities. `recall eval tune` re-applies candidate thresholds to the new run's recorded scores without calling any model; paste the best candidate into the config.
 
 What the configuration relies on:
 
-- **Chat and embeddings** use the `workers-ai` backend: `DREW_*_ACCOUNT_ID`, `DREW_*_KEY` (the API token) and the model id, with `Authorization: Bearer <token>`; a `DREW_*_URL` left over from another block is rejected. Explain posts to Workers AI's [OpenAI-compatible](https://developers.cloudflare.com/workers-ai/configuration/open-ai-compatibility/) `.../accounts/{ACCOUNT_ID}/ai/v1/chat/completions`. Embeddings run on the native `.../accounts/{ACCOUNT_ID}/ai/run/@cf/baai/bge-m3` with `{"text": [...], "truncate_inputs": true}`, since the OpenAI-compatible route ignores `truncate_inputs`. A failure is reported by Workers AI's `errors`, with the model and route.
+- **Chat and embeddings** use the `workers-ai` backend: `RECALL_*_ACCOUNT_ID`, `RECALL_*_KEY` (the API token) and the model id, with `Authorization: Bearer <token>`; a `RECALL_*_URL` left over from another block is rejected. Explain posts to Workers AI's [OpenAI-compatible](https://developers.cloudflare.com/workers-ai/configuration/open-ai-compatibility/) `.../accounts/{ACCOUNT_ID}/ai/v1/chat/completions`. Embeddings run on the native `.../accounts/{ACCOUNT_ID}/ai/run/@cf/baai/bge-m3` with `{"text": [...], "truncate_inputs": true}`, since the OpenAI-compatible route ignores `truncate_inputs`. A failure is reported by Workers AI's `errors`, with the model and route.
 - **Long sections are embedded from their first 8,192 tokens**, bge-m3's input limit, as Ollama's bge-m3 does, so hosted and local vectors match. Without truncation such a section fails (`Sequence too long: 10670 > 8192`). The chunk keeps its id and full text, which BM25 and Explain still use. Each embed call logs one warning with the number of inputs estimated over the limit.
-- **Embedding batches.** `@cf/baai/bge-m3` rejects a request over its 60,000-token [context](https://developers.cloudflare.com/workers-ai/models/bge-m3/) (`Max context reached ... but model supports only 60000`), and Workers AI counts a request as its text count times its longest text's tokens: every input is padded to the longest, so 35 sections with one of 2,916 tokens count as 102,060. The `workers-ai` embedder knows that limit and packs each request, still at most 64 texts, so that count times its longest text's estimate, at 3 bytes a token, which overcounts prose and markdown, stays under 50,000; the margin to 60,000 covers text that tokenizes denser. No setting changes it: `DREW_EMBED_MAX_BATCH_TOKENS` is for `openai-compatible` servers and is rejected here, and an embedding model whose limit Drew does not know is rejected at startup with the supported list (`@cf/baai/bge-m3`). A chunk estimated over the budget alone goes in a request of its own.
-- **Reasoning effort.** [qwen3.8-27b](https://developers.cloudflare.com/workers-ai/models/qwen3.8-27b/) takes `reasoning_effort` `low`, `medium` or `xhigh` (the default). `DREW_EXPLAIN_REASONING_EFFORT` sends it only when set. Use `medium`: `low` with a `json_schema` response format, which Explain always sends, [times out at 120 s](https://github.com/cloudflare/workers-sdk/issues/16165).
-- **`max_tokens` includes the reasoning** on a reasoning model. Explain's budget is `explain.max_tokens` in the pipeline config: 2,048 in `config/drew.json`, enough for `qwen3:14b`'s answer alone, and 8,192 in `config/drew-workers-ai.json`, which the hosted block selects with `DREW_CONFIG`. Use 8,192 for qwen3.8-27b at `reasoning_effort` `medium`: its reasoning comes out of the same budget before the answer, and at 2,048 it left too little, so the JSON answer was cut off mid-string (`EOF while parsing a string`). A reply stopped at the limit (`finish_reason length`, or Bedrock's stop reason `max_tokens`) fails the run with `answer cut off at max_tokens=N`, even when part of the answer arrived: a budget too small for the model is a configuration problem, not a question Drew cannot answer. Reasoning never reaches the answer: a separate `reasoning` field is not read, and a `<think>` block is dropped.
-- **Schema shape.** Drew sends OpenAI's `response_format.json_schema` form, `{name, strict, schema}`. Workers AI's [JSON Mode documentation](https://developers.cloudflare.com/workers-ai/features/json-mode/) shows the bare schema instead; if Workers AI rejects or ignores the OpenAI form, set `DREW_EXPLAIN_SCHEMA_FORMAT=bare`.
-- **Clef Flash** ([model page](https://developers.cloudflare.com/workers-ai/models/clef-flash/)) answers the System One request at `POST .../accounts/{ACCOUNT_ID}/ai/run/@cf/cloudflare/clef-flash`, with `model` set to `clef-flash`, inside Workers AI's `{result, success, errors, messages}` envelope. Its context is 24,576 tokens, and a longer text state is truncated to fit without an error. Drew caps a state at 16,000 characters and logs a warning when a request's input tokens come within 512 of the limit. It costs $0.038 per million input tokens, and output is free.
+- **Embedding batches.** `@cf/baai/bge-m3` rejects a request over its 60,000-token [context](https://developers.cloudflare.com/workers-ai/models/bge-m3/) (`Max context reached ... but model supports only 60000`), and Workers AI counts a request as its text count times its longest text's tokens: every input is padded to the longest, so 35 sections with one of 2,916 tokens count as 102,060. The `workers-ai` embedder knows that limit and packs each request, still at most 64 texts, so that count times its longest text's estimate, at 3 bytes a token, which overcounts prose and markdown, stays under 50,000; the margin to 60,000 covers text that tokenizes denser. No setting changes it: `RECALL_EMBED_MAX_BATCH_TOKENS` is for `openai-compatible` servers and is rejected here, and an embedding model whose limit the adapter does not know is rejected at startup with the supported list (`@cf/baai/bge-m3`). A chunk estimated over the budget alone goes in a request of its own.
+- **Reasoning effort.** [qwen3.8-27b](https://developers.cloudflare.com/workers-ai/models/qwen3.8-27b/) takes `reasoning_effort` `low`, `medium` or `xhigh` (the default). `RECALL_EXPLAIN_REASONING_EFFORT` sends it only when set. Use `medium`: `low` with a `json_schema` response format, which Explain always sends, [times out at 120 s](https://github.com/cloudflare/workers-sdk/issues/16165).
+- **`max_tokens` includes the reasoning** on a reasoning model. Explain's budget is `explain.max_tokens` in the pipeline config: 2,048 in `config/recall.json`, enough for `qwen3:14b`'s answer alone, and 8,192 in `config/recall-workers-ai.json`, which the hosted block selects with `RECALL_CONFIG`. Use 8,192 for qwen3.8-27b at `reasoning_effort` `medium`: its reasoning comes out of the same budget before the answer, and at 2,048 it left too little, so the JSON answer was cut off mid-string (`EOF while parsing a string`). A reply stopped at the limit (`finish_reason length`, or Bedrock's stop reason `max_tokens`) fails the run with `answer cut off at max_tokens=N`, even when part of the answer arrived: a budget too small for the model is a configuration problem, not a question the sources cannot answer. Reasoning never reaches the answer: a separate `reasoning` field is not read, and a `<think>` block is dropped.
+- **Schema shape.** The adapter sends OpenAI's `response_format.json_schema` form, `{name, strict, schema}`. Workers AI's [JSON Mode documentation](https://developers.cloudflare.com/workers-ai/features/json-mode/) shows the bare schema instead; if Workers AI rejects or ignores the OpenAI form, set `RECALL_EXPLAIN_SCHEMA_FORMAT=bare`.
+- **Clef Flash** ([model page](https://developers.cloudflare.com/workers-ai/models/clef-flash/)) answers the System One request at `POST .../accounts/{ACCOUNT_ID}/ai/run/@cf/cloudflare/clef-flash`, with `model` set to `clef-flash`, inside Workers AI's `{result, success, errors, messages}` envelope. Its context is 24,576 tokens, and a longer text state is truncated to fit without an error. recall caps a state at 16,000 characters and logs a warning when a request's input tokens come within 512 of the limit. It costs $0.038 per million input tokens, and output is free.
 - **system-one.dev** hosts Clef Flash too, behind the System One API (`POST https://system-one.dev/v1/systemone`, bearer key, 120 decision requests a minute by default, model `clef-flash` per `GET https://system-one.dev/v1/models`; [API docs](https://docs.system-one.dev/en/docs/api)). Use the commented alternative in `.env.example`.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `drew serve` | OpenAI API plus optional Slack bot |
-| `drew ingest` | Snapshot ingest from `DREW_DOCS_DIR`; `--reembed` after changing the embedding model |
-| `drew models check` | One call to the embedder, the Explain LLM and System One, with the same arguments as `serve` and `eval run`; prints each model, endpoint, latency and outcome, and exits non-zero when any fails |
-| `drew eval run …` / `drew eval tune …` | Golden-set metrics and threshold tuning. `eval/golden/daas.jsonl` holds DaaS's own golden questions (`_ops/EVAL.md`, held out of the corpus): `drew eval run --golden eval/golden/daas.jsonl --out eval/results/daas.json --concurrency 2`. `--question daas-q13` (repeatable, or comma-separated) runs only those questions; with `--baseline`, the baseline is compared on the same questions |
-| `cargo eval-misses` | The eight DaaS questions whose relevant chunks retrieval missed at `4ebe407`, compared against that run (`eval/results/daas-2026-10-21-v4.json`). Run it before the full golden set when changing retrieval. Output goes to `eval/results/retrieval-misses.json` (gitignored); extra `--question` ids are appended to the set |
-| `drew eval retrieval …` / `cargo eval-retrieval` | Runs only Retrieve (embedder and database; no System One, no LLM) on the golden set and prints recall@10 and recall@50 per question and per category. Recall counts matches only, not the neighbouring sections added as context. `--baseline` takes an `eval run` or `eval retrieval` results file and lists each question as gained, lost or unchanged; a lost question exits non-zero. The alias runs all DaaS questions against `eval/results/daas-retrieval-2026-10-22-bm25.json` (retrieval at `6752079`, with BM25: recall@10 68.1%, recall@50 86.2%; before BM25, `daas-retrieval-2026-10-22.json`: 61.2% and 79.3%), not the v4 full run that `cargo eval-misses` uses, since v4 predates `context_for` and counts context chunks; it writes `eval/results/retrieval.json` (gitignored) |
+| `recall serve` | OpenAI-compatible API: `/v1/models`, `/v1/chat/completions`, `/v1/runs/{id}` |
+| `recall ingest` | Snapshot ingest from `RECALL_DOCS_DIR`; `--reembed` after changing the embedding model |
+| `recall models check` | One call to the embedder, the Explain LLM and System One, with the same arguments as `serve` and `eval run`; prints each model, endpoint, latency and outcome, and exits non-zero when any fails |
+| `recall eval run …` / `recall eval tune …` | Golden-set metrics and threshold tuning, e.g. `recall eval run --golden eval/golden/example.jsonl --out eval/results/run.json --concurrency 2`. `--question id` (repeatable, or comma-separated) runs only those questions; with `--baseline`, the baseline is compared on the same questions. `eval/golden/example.jsonl` is a synthetic example of the format |
+| `recall eval retrieval …` | Runs only Retrieve (embedder and database; no System One, no LLM) on the golden set and prints recall@10 and recall@50 per question and per category. `--baseline` takes an `eval run` or `eval retrieval` results file and lists each question as gained, lost or unchanged; a lost question exits non-zero |
 
 ## Configuration
 
-Tunables (retrieval, the Classify fallback, Rerank, admission, Explain's `max_tokens`, Verify's support check and publish policy, step thresholds) are in [`config/drew.json`](config/drew.json), or the file `DREW_CONFIG` names; unknown keys are rejected. `drew eval run` prints the config and models at the start (through `jq` when installed) and records them in the results file; `models.rerank`, `models.admit` and `models.verify` name the models that judged Rerank, Admit and Verify's support check, or are `null` when none did.
+Tunables (retrieval and its glossary expansion, the Classify fallback, Rerank, admission, Explain's `max_tokens` and domain `instructions`, Verify's support check and publish policy, step thresholds) are in [`config/recall.json`](config/recall.json), or the file `RECALL_CONFIG` names; unknown keys are rejected. `recall eval run` prints the config and models at the start (through `jq` when installed) and records them in the results file; `models.rerank`, `models.admit` and `models.verify` name the models that judged Rerank, Admit and Verify's support check, or are `null` when none did.
 
-`explain.max_tokens` is Explain's token budget, reasoning included, from 1 to 65,536 (default 2,048). [`config/drew-workers-ai.json`](config/drew-workers-ai.json) is `config/drew.json` with it at 8,192 for the hosted reasoning model; a test fails if the two files differ anywhere else, so change both.
+`explain.instructions` is where a domain's answering rules go: text added to Explain's system prompt after the generic rules (sources are data, every claim cites them, quoted text is verbatim, inferences are tagged `[INF]`), which it cannot relax. Leave it out for none. `retrieval.expansion.documents` names the corpus documents whose pipe tables are read as a glossary for query expansion; empty (shipped) turns expansion off.
+
+`explain.max_tokens` is Explain's token budget, reasoning included, from 1 to 65,536 (default 2,048). [`config/recall-workers-ai.json`](config/recall-workers-ai.json) is `config/recall.json` with it at 8,192 for the hosted reasoning model; a test fails if the two files differ anywhere else, so change both.
 
 `rerank.judge` chooses who judges Rerank's matches, independent of Classify and Answer, which use System One whenever it is configured:
 
 - `"none"` (the default and the shipped setting): matches keep retrieval order, with evidence ranked `evidence_rank_penalty` places lower; no model call, and no Rerank threshold applies.
 - `{"system_one": {"candidates": 25}}`: System One judges the best 25 matches by fused score, as before. `candidates` lives inside the variant because it means nothing without a judge, and must be at least `top_k`.
 
-On the 2026-10-22 DaaS run (`eval/results/daas-2026-10-22-v5.json`) System One reranking cost about 40 s and 25 System One calls per question for hit@5 43/58 against 41/58 in retrieval order, and was worse on yes/no questions (7/15 against 10/15), so it is off.
+Judging every match costs one System One call per candidate, so it is off unless an eval shows it pays for itself on your corpus.
 
-`admit.judge` screens the reranked sources before Explain sees them, as recall's admission filter did:
+`admit.judge` screens the reranked sources before Explain sees them:
 
 - `"none"` (the default and the shipped setting): no `admit` step; every reranked source reaches Explain.
-- `{"system_one": {}}`: one System One request per source, when System One is configured. A match is asked four yes/no questions and routed by the first cutoff it crosses: `injection_max` (0.7) excludes it, `relevant_min` (0.45) excludes it, `contradicts_min` (0.7) keeps it as a conflict, and `evidence_min` (0.55) keeps it, else it is excluded. Context is only screened for injection and otherwise rides with its match. No kept match declines the run with `no_sources`. The cutoffs are uncalibrated; fit them with `drew eval` before relying on them. The corpus is pre-audited, which is why the shipped config leaves this off.
+- `{"system_one": {}}`: one System One request per source, when System One is configured. A match is asked four yes/no questions and routed by the first cutoff it crosses: `injection_max` (0.7) excludes it, `relevant_min` (0.45) excludes it, `contradicts_min` (0.7) keeps it as a conflict, and `evidence_min` (0.55) keeps it, else it is excluded. Context is only screened for injection and otherwise rides with its match. No kept match declines the run with `no_sources`. The cutoffs are uncalibrated; fit them with `recall eval` before relying on them. The shipped config leaves it off, since it adds a System One request per source; turn it on for a corpus you do not curate yourself.
 
 `verify.support` is what a claim must pass besides citing this run's sources:
 
@@ -213,26 +185,30 @@ On the 2026-10-22 DaaS run (`eval/results/daas-2026-10-22-v5.json`) System One r
 - `"quotes"`: also, every span in backticks or double quotes appears in a cited chunk; no model call.
 - `{"system_one": {"min_support": 0.75}}` (shipped): the quote check, then System One judges each cited chunk in order until one "supports" the claim with at least `min_support`. Without System One it falls back to `quotes`.
 
-`verify.publish` is `"decline"` (the default and shipped: any failed claim declines the run) or `"strip"` (failed claims are left out and the rest published; the run declines only when none passes). Every verdict is in the Verify trace record, and `drew eval` reports the share of judged claims that are supported as `faithfulness`.
+`verify.publish` is `"decline"` (the default and shipped: any failed claim declines the run) or `"strip"` (failed claims are left out and the rest published; the run declines only when none passes). Every verdict is in the Verify trace record, and `recall eval` reports the share of judged claims that are supported as `faithfulness`.
 
-See `.env.example`. Key variables: `DATABASE_URL`, `DREW_API_KEYS`, `DREW_ADMIN_USERS`, `DREW_DOCS_DIR`, `DREW_DOCS_BASE_URL`, `DREW_DOCS_AUTHORITATIVE` / `DREW_DOCS_EVIDENCE` / `DREW_DOCS_SKIP` (which paths are Drew's answers, which are supporting evidence, and which are left out), the model backends below, `SLACK_APP_TOKEN`, `SLACK_BOT_TOKEN`.
+See `.env.example`. Key variables: `DATABASE_URL`, `RECALL_API_KEYS`, `RECALL_ADMIN_USERS`, `RECALL_DOCS_DIR`, `RECALL_DOCS_BASE_URL`, `RECALL_DOCS_AUTHORITATIVE` / `RECALL_DOCS_EVIDENCE` / `RECALL_DOCS_SKIP` (which paths are authoritative, which are supporting evidence, and which are left out), and the model backends below.
 
 Each model port names its backend, with no default. A backend's missing or unparsable setting (a URL is checked when parsed), or a setting it does not use, is a startup error naming the variable. Keys are never printed.
 
 | Port | Backends | Variables |
 |---|---|---|
-| Embeddings | `bedrock`, `openai-compatible` (Ollama), `workers-ai` | `DREW_EMBED_BACKEND`, `DREW_EMBED_MODEL`; `openai-compatible`: `DREW_EMBED_URL`, optional `DREW_EMBED_KEY`, `DREW_EMBED_MAX_BATCH_TOKENS` (a positive integer); `workers-ai`: `DREW_EMBED_ACCOUNT_ID`, `DREW_EMBED_KEY`, model `@cf/baai/bge-m3`, and no URL or batch budget |
-| Explain | `bedrock`, `openai-compatible` (Ollama), `workers-ai` | `DREW_EXPLAIN_BACKEND`, `DREW_EXPLAIN_MODEL`; `openai-compatible`: `DREW_EXPLAIN_URL`, optional `DREW_EXPLAIN_KEY`; `workers-ai`: `DREW_EXPLAIN_ACCOUNT_ID`, `DREW_EXPLAIN_KEY`, a `@cf/...` model id, and no URL; both: optional `DREW_EXPLAIN_REASONING_EFFORT` (`low`, `medium`, `xhigh`), `DREW_EXPLAIN_SCHEMA_FORMAT` (`openai`, `bare`) |
-| System One | `none`, `system-one` (Kev, system-one.dev), `workers-ai` (Clef) | `DREW_SYSTEM_ONE_BACKEND`; `system-one`: `DREW_SYSTEM_ONE_URL`, `DREW_SYSTEM_ONE_MODEL`, optional `DREW_SYSTEM_ONE_KEY`; `workers-ai`: `DREW_SYSTEM_ONE_ACCOUNT_ID`, `DREW_SYSTEM_ONE_MODEL`, `DREW_SYSTEM_ONE_KEY`, and no URL: it always calls `api.cloudflare.com`, and a set `DREW_SYSTEM_ONE_URL` (say, Kev's, left from the local block) is a startup error |
+| Embeddings | `bedrock`, `openai-compatible` (Ollama), `workers-ai` | `RECALL_EMBED_BACKEND`, `RECALL_EMBED_MODEL`; `openai-compatible`: `RECALL_EMBED_URL`, optional `RECALL_EMBED_KEY`, `RECALL_EMBED_MAX_BATCH_TOKENS` (a positive integer); `workers-ai`: `RECALL_EMBED_ACCOUNT_ID`, `RECALL_EMBED_KEY`, model `@cf/baai/bge-m3`, and no URL or batch budget |
+| Explain | `bedrock`, `openai-compatible` (Ollama), `workers-ai` | `RECALL_EXPLAIN_BACKEND`, `RECALL_EXPLAIN_MODEL`; `openai-compatible`: `RECALL_EXPLAIN_URL`, optional `RECALL_EXPLAIN_KEY`; `workers-ai`: `RECALL_EXPLAIN_ACCOUNT_ID`, `RECALL_EXPLAIN_KEY`, a `@cf/...` model id, and no URL; both: optional `RECALL_EXPLAIN_REASONING_EFFORT` (`low`, `medium`, `xhigh`), `RECALL_EXPLAIN_SCHEMA_FORMAT` (`openai`, `bare`) |
+| System One | `none`, `system-one` (Kev, system-one.dev), `workers-ai` (Clef) | `RECALL_SYSTEM_ONE_BACKEND`; `system-one`: `RECALL_SYSTEM_ONE_URL`, `RECALL_SYSTEM_ONE_MODEL`, optional `RECALL_SYSTEM_ONE_KEY`; `workers-ai`: `RECALL_SYSTEM_ONE_ACCOUNT_ID`, `RECALL_SYSTEM_ONE_MODEL`, `RECALL_SYSTEM_ONE_KEY`, and no URL: it always calls `api.cloudflare.com`, and a set `RECALL_SYSTEM_ONE_URL` (say, Kev's, left from the local block) is a startup error |
 
 ## Code layout
 
 | Path | Contents |
 |---|---|
-| `src/ingest/markdown.rs` | Markdown directory source and heading-section chunking |
-| `src/slack/` | Socket Mode bot, Slack API client, mrkdwn rendering |
-| `src/pipeline/` | Typed pipeline and steps |
+| `src/domain.rs` | Shared types: questions, chunks and their versions, citations, provenance, probabilities |
+| `src/ingest/` | The `Source` port, versioning and embedding; `markdown.rs` is the markdown-directory connector |
+| `src/retrieval/` | The `Retriever` port and the hybrid Postgres retriever |
+| `src/llm/` | Model ports (`Embedder`, `ChatModel`, `SystemOne`, `Judge`), their adapters and fakes |
+| `src/pipeline/` | Typed pipeline, steps (`Classify`, `Retrieve`, `Rerank`, `Admit`, `Answer`, `Explain`, `Verify`), trace and report |
+| `src/store/` | The `RunStore` port and Postgres stores |
 | `src/server/` | OpenAI-compatible HTTP API |
+| `src/eval/` | Golden-set metrics, baseline gate, threshold tuning |
 | `migrations/` | Postgres schema |
 
 ## Development
@@ -242,8 +218,10 @@ With the database running:
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo nextest run        # brew install cargo-nextest, or cargo install cargo-nextest --locked
+cargo nextest run        # cargo install cargo-nextest --locked
 cargo test --doc         # nextest does not run doctests; the compile_fail ones guard the pipeline types
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+cargo audit
 ```
 
 Conventions are in [AGENTS.md](AGENTS.md).

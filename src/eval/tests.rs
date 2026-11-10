@@ -249,11 +249,11 @@ fn fixture() -> Vec<(GoldenQuestion, RunReport)> {
     );
 
     // Wrong choice: recall 1, relevant chunk only at rerank rank 6, cites an unretrieved chunk.
-    let c1 = golden("c1", Expected::Choice("S_TCODE".into()), &["c"]);
+    let c1 = golden("c1", Expected::Choice("A_OPCODE".into()), &["c"]);
     let c1_report = report(
         &c1,
         Some(Choice),
-        answered(selected("S_TABU_DIS", "z"), &["z"]),
+        answered(selected("A_TABLE_GRP", "z"), &["z"]),
         vec![
             classify(Choice, 0.8),
             retrieve(&["c"]),
@@ -340,20 +340,8 @@ fn example_golden_set_parses_and_is_marked_synthetic() {
 }
 
 #[test]
-fn daas_golden_set_parses_and_points_at_markdown_chunks() {
-    let questions = golden::parse(include_str!("../../eval/golden/daas.jsonl")).unwrap();
-    assert!(questions.len() >= 50);
-    assert!(questions.iter().all(|q| {
-        !q.relevant_chunks.is_empty()
-            && q.relevant_chunks
-                .iter()
-                .all(|c| c.0.starts_with("markdown:") && c.0.contains('#'))
-    }));
-}
-
-#[test]
 fn golden_line_round_trips_through_serde() {
-    let line = r#"{"id":"q1","question":"Which?","category":"choice","expected":"B","relevant_chunks":["markdown:arm-1.md#c1"],"source_thread":"https://x"}"#;
+    let line = r#"{"id":"q1","question":"Which?","category":"choice","expected":"B","relevant_chunks":["markdown:doc-1.md#c1"],"source_thread":"https://x"}"#;
     let parsed = golden::parse(line).unwrap();
     assert_eq!(parsed[0].expected, Expected::Choice("B".into()));
     assert!(!parsed[0].synthetic);
@@ -402,9 +390,9 @@ fn golden_errors_report_line_numbers() {
 
 #[test]
 fn expected_answers_grade_verdicts() {
-    let choice = Expected::Choice("S_TCODE".into());
+    let choice = Expected::Choice("A_OPCODE".into());
     assert_eq!(
-        choice.matches(selected(" s_tcode ", "a").as_ref()),
+        choice.matches(selected(" a_opcode ", "a").as_ref()),
         Some(true)
     );
     assert_eq!(choice.matches(yes(true).as_ref()), Some(false));
@@ -554,22 +542,6 @@ fn results_written_before_context_for_still_parse() {
     let chunk: RankedChunk = serde_json::from_str(old).unwrap();
     assert_eq!(chunk.context_for, None);
     assert_eq!(serde_json::to_string(&chunk).unwrap(), old.replace(' ', ""));
-
-    let v4 = include_str!("../../eval/results/daas-2026-10-21-v4.json");
-    let results: Results = serde_json::from_str(v4).unwrap();
-    assert_eq!(results.runs.len(), 58);
-    assert_eq!(
-        results.setup.as_ref().unwrap().config.rerank.judge(),
-        crate::config::RerankJudge::SystemOne(crate::config::SystemOneJudge { candidates: 25 })
-    );
-    let baseline = retrieval::BaselineRecords::parse(v4).unwrap();
-    for run in &results.runs {
-        assert!(baseline.contains(&run.golden.id));
-        assert_eq!(
-            baseline.record(&run.golden.id),
-            metrics::retrieve_record(&run.report)
-        );
-    }
 }
 
 #[test]
@@ -721,34 +693,13 @@ async fn baseline_gate_passes_on_equal_metrics_and_fails_on_regression() {
     assert_eq!(found[0].category, Some(CategoryKind::Boolean));
 }
 
-fn results_file<T: serde::de::DeserializeOwned>(name: &str) -> T {
-    read_json(
-        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("eval/results")
-            .join(name),
-    )
-    .unwrap()
-}
-
-/// The gate as `drew eval run` applies it: the baseline parsed from its file, the current metrics computed from runs.
-fn gate(baseline: &str, current: &str) -> Vec<(Option<CategoryKind>, MetricName)> {
-    let baseline: Baseline = results_file(baseline);
-    let current = MetricsReport::of(&results_file::<Results>(current).runs);
-    regressions(&baseline, &current)
-        .iter()
-        .map(|r| (r.category, r.metric))
-        .collect()
-}
-
-#[test]
-fn baseline_gate_passes_equal_counts_read_back_from_a_results_file() {
-    // Both classify 54 of 58; v5 improves or keeps every other metric.
+#[tokio::test]
+async fn baseline_gate_passes_equal_counts_read_back_from_a_results_file() {
+    let results = evaluate_fixture(&fixture()).await;
+    let baseline: Baseline =
+        serde_json::from_str(&serde_json::to_string(&results).unwrap()).unwrap();
     assert_eq!(
-        gate("daas-2026-10-21-v4.json", "daas-2026-10-22-v5.json"),
-        vec![]
-    );
-    assert_eq!(
-        gate("daas-2026-10-22-v5.json", "daas-2026-10-22-v5.json"),
+        regressions(&baseline, &MetricsReport::of(&results.runs)),
         vec![]
     );
 }
@@ -795,7 +746,7 @@ async fn baseline_gate_treats_rising_decline_rate_and_lost_metrics_as_regression
 #[tokio::test]
 async fn run_command_writes_results_and_gates_on_the_baseline_file() {
     let runs = fixture();
-    let dir = std::env::temp_dir().join(format!("drew-eval-{}", RunId::new()));
+    let dir = std::env::temp_dir().join(format!("recall-eval-{}", RunId::new()));
     fs::create_dir_all(&dir).unwrap();
     let golden_path = dir.join("golden.jsonl");
     let golden_text: Vec<String> = runs
@@ -874,7 +825,7 @@ async fn run_command_writes_results_and_gates_on_the_baseline_file() {
 #[tokio::test]
 async fn one_question_runs_alone_and_is_gated_against_the_same_question() {
     let runs = fixture();
-    let dir = std::env::temp_dir().join(format!("drew-eval-{}", RunId::new()));
+    let dir = std::env::temp_dir().join(format!("recall-eval-{}", RunId::new()));
     fs::create_dir_all(&dir).unwrap();
     let golden_path = dir.join("golden.jsonl");
     let golden_text: Vec<String> = runs
@@ -935,7 +886,7 @@ async fn one_question_runs_alone_and_is_gated_against_the_same_question() {
 
 #[tokio::test]
 async fn golden_parse_errors_surface_through_the_run_command() {
-    let dir = std::env::temp_dir().join(format!("drew-eval-{}", RunId::new()));
+    let dir = std::env::temp_dir().join(format!("recall-eval-{}", RunId::new()));
     fs::create_dir_all(&dir).unwrap();
     let golden_path = dir.join("golden.jsonl");
     fs::write(&golden_path, "\n{}\n").unwrap();
@@ -1174,7 +1125,7 @@ fn a_candidate_round_trips_and_pastes_into_the_config() {
 fn corpus() -> Vec<crate::domain::Chunk> {
     use crate::pipeline::steps::fixtures::chunk;
     vec![
-        chunk("roles", "sap", "which SAP role grants AGR_USERS access"),
+        chunk("roles", "access", "which role grants ROLE_USERS access"),
         chunk(
             "sheet",
             "mitigations",
@@ -1202,10 +1153,10 @@ async fn retrieval_command_scores_matches_and_diffs_each_question_against_a_base
 
     let chunks = corpus();
     let golden = [
-        retrieval_golden("roles", "which SAP role grants AGR_USERS", &chunks[0]),
+        retrieval_golden("roles", "which role grants ROLE_USERS", &chunks[0]),
         retrieval_golden("sheet", "mitigation detail sheet empty", &chunks[1]),
     ];
-    let dir = std::env::temp_dir().join(format!("drew-eval-{}", RunId::new()));
+    let dir = std::env::temp_dir().join(format!("recall-eval-{}", RunId::new()));
     fs::create_dir_all(&dir).unwrap();
     let golden_path = dir.join("golden.jsonl");
     let lines: Vec<String> = golden
@@ -1298,7 +1249,7 @@ async fn retrieval_command_scores_matches_and_diffs_each_question_against_a_base
 
 #[test]
 fn tune_command_reads_results_and_candidate_files() {
-    let dir = std::env::temp_dir().join(format!("drew-eval-{}", RunId::new()));
+    let dir = std::env::temp_dir().join(format!("recall-eval-{}", RunId::new()));
     fs::create_dir_all(&dir).unwrap();
     write_json(&dir.join("results.json"), &tuning_results()).unwrap();
     fs::write(

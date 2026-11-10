@@ -1,7 +1,7 @@
 //! Which backend serves each model port, read once from the command line and environment.
 //!
-//! Each port names its backend, with no default: `DREW_EMBED_BACKEND`, `DREW_EXPLAIN_BACKEND` and
-//! `DREW_SYSTEM_ONE_BACKEND`. A missing env file is then a startup error, not a silent fall back to Bedrock. The
+//! Each port names its backend, with no default: `RECALL_EMBED_BACKEND`, `RECALL_EXPLAIN_BACKEND` and
+//! `RECALL_SYSTEM_ONE_BACKEND`. A missing env file is then a startup error, not a silent fall back to Bedrock. The
 //! flat command-line fields are parsed into one enum per port whose variants hold exactly the settings that backend
 //! uses; a missing, unparsable or unused setting is an error naming its variable. Each arm destructures every field,
 //! so a new field does not compile until every backend accepts or rejects it. [`embedder`], [`explain_model`] and
@@ -34,29 +34,29 @@ use super::{
 #[derive(Clone, Debug, clap::Args)]
 pub struct EmbedArgs {
     /// Which backend serves embeddings.
-    #[arg(long, env = "DREW_EMBED_BACKEND", value_enum)]
+    #[arg(long, env = "RECALL_EMBED_BACKEND", value_enum)]
     pub embed_backend: EmbedBackendKind,
     /// Embedding model, with 1024 dimensions: on Bedrock Titan Text Embeddings v2 or Cohere Embed v3, on Workers AI
     /// `@cf/baai/bge-m3`, otherwise the server's name, e.g. `bge-m3` in Ollama.
-    #[arg(long, env = "DREW_EMBED_MODEL")]
+    #[arg(long, env = "RECALL_EMBED_MODEL")]
     pub embed_model: String,
     /// `openai-compatible` only, and required there: base URL, e.g. `http://localhost:11434/v1`.
-    #[arg(long, env = "DREW_EMBED_URL")]
+    #[arg(long, env = "RECALL_EMBED_URL")]
     pub embed_url: Option<Url>,
     /// `workers-ai` only, and required there: the Cloudflare account id.
-    #[arg(long, env = "DREW_EMBED_ACCOUNT_ID")]
+    #[arg(long, env = "RECALL_EMBED_ACCOUNT_ID")]
     pub embed_account_id: Option<AccountId>,
     /// Bearer key: optional on `openai-compatible`; the Workers AI API token, required, on `workers-ai`.
-    #[arg(long, env = "DREW_EMBED_KEY", hide_env_values = true)]
+    #[arg(long, env = "RECALL_EMBED_KEY", hide_env_values = true)]
     pub embed_key: Option<ApiKey>,
     /// `openai-compatible` only: the most estimated tokens one request carries, counted as its text count times its
     /// longest text's estimate, for a server whose limit spans a request. Unset: 64 texts a request whatever their
     /// size. `workers-ai` knows its model's limit.
-    #[arg(long, env = "DREW_EMBED_MAX_BATCH_TOKENS")]
+    #[arg(long, env = "RECALL_EMBED_MAX_BATCH_TOKENS")]
     pub embed_max_batch_tokens: Option<NonZeroUsize>,
 }
 
-/// `DREW_EMBED_BACKEND`.
+/// `RECALL_EMBED_BACKEND`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum EmbedBackendKind {
     /// Amazon Bedrock; region and credentials from the default AWS chain.
@@ -72,31 +72,31 @@ pub enum EmbedBackendKind {
 #[derive(Clone, Debug, clap::Args)]
 pub struct ChatArgs {
     /// Which backend serves `Explain`.
-    #[arg(long, env = "DREW_EXPLAIN_BACKEND", value_enum)]
+    #[arg(long, env = "RECALL_EXPLAIN_BACKEND", value_enum)]
     pub explain_backend: ChatBackendKind,
     /// Model for `Explain`: a Bedrock model or inference profile id, e.g. `us.anthropic.claude-sonnet-4-5-20250929-v1:0`,
     /// a Workers AI model id, e.g. `@cf/qwen/qwen3.8-27b`, or the server's model name, e.g. `qwen3:14b`.
-    #[arg(long, env = "DREW_EXPLAIN_MODEL")]
+    #[arg(long, env = "RECALL_EXPLAIN_MODEL")]
     pub explain_model: String,
     /// `openai-compatible` only, and required there: base URL, e.g. `http://localhost:11434/v1`.
-    #[arg(long, env = "DREW_EXPLAIN_URL")]
+    #[arg(long, env = "RECALL_EXPLAIN_URL")]
     pub explain_url: Option<Url>,
     /// `workers-ai` only, and required there: the Cloudflare account id.
-    #[arg(long, env = "DREW_EXPLAIN_ACCOUNT_ID")]
+    #[arg(long, env = "RECALL_EXPLAIN_ACCOUNT_ID")]
     pub explain_account_id: Option<AccountId>,
     /// Bearer key: optional on `openai-compatible`; the Workers AI API token, required, on `workers-ai`.
-    #[arg(long, env = "DREW_EXPLAIN_KEY", hide_env_values = true)]
+    #[arg(long, env = "RECALL_EXPLAIN_KEY", hide_env_values = true)]
     pub explain_key: Option<ApiKey>,
     /// `openai-compatible` and `workers-ai`: `reasoning_effort` to send; unset sends none. Use `medium` on Workers
     /// AI: `low` with a `json_schema` hangs there (cloudflare/workers-sdk#16165).
-    #[arg(long, env = "DREW_EXPLAIN_REASONING_EFFORT", value_enum)]
+    #[arg(long, env = "RECALL_EXPLAIN_REASONING_EFFORT", value_enum)]
     pub explain_reasoning_effort: Option<ReasoningEffort>,
     /// `openai-compatible` and `workers-ai`: how the response schema is sent. Unset: `openai`.
-    #[arg(long, env = "DREW_EXPLAIN_SCHEMA_FORMAT", value_enum)]
+    #[arg(long, env = "RECALL_EXPLAIN_SCHEMA_FORMAT", value_enum)]
     pub explain_schema_format: Option<SchemaFormat>,
 }
 
-/// `DREW_EXPLAIN_BACKEND`.
+/// `RECALL_EXPLAIN_BACKEND`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum ChatBackendKind {
     /// Amazon Bedrock's Converse API; region and credentials from the default AWS chain.
@@ -112,24 +112,24 @@ pub enum ChatBackendKind {
 #[group(id = "system_one")]
 pub struct SystemOneArgs {
     /// Which backend serves System One; `none` classifies every question `open`.
-    #[arg(long, env = "DREW_SYSTEM_ONE_BACKEND", value_enum)]
+    #[arg(long, env = "RECALL_SYSTEM_ONE_BACKEND", value_enum)]
     pub system_one_backend: SystemOneBackendKind,
     /// Model: e.g. `kev-latest`, `clef-flash` on system-one.dev, or `@cf/cloudflare/clef-flash` on Workers AI.
-    #[arg(long, env = "DREW_SYSTEM_ONE_MODEL")]
+    #[arg(long, env = "RECALL_SYSTEM_ONE_MODEL")]
     pub system_one_model: Option<String>,
     /// `system-one` only, and required there: the server root, e.g. `http://127.0.0.1:8009` or
     /// `https://system-one.dev`.
-    #[arg(long, env = "DREW_SYSTEM_ONE_URL")]
+    #[arg(long, env = "RECALL_SYSTEM_ONE_URL")]
     pub system_one_url: Option<Url>,
     /// `workers-ai` only: the Cloudflare account id.
-    #[arg(long, env = "DREW_SYSTEM_ONE_ACCOUNT_ID")]
+    #[arg(long, env = "RECALL_SYSTEM_ONE_ACCOUNT_ID")]
     pub system_one_account_id: Option<AccountId>,
     /// Bearer key: Kev's `KEV_API_KEY` or a system-one.dev key, or the Workers AI API token (required there).
-    #[arg(long, env = "DREW_SYSTEM_ONE_KEY", hide_env_values = true)]
+    #[arg(long, env = "RECALL_SYSTEM_ONE_KEY", hide_env_values = true)]
     pub system_one_key: Option<ApiKey>,
 }
 
-/// `DREW_SYSTEM_ONE_BACKEND`.
+/// `RECALL_SYSTEM_ONE_BACKEND`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum SystemOneBackendKind {
     /// No System One: every question is classified `open`, and nothing is answered yes or no.
@@ -245,7 +245,7 @@ impl TryFrom<&EmbedArgs> for EmbedBackend {
     type Error = InvalidBackend;
 
     fn try_from(args: &EmbedArgs) -> Result<Self, Self::Error> {
-        let selected = Selected::new("DREW_EMBED_BACKEND", &args.embed_backend);
+        let selected = Selected::new("RECALL_EMBED_BACKEND", &args.embed_backend);
         Ok(match args.embed_backend {
             EmbedBackendKind::Bedrock => {
                 let EmbedArgs {
@@ -256,12 +256,12 @@ impl TryFrom<&EmbedArgs> for EmbedBackend {
                     embed_key,
                     embed_max_batch_tokens,
                 } = args;
-                selected.reject(embed_url.as_ref(), "DREW_EMBED_URL")?;
-                selected.reject(embed_account_id.as_ref(), "DREW_EMBED_ACCOUNT_ID")?;
-                selected.reject(embed_key.as_ref(), "DREW_EMBED_KEY")?;
+                selected.reject(embed_url.as_ref(), "RECALL_EMBED_URL")?;
+                selected.reject(embed_account_id.as_ref(), "RECALL_EMBED_ACCOUNT_ID")?;
+                selected.reject(embed_key.as_ref(), "RECALL_EMBED_KEY")?;
                 selected.reject(
                     embed_max_batch_tokens.as_ref(),
-                    "DREW_EMBED_MAX_BATCH_TOKENS",
+                    "RECALL_EMBED_MAX_BATCH_TOKENS",
                 )?;
                 Self::Bedrock {
                     model: embed_model.clone(),
@@ -276,9 +276,9 @@ impl TryFrom<&EmbedArgs> for EmbedBackend {
                     embed_key,
                     embed_max_batch_tokens,
                 } = args;
-                selected.reject(embed_account_id.as_ref(), "DREW_EMBED_ACCOUNT_ID")?;
+                selected.reject(embed_account_id.as_ref(), "RECALL_EMBED_ACCOUNT_ID")?;
                 Self::OpenAiCompatible {
-                    url: selected.require(embed_url.as_ref(), "DREW_EMBED_URL")?,
+                    url: selected.require(embed_url.as_ref(), "RECALL_EMBED_URL")?,
                     model: embed_model.clone(),
                     key: embed_key.clone(),
                     max_batch_tokens: *embed_max_batch_tokens,
@@ -293,16 +293,16 @@ impl TryFrom<&EmbedArgs> for EmbedBackend {
                     embed_key,
                     embed_max_batch_tokens,
                 } = args;
-                selected.reject(embed_url.as_ref(), "DREW_EMBED_URL")?;
+                selected.reject(embed_url.as_ref(), "RECALL_EMBED_URL")?;
                 selected.reject(
                     embed_max_batch_tokens.as_ref(),
-                    "DREW_EMBED_MAX_BATCH_TOKENS",
+                    "RECALL_EMBED_MAX_BATCH_TOKENS",
                 )?;
                 Self::WorkersAi {
                     account_id: selected
-                        .require(embed_account_id.as_ref(), "DREW_EMBED_ACCOUNT_ID")?,
-                    model: parse(embed_model, "DREW_EMBED_MODEL")?,
-                    key: selected.require(embed_key.as_ref(), "DREW_EMBED_KEY")?,
+                        .require(embed_account_id.as_ref(), "RECALL_EMBED_ACCOUNT_ID")?,
+                    model: parse(embed_model, "RECALL_EMBED_MODEL")?,
+                    key: selected.require(embed_key.as_ref(), "RECALL_EMBED_KEY")?,
                 }
             }
         })
@@ -310,11 +310,11 @@ impl TryFrom<&EmbedArgs> for EmbedBackend {
 }
 
 impl EmbedBackend {
-    /// What `drew models check` prints before calling a backend that depends on ambient settings.
+    /// What `recall models check` prints before calling a backend that depends on ambient settings.
     pub(crate) async fn note(&self) -> Option<String> {
         match self {
             Self::Bedrock { .. } => Some(format!(
-                "embeddings on Bedrock (DREW_EMBED_BACKEND=bedrock): {}",
+                "embeddings on Bedrock (RECALL_EMBED_BACKEND=bedrock): {}",
                 aws_environment().await
             )),
             Self::OpenAiCompatible { .. } | Self::WorkersAi { .. } => None,
@@ -381,7 +381,7 @@ impl TryFrom<&ChatArgs> for ChatBackend {
     type Error = InvalidBackend;
 
     fn try_from(args: &ChatArgs) -> Result<Self, Self::Error> {
-        let selected = Selected::new("DREW_EXPLAIN_BACKEND", &args.explain_backend);
+        let selected = Selected::new("RECALL_EXPLAIN_BACKEND", &args.explain_backend);
         Ok(match args.explain_backend {
             ChatBackendKind::Bedrock => {
                 let ChatArgs {
@@ -393,14 +393,17 @@ impl TryFrom<&ChatArgs> for ChatBackend {
                     explain_reasoning_effort,
                     explain_schema_format,
                 } = args;
-                selected.reject(explain_url.as_ref(), "DREW_EXPLAIN_URL")?;
-                selected.reject(explain_account_id.as_ref(), "DREW_EXPLAIN_ACCOUNT_ID")?;
-                selected.reject(explain_key.as_ref(), "DREW_EXPLAIN_KEY")?;
+                selected.reject(explain_url.as_ref(), "RECALL_EXPLAIN_URL")?;
+                selected.reject(explain_account_id.as_ref(), "RECALL_EXPLAIN_ACCOUNT_ID")?;
+                selected.reject(explain_key.as_ref(), "RECALL_EXPLAIN_KEY")?;
                 selected.reject(
                     explain_reasoning_effort.as_ref(),
-                    "DREW_EXPLAIN_REASONING_EFFORT",
+                    "RECALL_EXPLAIN_REASONING_EFFORT",
                 )?;
-                selected.reject(explain_schema_format.as_ref(), "DREW_EXPLAIN_SCHEMA_FORMAT")?;
+                selected.reject(
+                    explain_schema_format.as_ref(),
+                    "RECALL_EXPLAIN_SCHEMA_FORMAT",
+                )?;
                 Self::Bedrock {
                     model: explain_model.clone(),
                 }
@@ -415,9 +418,9 @@ impl TryFrom<&ChatArgs> for ChatBackend {
                     explain_reasoning_effort,
                     explain_schema_format,
                 } = args;
-                selected.reject(explain_account_id.as_ref(), "DREW_EXPLAIN_ACCOUNT_ID")?;
+                selected.reject(explain_account_id.as_ref(), "RECALL_EXPLAIN_ACCOUNT_ID")?;
                 Self::OpenAiCompatible {
-                    url: selected.require(explain_url.as_ref(), "DREW_EXPLAIN_URL")?,
+                    url: selected.require(explain_url.as_ref(), "RECALL_EXPLAIN_URL")?,
                     model: explain_model.clone(),
                     key: explain_key.clone(),
                     options: ChatOptions {
@@ -436,12 +439,12 @@ impl TryFrom<&ChatArgs> for ChatBackend {
                     explain_reasoning_effort,
                     explain_schema_format,
                 } = args;
-                selected.reject(explain_url.as_ref(), "DREW_EXPLAIN_URL")?;
+                selected.reject(explain_url.as_ref(), "RECALL_EXPLAIN_URL")?;
                 Self::WorkersAi {
                     account_id: selected
-                        .require(explain_account_id.as_ref(), "DREW_EXPLAIN_ACCOUNT_ID")?,
-                    model: parse(explain_model, "DREW_EXPLAIN_MODEL")?,
-                    key: selected.require(explain_key.as_ref(), "DREW_EXPLAIN_KEY")?,
+                        .require(explain_account_id.as_ref(), "RECALL_EXPLAIN_ACCOUNT_ID")?,
+                    model: parse(explain_model, "RECALL_EXPLAIN_MODEL")?,
+                    key: selected.require(explain_key.as_ref(), "RECALL_EXPLAIN_KEY")?,
                     options: ChatOptions {
                         reasoning_effort: *explain_reasoning_effort,
                         schema_format: explain_schema_format.unwrap_or_default(),
@@ -453,11 +456,11 @@ impl TryFrom<&ChatArgs> for ChatBackend {
 }
 
 impl ChatBackend {
-    /// What `drew models check` prints before calling a backend that depends on ambient settings.
+    /// What `recall models check` prints before calling a backend that depends on ambient settings.
     pub(crate) async fn note(&self) -> Option<String> {
         match self {
             Self::Bedrock { .. } => Some(format!(
-                "explain on Bedrock (DREW_EXPLAIN_BACKEND=bedrock): {}",
+                "explain on Bedrock (RECALL_EXPLAIN_BACKEND=bedrock): {}",
                 aws_environment().await
             )),
             Self::OpenAiCompatible { .. } | Self::WorkersAi { .. } => None,
@@ -519,7 +522,7 @@ impl TryFrom<&SystemOneArgs> for SystemOneBackend {
     type Error = InvalidBackend;
 
     fn try_from(args: &SystemOneArgs) -> Result<Self, Self::Error> {
-        let selected = Selected::new("DREW_SYSTEM_ONE_BACKEND", &args.system_one_backend);
+        let selected = Selected::new("RECALL_SYSTEM_ONE_BACKEND", &args.system_one_backend);
         Ok(match args.system_one_backend {
             SystemOneBackendKind::None => {
                 let SystemOneArgs {
@@ -529,10 +532,13 @@ impl TryFrom<&SystemOneArgs> for SystemOneBackend {
                     system_one_account_id,
                     system_one_key,
                 } = args;
-                selected.reject(system_one_model.as_ref(), "DREW_SYSTEM_ONE_MODEL")?;
-                selected.reject(system_one_url.as_ref(), "DREW_SYSTEM_ONE_URL")?;
-                selected.reject(system_one_account_id.as_ref(), "DREW_SYSTEM_ONE_ACCOUNT_ID")?;
-                selected.reject(system_one_key.as_ref(), "DREW_SYSTEM_ONE_KEY")?;
+                selected.reject(system_one_model.as_ref(), "RECALL_SYSTEM_ONE_MODEL")?;
+                selected.reject(system_one_url.as_ref(), "RECALL_SYSTEM_ONE_URL")?;
+                selected.reject(
+                    system_one_account_id.as_ref(),
+                    "RECALL_SYSTEM_ONE_ACCOUNT_ID",
+                )?;
+                selected.reject(system_one_key.as_ref(), "RECALL_SYSTEM_ONE_KEY")?;
                 Self::None
             }
             SystemOneBackendKind::SystemOne => {
@@ -543,10 +549,14 @@ impl TryFrom<&SystemOneArgs> for SystemOneBackend {
                     system_one_account_id,
                     system_one_key,
                 } = args;
-                selected.reject(system_one_account_id.as_ref(), "DREW_SYSTEM_ONE_ACCOUNT_ID")?;
+                selected.reject(
+                    system_one_account_id.as_ref(),
+                    "RECALL_SYSTEM_ONE_ACCOUNT_ID",
+                )?;
                 Self::SystemOne {
-                    url: selected.require(system_one_url.as_ref(), "DREW_SYSTEM_ONE_URL")?,
-                    model: selected.require(system_one_model.as_ref(), "DREW_SYSTEM_ONE_MODEL")?,
+                    url: selected.require(system_one_url.as_ref(), "RECALL_SYSTEM_ONE_URL")?,
+                    model: selected
+                        .require(system_one_model.as_ref(), "RECALL_SYSTEM_ONE_MODEL")?,
                     key: system_one_key.clone(),
                 }
             }
@@ -558,16 +568,18 @@ impl TryFrom<&SystemOneArgs> for SystemOneBackend {
                     system_one_account_id,
                     system_one_key,
                 } = args;
-                selected.reject(system_one_url.as_ref(), "DREW_SYSTEM_ONE_URL")?;
+                selected.reject(system_one_url.as_ref(), "RECALL_SYSTEM_ONE_URL")?;
                 let model = parse(
-                    &selected.require(system_one_model.as_ref(), "DREW_SYSTEM_ONE_MODEL")?,
-                    "DREW_SYSTEM_ONE_MODEL",
+                    &selected.require(system_one_model.as_ref(), "RECALL_SYSTEM_ONE_MODEL")?,
+                    "RECALL_SYSTEM_ONE_MODEL",
                 )?;
                 Self::WorkersAi {
-                    account_id: selected
-                        .require(system_one_account_id.as_ref(), "DREW_SYSTEM_ONE_ACCOUNT_ID")?,
+                    account_id: selected.require(
+                        system_one_account_id.as_ref(),
+                        "RECALL_SYSTEM_ONE_ACCOUNT_ID",
+                    )?,
                     model,
-                    key: selected.require(system_one_key.as_ref(), "DREW_SYSTEM_ONE_KEY")?,
+                    key: selected.require(system_one_key.as_ref(), "RECALL_SYSTEM_ONE_KEY")?,
                 }
             }
         })
@@ -575,12 +587,12 @@ impl TryFrom<&SystemOneArgs> for SystemOneBackend {
 }
 
 impl SystemOneBackend {
-    /// What `drew models check` prints before calling a backend that depends on ambient settings, or instead of
+    /// What `recall models check` prints before calling a backend that depends on ambient settings, or instead of
     /// calling none.
     pub(crate) fn note(&self) -> Option<String> {
         match self {
             Self::None => Some(
-                "system one: none (DREW_SYSTEM_ONE_BACKEND=none); every question is classified open"
+                "system one: none (RECALL_SYSTEM_ONE_BACKEND=none); every question is classified open"
                     .to_owned(),
             ),
             Self::SystemOne { .. } | Self::WorkersAi { .. } => None,
@@ -618,7 +630,7 @@ impl SystemOneBackend {
     }
 }
 
-/// The embedder `DREW_EMBED_BACKEND` selects.
+/// The embedder `RECALL_EMBED_BACKEND` selects.
 ///
 /// # Errors
 ///
@@ -628,7 +640,7 @@ pub async fn embedder(args: &EmbedArgs) -> eros::Result<Arc<dyn Embedder>> {
     EmbedBackend::try_from(args)?.build().await
 }
 
-/// The `Explain` LLM `DREW_EXPLAIN_BACKEND` selects.
+/// The `Explain` LLM `RECALL_EXPLAIN_BACKEND` selects.
 ///
 /// # Errors
 ///
@@ -637,7 +649,7 @@ pub async fn explain_model(args: &ChatArgs) -> eros::Result<Arc<dyn ChatModel>> 
     ChatBackend::try_from(args)?.build().await
 }
 
-/// The System One `DREW_SYSTEM_ONE_BACKEND` selects; `None` for `none`.
+/// The System One `RECALL_SYSTEM_ONE_BACKEND` selects; `None` for `none`.
 ///
 /// # Errors
 ///
@@ -666,11 +678,11 @@ mod tests {
     fn every_backend_is_required_with_no_default() {
         let command = Cli::command();
         for (id, env) in [
-            ("embed_backend", "DREW_EMBED_BACKEND"),
-            ("explain_backend", "DREW_EXPLAIN_BACKEND"),
-            ("system_one_backend", "DREW_SYSTEM_ONE_BACKEND"),
-            ("explain_model", "DREW_EXPLAIN_MODEL"),
-            ("embed_model", "DREW_EMBED_MODEL"),
+            ("embed_backend", "RECALL_EMBED_BACKEND"),
+            ("explain_backend", "RECALL_EXPLAIN_BACKEND"),
+            ("system_one_backend", "RECALL_SYSTEM_ONE_BACKEND"),
+            ("explain_model", "RECALL_EXPLAIN_MODEL"),
+            ("embed_model", "RECALL_EMBED_MODEL"),
         ] {
             let arg = command
                 .get_arguments()
@@ -696,7 +708,7 @@ mod tests {
 
     fn try_parse(args: &[&str]) -> Result<Cli, clap::Error> {
         let base = [
-            "drew",
+            "recall",
             "--embed-backend",
             "openai-compatible",
             "--embed-model",
@@ -732,18 +744,18 @@ mod tests {
         ]);
         assert_eq!(
             missing(EmbedBackend::try_from(&cli.embed).err().unwrap()),
-            "DREW_EMBED_URL"
+            "RECALL_EMBED_URL"
         );
         assert_eq!(
             missing(ChatBackend::try_from(&cli.chat).err().unwrap()),
-            "DREW_EXPLAIN_URL"
+            "RECALL_EXPLAIN_URL"
         );
         let error = SystemOneBackend::try_from(&cli.system_one).err().unwrap();
         assert_eq!(
             error.to_string(),
-            "DREW_SYSTEM_ONE_ACCOUNT_ID is required with DREW_SYSTEM_ONE_BACKEND=workers-ai"
+            "RECALL_SYSTEM_ONE_ACCOUNT_ID is required with RECALL_SYSTEM_ONE_BACKEND=workers-ai"
         );
-        assert_eq!(missing(error), "DREW_SYSTEM_ONE_ACCOUNT_ID");
+        assert_eq!(missing(error), "RECALL_SYSTEM_ONE_ACCOUNT_ID");
     }
 
     #[test]
@@ -760,12 +772,12 @@ mod tests {
         ]);
         assert_eq!(
             ChatBackend::try_from(&cli.chat).err().unwrap().to_string(),
-            "DREW_EXPLAIN_REASONING_EFFORT is set, but DREW_EXPLAIN_BACKEND=bedrock does not use it; unset it"
+            "RECALL_EXPLAIN_REASONING_EFFORT is set, but RECALL_EXPLAIN_BACKEND=bedrock does not use it; unset it"
         );
         assert!(matches!(
             SystemOneBackend::try_from(&cli.system_one),
             Err(InvalidBackend::Unused {
-                var: "DREW_SYSTEM_ONE_URL",
+                var: "RECALL_SYSTEM_ONE_URL",
                 ..
             })
         ));
@@ -801,7 +813,7 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(
-            error.starts_with("DREW_SYSTEM_ONE_MODEL: ")
+            error.starts_with("RECALL_SYSTEM_ONE_MODEL: ")
                 && error.contains("@cf/cloudflare/clef-flash"),
             "{error}"
         );
@@ -828,7 +840,7 @@ mod tests {
                 .err()
                 .unwrap()
                 .to_string(),
-            "DREW_SYSTEM_ONE_URL is set, but DREW_SYSTEM_ONE_BACKEND=workers-ai does not use it; unset it"
+            "RECALL_SYSTEM_ONE_URL is set, but RECALL_SYSTEM_ONE_BACKEND=workers-ai does not use it; unset it"
         );
         assert!(system_one_client(&cli.system_one).is_err());
     }
@@ -889,7 +901,7 @@ mod tests {
                 .err()
                 .unwrap()
                 .to_string(),
-            "DREW_EMBED_MAX_BATCH_TOKENS is set, but DREW_EMBED_BACKEND=bedrock does not use it; unset it"
+            "RECALL_EMBED_MAX_BATCH_TOKENS is set, but RECALL_EMBED_BACKEND=bedrock does not use it; unset it"
         );
     }
 
@@ -926,7 +938,7 @@ mod tests {
     /// Embeddings and Explain on Workers AI, plus `extra`.
     fn try_workers_ai(embed_model: &str, extra: &[&str]) -> Result<Cli, clap::Error> {
         let base = [
-            "drew",
+            "recall",
             "--embed-backend",
             "workers-ai",
             "--embed-model",
@@ -987,11 +999,11 @@ mod tests {
         for (extra, message) in [
             (
                 ["--embed-url", "http://localhost:11434/v1"],
-                "DREW_EMBED_URL is set, but DREW_EMBED_BACKEND=workers-ai does not use it; unset it",
+                "RECALL_EMBED_URL is set, but RECALL_EMBED_BACKEND=workers-ai does not use it; unset it",
             ),
             (
                 ["--embed-max-batch-tokens", "50000"],
-                "DREW_EMBED_MAX_BATCH_TOKENS is set, but DREW_EMBED_BACKEND=workers-ai does not use it; unset it",
+                "RECALL_EMBED_MAX_BATCH_TOKENS is set, but RECALL_EMBED_BACKEND=workers-ai does not use it; unset it",
             ),
         ] {
             let cli = try_workers_ai("@cf/baai/bge-m3", &extra).unwrap();
@@ -1010,7 +1022,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             ChatBackend::try_from(&cli.chat).err().unwrap().to_string(),
-            "DREW_EXPLAIN_URL is set, but DREW_EXPLAIN_BACKEND=workers-ai does not use it; unset it"
+            "RECALL_EXPLAIN_URL is set, but RECALL_EXPLAIN_BACKEND=workers-ai does not use it; unset it"
         );
     }
 
@@ -1021,11 +1033,11 @@ mod tests {
         cli.chat.explain_key = None;
         assert_eq!(
             missing(EmbedBackend::try_from(&cli.embed).err().unwrap()),
-            "DREW_EMBED_ACCOUNT_ID"
+            "RECALL_EMBED_ACCOUNT_ID"
         );
         assert_eq!(
             missing(ChatBackend::try_from(&cli.chat).err().unwrap()),
-            "DREW_EXPLAIN_KEY"
+            "RECALL_EXPLAIN_KEY"
         );
 
         let cli = try_workers_ai("bge-m3", &[]).unwrap();
@@ -1034,7 +1046,7 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(
-            error.starts_with("DREW_EMBED_MODEL: ")
+            error.starts_with("RECALL_EMBED_MODEL: ")
                 && error.ends_with("supported: @cf/baai/bge-m3"),
             "{error}"
         );
@@ -1045,7 +1057,7 @@ mod tests {
                 .err()
                 .unwrap()
                 .to_string()
-                .starts_with("DREW_EXPLAIN_MODEL: ")
+                .starts_with("RECALL_EXPLAIN_MODEL: ")
         );
         assert!(try_workers_ai("@cf/baai/bge-m3", &["--embed-account-id", "acc/../x"]).is_err());
     }
@@ -1067,14 +1079,14 @@ mod tests {
         assert!(matches!(
             EmbedBackend::try_from(&cli.embed),
             Err(InvalidBackend::Unused {
-                var: "DREW_EMBED_ACCOUNT_ID",
+                var: "RECALL_EMBED_ACCOUNT_ID",
                 ..
             })
         ));
         assert!(matches!(
             ChatBackend::try_from(&cli.chat),
             Err(InvalidBackend::Unused {
-                var: "DREW_EXPLAIN_ACCOUNT_ID",
+                var: "RECALL_EXPLAIN_ACCOUNT_ID",
                 ..
             })
         ));

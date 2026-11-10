@@ -1,4 +1,4 @@
-//! Batch ingestion (`drew ingest`): a [`Source`] returns a full snapshot of documents; [`ingest`] versions, embeds
+//! Batch ingestion (`recall ingest`): a [`Source`] returns a full snapshot of documents; [`ingest`] versions, embeds
 //! and stores their chunks through [`crate::store::chunks::ChunkStore`], and supersedes what the snapshot no longer
 //! contains. The pre-audited markdown directory ([`markdown`]) is the only source. Ingestion never reads or writes
 //! pipeline runs.
@@ -29,7 +29,7 @@ pub trait Source: Send + Sync {
     async fn fetch_all(&self) -> eros::Result<Vec<Document>>;
 }
 
-/// `drew ingest` options.
+/// `recall ingest` options.
 #[derive(Debug, clap::Args)]
 pub struct Args {
     /// Database connection.
@@ -46,7 +46,7 @@ pub struct Args {
     pub markdown: markdown::MarkdownArgs,
 }
 
-/// Runs `drew ingest`: connects, ingests every configured source, and fails if any source failed.
+/// Runs `recall ingest`: connects, ingests every configured source, and fails if any source failed.
 ///
 /// # Errors
 ///
@@ -62,7 +62,7 @@ pub async fn run(args: Args) -> eros::Result<()> {
     }
     eros::ensure!(
         !sources.is_empty(),
-        "no sources are configured (set DREW_DOCS_DIR)"
+        "no sources are configured (set RECALL_DOCS_DIR)"
     );
 
     let reports = ingest(&pool, embedder.as_ref(), &sources, args.reembed).await?;

@@ -174,7 +174,7 @@ mod tests {
     ) -> Result<Scored<CategoryKind, ClassifyRecord>, StepError> {
         Classify::new(Some(Arc::<ScriptedSystemOne>::clone(system_one)))
             .run(
-                &Question::new("Does AGR_USERS hold role assignments?"),
+                &Question::new("Does ROLE_USERS hold role assignments?"),
                 Asked,
             )
             .await
@@ -190,7 +190,7 @@ mod tests {
         assert_eq!(scored.score, Some(p(0.87)));
         assert_eq!(scored.prompt_version, Some(CLASSIFY_PROMPT_VERSION));
         let request = &system_one.requests()[0];
-        assert_eq!(request.state, "Does AGR_USERS hold role assignments?");
+        assert_eq!(request.state, "Does ROLE_USERS hold role assignments?");
         let Decision::Choice { criteria, .. } = &request.questions[QUESTION_ID] else {
             panic!("expected a choice question");
         };

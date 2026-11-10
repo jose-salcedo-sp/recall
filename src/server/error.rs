@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::domain::RunId;
 
-use super::openai::Drew;
+use super::openai::RunSummary;
 
 /// An error response. Messages are fixed text for users; internal detail goes to the log and the stored run.
 #[derive(Debug)]
@@ -25,7 +25,7 @@ pub struct ApiError {
     /// The run the error belongs to, so the caller can look it up.
     pub run_id: Option<RunId>,
     /// Attached when a persisted run failed, so the caller sees its trace.
-    pub drew: Option<Box<Drew>>,
+    pub provenance: Option<Box<RunSummary>>,
 }
 
 impl ApiError {
@@ -36,7 +36,7 @@ impl ApiError {
             kind,
             code,
             run_id: None,
-            drew: None,
+            provenance: None,
         }
     }
 
@@ -88,10 +88,10 @@ impl ApiError {
         }
     }
 
-    /// Sets [`ApiError::drew`].
-    pub fn with_drew(self, drew: Drew) -> Self {
+    /// Sets [`ApiError::provenance`].
+    pub fn with_summary(self, summary: RunSummary) -> Self {
         Self {
-            drew: Some(Box::new(drew)),
+            provenance: Some(Box::new(summary)),
             ..self
         }
     }
@@ -101,7 +101,7 @@ impl ApiError {
 struct Body<'a> {
     error: ErrorObject<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    drew: Option<&'a Drew>,
+    provenance: Option<&'a RunSummary>,
 }
 
 #[derive(Serialize)]
@@ -125,7 +125,7 @@ impl IntoResponse for ApiError {
                 code: self.code,
                 run_id: self.run_id,
             },
-            drew: self.drew.as_deref(),
+            provenance: self.provenance.as_deref(),
         };
         let mut response = (self.status, Json(body)).into_response();
         if self.status == StatusCode::UNAUTHORIZED {

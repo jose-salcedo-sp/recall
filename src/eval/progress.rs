@@ -1,4 +1,4 @@
-//! Live feedback for `drew eval run`: one line per finished question, above a progress bar.
+//! Live feedback for `recall eval run`: one line per finished question, above a progress bar.
 
 use std::{
     sync::{
@@ -92,7 +92,7 @@ impl Progress for Bar {
     }
 }
 
-/// `    ANSWERED [  41.2s] ( 3/58) daas-q13 boolean  classify ✓  hit@5 ✗  recall 50%  answer ✗`
+/// `    ANSWERED [  41.2s] ( 3/58) q13 boolean  classify ✓  hit@5 ✗  recall 50%  answer ✗`
 pub fn line(run: &EvalRun, elapsed: Duration, position: usize, total: usize) -> String {
     let status = match &run.report.outcome {
         Outcome::Answered(_) => style(format!("{:>12}", "ANSWERED")).green().bold(),

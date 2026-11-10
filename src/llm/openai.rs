@@ -313,7 +313,7 @@ impl OpenAiEmbedder {
     pub fn with_max_batch_tokens(self, max_batch_tokens: Option<NonZeroUsize>) -> Self {
         Self {
             max_batch_tokens: max_batch_tokens
-                .map(|tokens| BatchBudget::new(tokens, "DREW_EMBED_MAX_BATCH_TOKENS")),
+                .map(|tokens| BatchBudget::new(tokens, "RECALL_EMBED_MAX_BATCH_TOKENS")),
             ..self
         }
     }
@@ -517,7 +517,7 @@ mod tests {
     fn a_completion_stopped_at_max_tokens_is_cut_off_with_or_without_content() {
         for content in [
             json!(null),
-            json!("{\"claims\": [{\"text\": \"AGR_USERS maps"),
+            json!("{\"claims\": [{\"text\": \"ROLE_USERS maps"),
         ] {
             let response = json!({ "choices": [{
                 "message": { "content": content, "reasoning": "hmm" }, "finish_reason": "length"
@@ -616,7 +616,7 @@ mod tests {
 
     fn budget(tokens: usize) -> Option<BatchBudget> {
         NonZeroUsize::new(tokens)
-            .map(|tokens| BatchBudget::new(tokens, "DREW_EMBED_MAX_BATCH_TOKENS"))
+            .map(|tokens| BatchBudget::new(tokens, "RECALL_EMBED_MAX_BATCH_TOKENS"))
     }
 
     fn sizes(texts: &[String], max_tokens: usize) -> Vec<usize> {
@@ -689,7 +689,7 @@ mod tests {
         let error = batches(&texts, budget(10)).unwrap_err().to_string();
         assert!(
             error.contains("text 1 of 2 is about 11 tokens (31 bytes)")
-                && error.contains("DREW_EMBED_MAX_BATCH_TOKENS"),
+                && error.contains("RECALL_EMBED_MAX_BATCH_TOKENS"),
             "{error}"
         );
     }

@@ -53,11 +53,11 @@ pub struct FailingRunStore;
 #[async_trait]
 impl RunStore for FailingRunStore {
     async fn save(&self, _: &UserId, _: &RunReport) -> eros::Result<()> {
-        eros::bail!("pool timed out connecting to postgres://drew@db.internal:5432/drew")
+        eros::bail!("pool timed out connecting to postgres://recall@db.internal:5432/recall")
     }
 
     async fn get(&self, _: RunId) -> eros::Result<Option<StoredRun>> {
-        eros::bail!("pool timed out connecting to postgres://drew@db.internal:5432/drew")
+        eros::bail!("pool timed out connecting to postgres://recall@db.internal:5432/recall")
     }
 }
 

@@ -37,7 +37,7 @@ pub const CATEGORIES: [CategoryKind; 4] = [
     CategoryKind::Open,
 ];
 
-/// The `drew eval run` output file.
+/// The `recall eval run` output file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Results {
     /// What the runs ran with. `None` in files written before it was recorded, and for scripted answerers.

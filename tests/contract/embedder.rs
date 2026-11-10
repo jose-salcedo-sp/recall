@@ -1,7 +1,7 @@
 //! Vectors are model output, so the contract is their shape: one `EMBEDDING_DIM` vector per input, in input order,
 //! whatever the batch size.
 
-use drew::llm::{EMBEDDING_DIM, EmbedPurpose, Embedder};
+use recall::llm::{EMBEDDING_DIM, EmbedPurpose, Embedder};
 use wiremock::MockServer;
 
 pub struct Adapter {
@@ -91,7 +91,7 @@ fn vector_of(text: &str) -> Vec<f32> {
 }
 
 mod hash {
-    use drew::llm::fakes::HashEmbedder;
+    use recall::llm::fakes::HashEmbedder;
 
     use super::Adapter;
 
@@ -108,7 +108,7 @@ mod hash {
 mod openai {
     use std::num::NonZeroUsize;
 
-    use drew::llm::{EMBEDDING_DIM, EmbedPurpose, Embedder, openai::OpenAiEmbedder};
+    use recall::llm::{EMBEDDING_DIM, EmbedPurpose, Embedder, openai::OpenAiEmbedder};
     use serde_json::{Value, json};
     use wiremock::{
         Mock, MockServer, Request, ResponseTemplate,
@@ -158,7 +158,7 @@ mod openai {
     embedder_contract!(openai);
 
     mod workers_ai {
-        use drew::llm::{
+        use recall::llm::{
             ModelRef,
             workers_ai::{WorkersAiEmbedModel, WorkersAiEmbedder},
         };
@@ -198,7 +198,7 @@ mod openai {
 
         /// Workers AI's native bge-m3 route, at 3 bytes a token: without `truncate_inputs` an input over 8,192 tokens
         /// fails, with it the input is cut to 8,192; then a request counts as its input count times its longest
-        /// input, as it did for `canon/LIMITS.md`. Answers in the envelope, `{"shape": [n, 1024], "data": [...]}`.
+        /// input, as it did for `a dense limits table`. Answers in the envelope, `{"shape": [n, 1024], "data": [...]}`.
         struct BgeM3;
 
         impl Respond for BgeM3 {
@@ -267,7 +267,7 @@ mod openai {
 
         embedder_contract!(workers_ai);
 
-        /// A section of `canon/LIMITS.md`'s shape: a heading and a table dense in digits.
+        /// A section of `a dense limits table`'s shape: a heading and a table dense in digits.
         fn section(i: usize, rows: usize) -> String {
             format!(
                 "LIMITS\nLimit {i}\n\n{}",
@@ -479,7 +479,7 @@ mod openai {
                 .unwrap_or(0)
     }
 
-    /// `canon/LIMITS.md`'s shape: 35 sections, one of about 8,770 bytes. Sent as one request they failed with `Max
+    /// `a dense limits table`'s shape: 35 sections, one of about 8,770 bytes. Sent as one request they failed with `Max
     /// context reached 102060 tokens but model supports only 60000` (35 x 2,916), though they sum to far less.
     #[tokio::test]
     async fn one_long_section_among_many_short_ones_splits_the_request() {
@@ -527,7 +527,7 @@ mod openai {
         assert!(
             report.contains("text 1 of 2")
                 && report.contains("LIMITS\\nEvery limit")
-                && report.contains("DREW_EMBED_MAX_BATCH_TOKENS"),
+                && report.contains("RECALL_EMBED_MAX_BATCH_TOKENS"),
             "{report}"
         );
         assert!(server.received_requests().await.unwrap().is_empty());
@@ -617,7 +617,7 @@ mod openai {
 mod bedrock {
     use std::time::Duration;
 
-    use drew::llm::{EMBEDDING_DIM, EmbedPurpose, Embedder, bedrock_embed::BedrockEmbedder};
+    use recall::llm::{EMBEDDING_DIM, EmbedPurpose, Embedder, bedrock_embed::BedrockEmbedder};
     use serde_json::{Value, json};
     use wiremock::{
         Mock, MockServer, Request, ResponseTemplate,

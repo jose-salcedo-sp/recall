@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use drew::llm::{ChatModel, ChatRequest};
 use futures::future::BoxFuture;
+use recall::llm::{ChatModel, ChatRequest};
 use serde_json::{Value, json};
 use wiremock::MockServer;
 
@@ -43,7 +43,7 @@ fn schema() -> Value {
 pub async fn a_text_reply_comes_back_as_its_text(
     make: impl AsyncFnOnce(Reply) -> Adapter,
 ) -> eros::Result<()> {
-    let text = "AGR_USERS maps users to roles.";
+    let text = "ROLE_USERS maps users to roles.";
     let adapter = make(Reply::Text(text.into())).await;
 
     let response = adapter.chat.complete(request(None)).await?;
@@ -55,7 +55,7 @@ pub async fn a_text_reply_comes_back_as_its_text(
 pub async fn a_structured_reply_comes_back_as_json_text(
     make: impl AsyncFnOnce(Reply) -> Adapter,
 ) -> eros::Result<()> {
-    let answer = json!({ "claims": ["AGR_USERS maps users to roles."] });
+    let answer = json!({ "claims": ["ROLE_USERS maps users to roles."] });
     let adapter = make(Reply::Json(answer.clone())).await;
 
     let response = adapter.chat.complete(request(Some(schema()))).await?;
@@ -82,7 +82,7 @@ pub async fn the_request_reaches_the_model_as_given(
 }
 
 /// The start of a structured reply, as a model cut off at `max_tokens` leaves it.
-const CUT_OFF: &str = r#"{"claims": ["AGR_USERS maps users to"#;
+const CUT_OFF: &str = r#"{"claims": ["ROLE_USERS maps users to"#;
 
 /// Adapter-only: a fake has no token limit. `chat` replies with [`CUT_OFF`] and its backend's stopped-at-the-limit
 /// reason; the error names the budget and the cause, not the partial JSON a parser would reject.
@@ -143,7 +143,7 @@ fn as_f32(value: &Value) -> f32 {
 mod scripted {
     use std::sync::Arc;
 
-    use drew::llm::fakes::ScriptedChat;
+    use recall::llm::fakes::ScriptedChat;
 
     use super::{Adapter, Reply};
 
@@ -168,7 +168,7 @@ mod scripted {
 mod openai {
     use std::sync::Arc;
 
-    use drew::llm::{
+    use recall::llm::{
         ChatModel, ChatRequest,
         openai::{ChatOptions, OpenAiChat, ReasoningEffort, SchemaFormat},
     };
@@ -267,7 +267,7 @@ mod openai {
     }
 
     mod workers_ai {
-        use drew::llm::workers_ai::WorkersAiChat;
+        use recall::llm::workers_ai::WorkersAiChat;
         use wiremock::Respond;
 
         use super::*;
@@ -356,7 +356,7 @@ mod openai {
             assert_eq!(body["response_format"]["json_schema"], schema());
             assert_eq!(
                 chat.model(),
-                drew::llm::ModelRef::new(
+                recall::llm::ModelRef::new(
                     QWEN,
                     "openai-compatible;reasoning_effort=medium;schema=bare"
                 )
@@ -504,7 +504,7 @@ mod openai {
 mod bedrock {
     use std::sync::Arc;
 
-    use drew::llm::{ChatModel, ChatRequest, bedrock_chat::BedrockChat};
+    use recall::llm::{ChatModel, ChatRequest, bedrock_chat::BedrockChat};
     use serde_json::{Value, json};
     use wiremock::{
         Mock, MockServer, ResponseTemplate,

@@ -1,18 +1,18 @@
-name: drew-ai
+name: recall
 
 services:
   db:
     image: pgvector/pgvector:pg17
     environment:
-      POSTGRES_USER: drew
-      POSTGRES_PASSWORD: drew
-      POSTGRES_DB: drew
+      POSTGRES_USER: recall
+      POSTGRES_PASSWORD: recall
+      POSTGRES_DB: recall
     ports:
       - "5433:5432"
     volumes:
       - db:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "drew"]
+      test: ["CMD", "pg_isready", "-U", "recall"]
       interval: 2s
       retries: 15
 
@@ -23,15 +23,15 @@ services:
     profiles: [hosted]
     image: pgvector/pgvector:pg17
     environment:
-      POSTGRES_USER: drew
-      POSTGRES_PASSWORD: drew
-      POSTGRES_DB: drew
+      POSTGRES_USER: recall
+      POSTGRES_PASSWORD: recall
+      POSTGRES_DB: recall
     ports:
       - "5434:5432"
     volumes:
       - db-hosted:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "drew"]
+      test: ["CMD", "pg_isready", "-U", "recall"]
       interval: 2s
       retries: 15
 

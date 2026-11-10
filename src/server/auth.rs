@@ -1,4 +1,4 @@
-//! Per-user bearer keys from `DREW_API_KEYS`.
+//! Per-user bearer keys from `RECALL_API_KEYS`.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -35,7 +35,7 @@ impl fmt::Debug for ApiKeys {
     }
 }
 
-/// User ids that may read any run (comma-separated), for auditing Slack and API traffic.
+/// User ids that may read any run (comma-separated), for auditing API traffic.
 #[derive(Clone, Default)]
 pub struct AdminUsers(HashSet<UserId>);
 
@@ -120,15 +120,15 @@ mod tests {
 
     #[test]
     fn parses_pairs() {
-        let keys: ApiKeys = " k1:drew , k2:jose,".parse().unwrap();
-        assert_eq!(keys.user("k1"), Some(&UserId("drew".into())));
+        let keys: ApiKeys = " k1:ana , k2:jose,".parse().unwrap();
+        assert_eq!(keys.user("k1"), Some(&UserId("ana".into())));
         assert_eq!(keys.user("k2"), Some(&UserId("jose".into())));
         assert_eq!(keys.user("k3"), None);
     }
 
     #[test]
     fn rejects_malformed_empty_and_duplicate_keys() {
-        for bad in ["", "k1", "k1:", ":drew", "k1:drew,k1:jose"] {
+        for bad in ["", "k1", "k1:", ":ana", "k1:ana,k1:jose"] {
             assert!(bad.parse::<ApiKeys>().is_err(), "{bad:?} should not parse");
         }
     }

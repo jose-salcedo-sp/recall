@@ -186,7 +186,7 @@ impl fmt::Display for WorkersAiEmbedModel {
     }
 }
 
-/// An embedding model whose request limit Drew does not know.
+/// An embedding model whose request limit this adapter does not know.
 #[derive(Debug, thiserror::Error)]
 #[error(
     "{0:?} is not a Workers AI embedding model with a known request limit; supported: {supported}",

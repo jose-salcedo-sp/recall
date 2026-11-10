@@ -1,4 +1,4 @@
-//! `drew::ingest::ingest` against Postgres: versioning, superseding, and the embedding-model check.
+//! `recall::ingest::ingest` against Postgres: versioning, superseding, and the embedding-model check.
 
 #![allow(
     clippy::unwrap_used,
@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
-use drew::{
+use recall::{
     domain::{ChunkDraft, Document, Labels, Sensitivity, SourceKind},
     ingest::{EmbeddingModelMismatch, Source, fakes::StaticSource, ingest},
     llm::{EmbedPurpose, Embedder, ModelRef, fakes::HashEmbedder},
@@ -79,7 +79,7 @@ fn document(source: SourceKind, external_id: &str, chunks: &[(&str, &str)]) -> D
         updated_at: updated(1),
         labels: Labels {
             acl: vec!["group:arm".into()],
-            customer: None,
+            tenant: None,
             sensitivity: Sensitivity::Internal,
         },
         chunks: chunks
@@ -132,7 +132,7 @@ fn stored(new_versions: u64, superseded: u64) -> Stored {
     }
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn first_ingest_inserts_every_chunk(pool: PgPool) {
     let store = ChunkStore::new(pool.clone());
     let embedder = RecordingEmbedder::new();
@@ -162,7 +162,7 @@ async fn first_ingest_inserts_every_chunk(pool: PgPool) {
     assert_eq!(title, "Doc roles.md");
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn identical_reingest_writes_nothing(pool: PgPool) {
     let store = ChunkStore::new(pool.clone());
     let embedder = RecordingEmbedder::new();
@@ -174,7 +174,7 @@ async fn identical_reingest_writes_nothing(pool: PgPool) {
     assert_eq!(embedder.batches().len(), 1);
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn changed_chunk_supersedes_its_old_version(pool: PgPool) {
     let store = ChunkStore::new(pool.clone());
     let embedder = RecordingEmbedder::new();
@@ -201,7 +201,7 @@ async fn changed_chunk_supersedes_its_old_version(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn removed_chunk_is_superseded(pool: PgPool) {
     let store = ChunkStore::new(pool.clone());
     let embedder = RecordingEmbedder::new();
@@ -223,7 +223,7 @@ async fn removed_chunk_is_superseded(pool: PgPool) {
     assert_eq!(embedder.batches().len(), 1);
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn reverted_chunk_revives_its_earlier_version_without_embedding(pool: PgPool) {
     let store = ChunkStore::new(pool.clone());
     let embedder = RecordingEmbedder::new();
@@ -250,7 +250,7 @@ async fn reverted_chunk_revives_its_earlier_version_without_embedding(pool: PgPo
     );
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn reordered_chunks_keep_their_versions_and_take_new_ordinals(pool: PgPool) {
     let store = ChunkStore::new(pool.clone());
     let embedder = RecordingEmbedder::new();
@@ -275,7 +275,7 @@ async fn reordered_chunks_keep_their_versions_and_take_new_ordinals(pool: PgPool
     );
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn duplicate_locators_are_rejected(pool: PgPool) {
     let store = ChunkStore::new(pool.clone());
     let doc = page(&[("a", "alpha"), ("a", "again")]);
@@ -284,7 +284,7 @@ async fn duplicate_locators_are_rejected(pool: PgPool) {
     assert_eq!(count(&pool, "true").await, 0);
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn embedding_model_mismatch_is_refused(pool: PgPool) {
     let sources = [static_source(vec![page(&[("a", "alpha")])])];
     ingest(&pool, &HashEmbedder, &sources, false).await.unwrap();
@@ -301,7 +301,7 @@ async fn embedding_model_mismatch_is_refused(pool: PgPool) {
     assert_eq!(count(&pool, "true").await, 1);
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn reembed_replaces_every_chunk_with_the_configured_model(pool: PgPool) {
     let first = static_source(vec![
         page(&[("a", "alpha"), ("b", "beta")]),
@@ -332,7 +332,7 @@ async fn reembed_replaces_every_chunk_with_the_configured_model(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn snapshot_supersedes_documents_missing_from_fetch(pool: PgPool) {
     let sources = [static_source(vec![
         page(&[("a", "alpha")]),
@@ -372,7 +372,7 @@ async fn term_stats(pool: &PgPool, lexemes: &[&str]) -> ((i64, Option<f64>), Vec
     (corpus, frequencies)
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn ingest_refreshes_term_stats_from_current_chunks(pool: PgPool) {
     assert_eq!(term_stats(&pool, &["role"]).await, ((0, None), vec![None]));
 
@@ -403,7 +403,7 @@ async fn ingest_refreshes_term_stats_from_current_chunks(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn one_failing_source_does_not_stop_the_others(pool: PgPool) {
     let sources = [
         Box::new(FailingSource) as Box<dyn Source>,

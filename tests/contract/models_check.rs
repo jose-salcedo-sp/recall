@@ -1,8 +1,8 @@
-//! `drew models check` against wiremock backends: Workers AI's OpenAI-compatible routes for embeddings and Explain,
+//! `recall models check` against wiremock backends: Workers AI's OpenAI-compatible routes for embeddings and Explain,
 //! and Kev's `/v1/systemone` for System One, since `workers-ai` takes no URL. One call per port, each reported with
 //! its model, endpoint and outcome, and the key never printed.
 
-use drew::{
+use recall::{
     config::ConfigArgs,
     llm::{
         EMBEDDING_DIM,
@@ -155,7 +155,7 @@ async fn a_missing_setting_fails_its_port_by_name() {
     assert!(
         report.contains("system one  not built")
             && report.contains(
-                "DREW_SYSTEM_ONE_ACCOUNT_ID is required with DREW_SYSTEM_ONE_BACKEND=workers-ai"
+                "RECALL_SYSTEM_ONE_ACCOUNT_ID is required with RECALL_SYSTEM_ONE_BACKEND=workers-ai"
             ),
         "{report}"
     );
@@ -176,7 +176,7 @@ async fn a_url_left_over_from_kev_fails_workers_ai_before_any_call() {
     assert!(
         report.contains("system one  not built")
             && report.contains(
-                "DREW_SYSTEM_ONE_URL is set, but DREW_SYSTEM_ONE_BACKEND=workers-ai does not use it; unset it"
+                "RECALL_SYSTEM_ONE_URL is set, but RECALL_SYSTEM_ONE_BACKEND=workers-ai does not use it; unset it"
             ),
         "{report}"
     );
@@ -202,7 +202,7 @@ async fn no_system_one_is_a_note_not_a_failure() {
         check
             .notes
             .iter()
-            .any(|note| note.contains("DREW_SYSTEM_ONE_BACKEND=none")),
+            .any(|note| note.contains("RECALL_SYSTEM_ONE_BACKEND=none")),
         "{check}"
     );
 }

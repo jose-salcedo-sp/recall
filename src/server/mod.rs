@@ -1,9 +1,8 @@
-//! OpenAI-compatible HTTP API (`drew serve`): `/v1/models`, `/v1/chat/completions`, `/v1/runs/{id}`. See
+//! OpenAI-compatible HTTP API (`recall serve`): `/v1/models`, `/v1/chat/completions`, `/v1/runs/{id}`. See
 //! `docs/design.md` section 4.
 //!
 //! This module owns HTTP: authentication, wire types, error bodies and markdown rendering. It answers through the
-//! [`Answerer`] port and persists every run through [`RunStore`] before responding. `drew serve` also starts the
-//! Slack bot ([`crate::slack`]) when it is configured.
+//! [`Answerer`] port and persists every run through [`RunStore`] before responding.
 
 pub mod auth;
 pub mod error;
@@ -15,7 +14,7 @@ mod fixtures;
 #[cfg(test)]
 mod tests;
 
-use std::{convert::Infallible, future::IntoFuture, sync::Arc};
+use std::{convert::Infallible, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -43,33 +42,30 @@ use crate::{
 use self::{
     auth::{AdminUsers, ApiKeys, User},
     error::ApiError,
-    openai::{ChatRequest, Chunk, Completion, Drew, ModelList},
+    openai::{ChatRequest, Chunk, Completion, ModelList, RunSummary},
 };
 
-/// `drew serve` options.
+/// `recall serve` options.
 #[derive(Debug, clap::Args)]
 pub struct Args {
     /// Database connection.
     #[command(flatten)]
     pub db: DbArgs,
     /// Socket address to listen on.
-    #[arg(long, env = "DREW_BIND", default_value = "0.0.0.0:8080")]
+    #[arg(long, env = "RECALL_BIND", default_value = "0.0.0.0:8080")]
     pub bind: String,
     /// Per-user bearer keys: `key:user_id` pairs, comma-separated.
-    #[arg(long, env = "DREW_API_KEYS", hide_env_values = true)]
+    #[arg(long, env = "RECALL_API_KEYS", hide_env_values = true)]
     pub api_keys: ApiKeys,
     /// User ids that may read any persisted run, comma-separated.
-    #[arg(long, env = "DREW_ADMIN_USERS", default_value = "")]
+    #[arg(long, env = "RECALL_ADMIN_USERS", default_value = "")]
     pub admin_users: AdminUsers,
     /// Models and tunables.
     #[command(flatten)]
     pub pipeline: PipelineArgs,
-    /// The Slack bot; off unless both tokens are set.
-    #[command(flatten)]
-    pub slack: crate::slack::SlackArgs,
 }
 
-/// What every handler shares; the Slack bot uses the same answerer and run store.
+/// What every handler shares.
 #[derive(Clone)]
 pub struct AppState {
     /// Runs the pipeline.
@@ -92,11 +88,11 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Runs `drew serve` until SIGINT or SIGTERM, then shuts the HTTP server and the Slack bot down gracefully.
+/// Runs `recall serve` until SIGINT or SIGTERM, then shuts the HTTP server down gracefully.
 ///
 /// # Errors
 ///
-/// When the database, pipeline or Slack bot cannot be set up, the address cannot be bound, or the server fails.
+/// When the database or pipeline cannot be set up, the address cannot be bound, or the server fails.
 pub async fn run(args: Args) -> eros::Result<()> {
     let pool = store::connect(&args.db).await?;
     let answerer = PipelineAnswerer::from_args(pool.clone(), &args.pipeline).await?;
@@ -106,24 +102,13 @@ pub async fn run(args: Args) -> eros::Result<()> {
         keys: Arc::new(args.api_keys),
         admins: Arc::new(args.admin_users),
     };
-    let bot = crate::slack::Bot::from_args(&args.slack)?;
     let listener = tokio::net::TcpListener::bind(&args.bind)
         .await
         .with_context(|| format!("binding {}", args.bind))?;
-    tracing::info!(addr = %listener.local_addr()?, "drew serve listening");
-    let (stop, shutdown) = tokio::sync::watch::channel(false);
-    let serve = axum::serve(listener, router(state.clone())).with_graceful_shutdown(async move {
-        shutdown_signal().await;
-        // Fails only when the bot is off, so nothing is listening.
-        let _ = stop.send(true);
-    });
-    let slack = async {
-        if let Some(bot) = bot {
-            bot.run(state, shutdown).await;
-        }
-    };
-    let (served, ()) = tokio::join!(serve.into_future(), slack);
-    served?;
+    tracing::info!(addr = %listener.local_addr()?, "recall serve listening");
+    axum::serve(listener, router(state))
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
 }
 
@@ -153,7 +138,7 @@ async fn shutdown_signal() {
 }
 
 async fn models(_: User) -> Json<ModelList> {
-    Json(ModelList::drew())
+    Json(ModelList::recall())
 }
 
 async fn chat_completions(
@@ -175,8 +160,8 @@ async fn chat_completions(
         .with_run(run_id));
     }
 
-    let drew = Drew::new(&report);
-    tracing::info!(%run_id, user = user.0, outcome = drew.outcome, "run finished");
+    let summary = RunSummary::new(&report);
+    tracing::info!(%run_id, user = user.0, outcome = summary.outcome, "run finished");
     let content = match &report.outcome {
         Outcome::Answered(answer) => render::answer(answer),
         Outcome::Declined { sources, .. } => render::declined(sources),
@@ -185,16 +170,16 @@ async fn chat_completions(
             return Err(
                 ApiError::internal("run_failed", format!("Run {run_id} failed at {at}."))
                     .with_run(run_id)
-                    .with_drew(drew),
+                    .with_summary(summary),
             );
         }
     };
 
     let created = Utc::now().timestamp();
     if request.stream != Some(true) {
-        return Ok(Json(Completion::new(drew, content, created)).into_response());
+        return Ok(Json(Completion::new(summary, content, created)).into_response());
     }
-    let events: Vec<Result<Event, Infallible>> = Chunk::pair(drew, content, created)
+    let events: Vec<Result<Event, Infallible>> = Chunk::pair(summary, content, created)
         .iter()
         .map(|chunk| {
             let data = serde_json::to_string(chunk)

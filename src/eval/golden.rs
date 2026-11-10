@@ -25,7 +25,7 @@ pub struct GoldenQuestion {
     pub expected: Expected,
     /// Chunks a correct retrieval should surface; recall@50 and hit@5 are measured against these.
     pub relevant_chunks: Vec<ChunkId>,
-    /// The Slack thread (or page) the question was mined from.
+    /// The thread or page the question was mined from.
     pub source_thread: String,
 }
 

@@ -45,7 +45,7 @@ impl fmt::Display for ApiKey {
     }
 }
 
-/// An empty key, as from `DREW_EXPLAIN_KEY=` in an env file; unset the variable instead.
+/// An empty key, as from `RECALL_EXPLAIN_KEY=` in an env file; unset the variable instead.
 #[derive(Debug, thiserror::Error)]
 #[error("the key is empty; unset the variable to send no key")]
 pub struct EmptyApiKey;

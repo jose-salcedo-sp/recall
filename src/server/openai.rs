@@ -1,4 +1,4 @@
-//! OpenAI chat-completions wire types, plus the `drew` extension object.
+//! OpenAI chat-completions wire types, plus the `provenance` extension object.
 
 use serde::{Deserialize, Serialize};
 
@@ -14,9 +14,10 @@ use crate::{
 use super::error::ApiError;
 
 /// The one model id `/v1/models` lists and every completion reports.
-pub const MODEL: &str = "drew-ai";
+pub const MODEL: &str = "recall";
 
-/// `POST /v1/chat/completions` body. Fields Drew ignores (temperature, tools, and so on) are accepted and dropped.
+/// `POST /v1/chat/completions` body. Fields the server ignores (temperature, tools, and so
+/// on) are accepted and dropped.
 #[derive(Debug, Deserialize)]
 pub struct ChatRequest {
     /// The conversation; only the last `user` message is used.
@@ -94,7 +95,7 @@ impl ChatRequest {
 
 /// Category, outcome, and citations for one run. The full trace is on `GET /v1/runs/{id}`.
 #[derive(Debug, Serialize)]
-pub struct Drew {
+pub struct RunSummary {
     /// For `GET /v1/runs/{id}`.
     pub run_id: RunId,
     /// What `Classify` chose; `None` when the run halted before classifying.
@@ -114,7 +115,7 @@ pub struct Drew {
     pub citations: Vec<Citation>,
 }
 
-impl Drew {
+impl RunSummary {
     /// The public part of a report: no trace, scores or error detail.
     pub fn new(report: &RunReport) -> Self {
         let (halted_at, decline_reason, verdict, citations) = match &report.outcome {
@@ -159,8 +160,8 @@ pub struct Completion {
     pub model: &'static str,
     /// The single answer.
     pub choices: [CompletionChoice; 1],
-    /// Drew's extension object.
-    pub drew: Drew,
+    /// The run's provenance: its id, outcome and citations.
+    pub provenance: RunSummary,
 }
 
 /// The one choice of a [`Completion`].
@@ -185,9 +186,9 @@ pub struct AssistantMessage {
 
 impl Completion {
     /// `created` is Unix seconds.
-    pub fn new(drew: Drew, content: String, created: i64) -> Self {
+    pub fn new(summary: RunSummary, content: String, created: i64) -> Self {
         Self {
-            id: completion_id(drew.run_id),
+            id: completion_id(summary.run_id),
             object: "chat.completion",
             created,
             model: MODEL,
@@ -199,7 +200,7 @@ impl Completion {
                 },
                 finish_reason: "stop",
             }],
-            drew,
+            provenance: summary,
         }
     }
 }
@@ -219,7 +220,7 @@ pub struct Chunk {
     pub choices: [ChunkChoice; 1],
     /// Only on the final chunk.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub drew: Option<Drew>,
+    pub provenance: Option<RunSummary>,
 }
 
 /// The one choice of a [`Chunk`].
@@ -245,10 +246,10 @@ pub struct Delta {
 }
 
 impl Chunk {
-    /// The whole verified answer in one content chunk, then a final chunk carrying `finish_reason` and `drew`.
-    pub fn pair(drew: Drew, content: String, created: i64) -> [Self; 2] {
-        let id = completion_id(drew.run_id);
-        let make = |delta, finish_reason, drew| Self {
+    /// The whole verified answer in one content chunk, then a final chunk carrying `finish_reason` and `provenance`.
+    pub fn pair(summary: RunSummary, content: String, created: i64) -> [Self; 2] {
+        let id = completion_id(summary.run_id);
+        let make = |delta, finish_reason, provenance| Self {
             id: id.clone(),
             object: "chat.completion.chunk",
             created,
@@ -258,7 +259,7 @@ impl Chunk {
                 delta,
                 finish_reason,
             }],
-            drew,
+            provenance,
         };
         [
             make(
@@ -269,7 +270,7 @@ impl Chunk {
                 None,
                 None,
             ),
-            make(Delta::default(), Some("stop"), Some(drew)),
+            make(Delta::default(), Some("stop"), Some(summary)),
         ]
     }
 }
@@ -296,20 +297,20 @@ pub struct ModelCard {
     pub object: &'static str,
     /// Always `0`; the model has no creation date.
     pub created: i64,
-    /// Always `drew`.
+    /// Always `recall`.
     pub owned_by: &'static str,
 }
 
 impl ModelList {
-    /// The list with Drew's one model.
-    pub fn drew() -> Self {
+    /// The list with the one model this server answers as.
+    pub fn recall() -> Self {
         Self {
             object: "list",
             data: [ModelCard {
                 id: MODEL,
                 object: "model",
                 created: 0,
-                owned_by: "drew",
+                owned_by: "recall",
             }],
         }
     }

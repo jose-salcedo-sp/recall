@@ -17,7 +17,7 @@ pub const MIN_ANSWERED_PRECISION: f64 = 0.95;
 /// Launch gate: the highest decline rate, in `0..=1`.
 pub const MAX_DECLINE_RATE: f64 = 0.40;
 
-/// One entry of the candidates file (a JSON array). `thresholds` and `per_category` are `config/drew.json`'s.
+/// One entry of the candidates file (a JSON array). `thresholds` and `per_category` are `config/recall.json`'s.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Candidate {
@@ -31,7 +31,7 @@ pub struct Candidate {
     pub per_category: PerCategory,
 }
 
-/// The `drew eval tune` output.
+/// The `recall eval tune` output.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TuneReport {
     /// One per candidate, in the candidates file's order.

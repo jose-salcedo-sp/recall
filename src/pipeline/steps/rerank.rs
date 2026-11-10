@@ -33,7 +33,7 @@ const RRF_K: f32 = 60.0;
 /// rank, so the judgement refines retrieval instead of replacing it; the trace records each probability of yes, and
 /// the best kept one scores the step. Without a judge, matches are ordered by retrieval rank alone and the step is
 /// unscored. Matches always keep their fused score. Either way an evidence match is ranked
-/// `evidence_rank_penalty` places lower, so Drew's settled answers lead unless the evidence is clearly better.
+/// `evidence_rank_penalty` places lower, so settled answers lead unless the evidence is clearly better.
 pub struct Rerank<TCategory> {
     top_k: usize,
     evidence_rank_penalty: usize,

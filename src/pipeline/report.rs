@@ -28,7 +28,7 @@ pub struct RunReport {
 pub enum Outcome {
     /// A verified answer.
     Answered(Answer),
-    /// Drew could not answer with certainty.
+    /// The sources do not answer the question with certainty.
     Declined {
         /// The step that declined.
         at: String,

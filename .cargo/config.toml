@@ -1,26 +1,3 @@
 [env]
 # Overridden by an exported DATABASE_URL. Start it with `docker compose up -d --wait db`.
-DATABASE_URL = "postgres://drew:drew@localhost:5433/drew"
-
-[alias]
-# The DaaS questions whose relevant chunks retrieval missed at 4ebe407, compared on the same questions against
-# the newest full run (8a9fbfe, with BM25). Retrieval changes are checked here before the full golden set.
-eval-misses = [
-    "run", "--quiet", "--", "eval", "run",
-    "--golden", "eval/golden/daas.jsonl",
-    "--baseline", "eval/results/daas-2026-10-22-v5.json",
-    "--out", "eval/results/retrieval-misses.json",
-    "--concurrency", "2",
-    "--question", "daas-q06,daas-q09,daas-q24,daas-q30,daas-q44,daas-q45,daas-q50,daas-q51",
-]
-# Retrieval alone (embedder and database, no System One or LLM) on every DaaS question, each compared against
-# retrieval at e5636f4, with BM25 and glossary expansion. Seconds instead of an hour; the gate before `eval-misses`
-# and the full golden set. The baseline is a retrieval file, not the v4 run: v4 predates `context_for`, so it counts
-# context chunks.
-# A retrieval change that is meant to move recall commits its own run as the new baseline.
-eval-retrieval = [
-    "run", "--quiet", "--", "eval", "retrieval",
-    "--golden", "eval/golden/daas.jsonl",
-    "--baseline", "eval/results/daas-retrieval-2026-10-22-glossary.json",
-    "--out", "eval/results/retrieval.json",
-]
+DATABASE_URL = "postgres://recall:recall@localhost:5433/recall"

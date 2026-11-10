@@ -100,7 +100,7 @@ pub(crate) mod fixtures {
             authoritative: false,
             labels: Labels {
                 acl: vec![],
-                customer: None,
+                tenant: None,
                 sensitivity: Sensitivity::Internal,
             },
         }

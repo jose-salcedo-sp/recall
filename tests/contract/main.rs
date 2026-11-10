@@ -16,5 +16,4 @@ mod judge;
 mod models_check;
 mod retriever;
 mod run_store;
-mod slack;
 mod system_one;

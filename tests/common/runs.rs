@@ -1,6 +1,6 @@
 //! One run report per outcome, shared by the `RunStore` tests.
 
-use drew::{
+use recall::{
     domain::{
         AtLeastOne, CategoryKind, ChunkId, ChunkRef, ChunkVersion, Cited, Probability, Provenance,
         Question, RunId, Span,
@@ -21,7 +21,7 @@ fn citation() -> Citation {
         },
         title: "Roles".into(),
         url: "https://wiki.example.test/1".into(),
-        excerpt: "PFCG maintains roles.".into(),
+        excerpt: "ROLEADM maintains roles.".into(),
     }
 }
 
@@ -45,7 +45,7 @@ fn trace() -> Trace {
 pub fn reports() -> Vec<(RunReport, &'static str)> {
     let report = |category, outcome| RunReport {
         id: RunId::new(),
-        question: Question::new("PFCG or SU01 for roles?"),
+        question: Question::new("ROLEADM or USERADM for roles?"),
         category,
         outcome,
         trace: trace(),
@@ -54,19 +54,19 @@ pub fn reports() -> Vec<(RunReport, &'static str)> {
     let answered = Outcome::Answered(Answer {
         verdict: Some(Verdict::Choice {
             selected: Cited {
-                value: "PFCG".into(),
+                value: "ROLEADM".into(),
                 sources: prompt(0, 4),
             },
             rejected: vec![Rejected {
                 option: Cited {
-                    value: "SU01".into(),
+                    value: "USERADM".into(),
                     sources: prompt(8, 12),
                 },
                 reason: "edits users".into(),
             }],
         }),
         why: vec![Cited {
-            value: "PFCG maintains roles.".into(),
+            value: "ROLEADM maintains roles.".into(),
             sources: AtLeastOne::one(Provenance::Chunk(citation().chunk.id)),
         }],
         citations: vec![citation()],

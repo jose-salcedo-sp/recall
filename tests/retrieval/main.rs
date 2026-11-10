@@ -9,7 +9,7 @@ mod seed;
 
 use std::sync::Arc;
 
-use drew::{
+use recall::{
     domain::{ChunkId, SourceKind},
     llm::{Embedder, ModelRef, fakes::HashEmbedder},
     retrieval::{
@@ -40,65 +40,65 @@ fn position(results: &[Retrieved], id: &ChunkId) -> Option<usize> {
     results.iter().position(|r| r.chunk.id == *id)
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn identifier_queries_match_exactly_via_full_text(pool: PgPool) {
     let chunk = async |key: &str, text: &str| {
         let doc = document(&pool, SourceKind::Markdown, key, key).await;
         SeedChunk::new(&doc, "body", 0, text).insert(&pool).await
     };
-    let s_tcode = chunk(
+    let a_opcode = chunk(
         "note-1.md",
-        "Start authorization: S_TCODE is checked when a user calls a transaction.",
+        "Start authorization: A_OPCODE is checked when a user calls a transaction.",
     )
     .await;
-    let tcode_prose = chunk(
+    let opcode_prose = chunk(
         "note-2.md",
-        "The s tcode column of the TSTC table lists transactions; see the TCODE field.",
+        "The a opcode column of the OPTAB table lists transactions; see the OPCODE field.",
     )
     .await;
-    let agr_users = chunk("note-3.md", "AGR_USERS stores role assignments per user.").await;
-    let agr_users_t = chunk(
+    let role_users = chunk("note-3.md", "ROLE_USERS stores role assignments per user.").await;
+    let role_users_t = chunk(
         "note-4.md",
-        "AGR_USERS_T holds role texts; agr users read it for descriptions.",
+        "ROLE_USERS_T holds role texts; role users read it for descriptions.",
     )
     .await;
-    let su24 = chunk(
+    let op24 = chunk(
         "note-5.md",
-        "Use SU24 to maintain authorization proposal values.",
+        "Use OP24 to maintain authorization proposal values.",
     )
     .await;
-    let su24n = chunk(
+    let op24n = chunk(
         "note-6.md",
-        "SU24N is the newer screen for proposal values.",
+        "OP24N is the newer screen for proposal values.",
     )
     .await;
     let retriever = retriever(&pool, full_text_only());
 
-    // English stems both chunks to `tcode`; only the exact token side tells them apart.
-    let results = retriever.retrieve("S_TCODE").await.unwrap();
-    assert_eq!(results[0].chunk.id, s_tcode);
-    assert!(position(&results, &tcode_prose) > Some(0));
+    // English stems both chunks to `opcode`; only the exact token side tells them apart.
+    let results = retriever.retrieve("A_OPCODE").await.unwrap();
+    assert_eq!(results[0].chunk.id, a_opcode);
+    assert!(position(&results, &opcode_prose) > Some(0));
 
-    let results = retriever.retrieve("Who reads AGR_USERS?").await.unwrap();
-    assert_eq!(results[0].chunk.id, agr_users);
-    assert!(position(&results, &agr_users_t) > Some(0));
+    let results = retriever.retrieve("Who reads ROLE_USERS?").await.unwrap();
+    assert_eq!(results[0].chunk.id, role_users);
+    assert!(position(&results, &role_users_t) > Some(0));
 
-    let results = retriever.retrieve("what is su24").await.unwrap();
-    assert_eq!(ids(&results), [su24.0.as_str()]);
-    assert_eq!(position(&results, &su24n), None);
+    let results = retriever.retrieve("what is op24").await.unwrap();
+    assert_eq!(ids(&results), [op24.0.as_str()]);
+    assert_eq!(position(&results, &op24n), None);
 
     let results = retriever
-        .retrieve("Which table is _AGR_USERS_?")
+        .retrieve("Which table is _ROLE_USERS_?")
         .await
         .unwrap();
-    assert_eq!(results[0].chunk.id, agr_users);
+    assert_eq!(results[0].chunk.id, role_users);
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn identifiers_in_headings_and_markdown_are_indexed(pool: PgPool) {
     let page = document(&pool, SourceKind::Markdown, "10", "Tables").await;
-    let heading = SeedChunk::new(&page, "agr-1251", 0, "Authorization values per role.")
-        .heading("AGR_1251")
+    let heading = SeedChunk::new(&page, "role-1251", 0, "Authorization values per role.")
+        .heading("ROLE_1251")
         .insert(&pool)
         .await;
     let notes = document(&pool, SourceKind::Markdown, "notes.md", "Notes").await;
@@ -107,13 +107,13 @@ async fn identifiers_in_headings_and_markdown_are_indexed(pool: PgPool) {
         .await;
     let retriever = retriever(&pool, full_text_only());
 
-    let results = retriever.retrieve("AGR_1251").await.unwrap();
+    let results = retriever.retrieve("ROLE_1251").await.unwrap();
     assert_eq!(ids(&results), [heading.0.as_str()]);
     let results = retriever.retrieve("usobt_c").await.unwrap();
     assert_eq!(ids(&results), [italic.0.as_str()]);
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn a_rare_term_outranks_repeats_of_a_common_one(pool: PgPool) {
     let chunk = async |key: &str, text: &str| {
         let doc = document(&pool, SourceKind::Markdown, key, key).await;
@@ -142,7 +142,7 @@ async fn a_rare_term_outranks_repeats_of_a_common_one(pool: PgPool) {
     assert_eq!(results.len(), 7);
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn tsquery_syntax_in_a_question_is_plain_text(pool: PgPool) {
     let doc = document(&pool, SourceKind::Markdown, "obrien.md", "Owners").await;
     let id = SeedChunk::new(&doc, "body", 0, "O'Brien owns the built-in roles.")
@@ -155,7 +155,7 @@ async fn tsquery_syntax_in_a_question_is_plain_text(pool: PgPool) {
     assert_eq!(ids(&results), [id.0.as_str()]);
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn prose_query_hits_via_vectors(pool: PgPool) {
     let question = "how do I take away someone's access when they quit";
     let doc = document(&pool, SourceKind::Markdown, "note-7.md", "Leavers").await;
@@ -190,9 +190,9 @@ async fn prose_query_hits_via_vectors(pool: PgPool) {
     assert_eq!(hybrid[0].chunk.id, leavers);
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn fusion_orders_by_reciprocal_rank(pool: PgPool) {
-    let query = "S_TCODE authorization check";
+    let query = "A_OPCODE authorization check";
     let q = embed(query).await;
     let chunk = async |key: &str, text: &str, cosine: f32| {
         let doc = document(&pool, SourceKind::Markdown, key, key).await;
@@ -204,7 +204,7 @@ async fn fusion_orders_by_reciprocal_rank(pool: PgPool) {
     // Full text: x (identifier), z (prose). Vectors: y, z, f1..f5, x.
     let x = chunk(
         "X-1",
-        "S_TCODE authorization check at transaction start",
+        "A_OPCODE authorization check at transaction start",
         0.0,
     )
     .await;
@@ -235,7 +235,7 @@ async fn fusion_orders_by_reciprocal_rank(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn superseded_versions_are_never_returned(pool: PgPool) {
     let page = document(&pool, SourceKind::Markdown, "20", "Start authorization").await;
     SeedChunk::new(&page, "intro", 0, "Intro, old wording.")
@@ -251,7 +251,7 @@ async fn superseded_versions_are_never_returned(pool: PgPool) {
         .superseded()
         .insert(&pool)
         .await;
-    SeedChunk::new(&page, "check", 2, "S_TCODE was checked by the old kernel.")
+    SeedChunk::new(&page, "check", 2, "A_OPCODE was checked by the old kernel.")
         .version("old-check")
         .superseded()
         .insert(&pool)
@@ -260,19 +260,19 @@ async fn superseded_versions_are_never_returned(pool: PgPool) {
         &page,
         "check",
         2,
-        "S_TCODE is checked at transaction start.",
+        "A_OPCODE is checked at transaction start.",
     )
     .version("new-check")
     .insert(&pool)
     .await;
     let gone = document(&pool, SourceKind::Markdown, "deleted.md", "Deleted file").await;
-    let deleted = SeedChunk::new(&gone, "body", 0, "S_TCODE in a deleted file.")
+    let deleted = SeedChunk::new(&gone, "body", 0, "A_OPCODE in a deleted file.")
         .superseded()
         .insert(&pool)
         .await;
 
     let results = retriever(&pool, HybridConfig::default())
-        .retrieve("S_TCODE")
+        .retrieve("A_OPCODE")
         .await
         .unwrap();
 
@@ -284,14 +284,14 @@ async fn superseded_versions_are_never_returned(pool: PgPool) {
     assert_eq!(position(&results, &deleted), None);
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn hits_expand_to_neighbouring_sections(pool: PgPool) {
-    let page = document(&pool, SourceKind::Markdown, "30", "SU24 guide").await;
+    let page = document(&pool, SourceKind::Markdown, "30", "OP24 guide").await;
     let mut sections = Vec::new();
     for (ordinal, text) in [
         "Overview of proposal values.",
         "Prerequisites for maintenance.",
-        "Run SU24 and pick the application.",
+        "Run OP24 and pick the application.",
         "Adjust check indicators.",
         "Transport the changes.",
     ]
@@ -308,7 +308,7 @@ async fn hits_expand_to_neighbouring_sections(pool: PgPool) {
     let first = SeedChunk::new(&sparse, "a", 0, "Background.")
         .insert(&pool)
         .await;
-    let middle = SeedChunk::new(&sparse, "b", 4, "SU24 in sparse pages.")
+    let middle = SeedChunk::new(&sparse, "b", 4, "OP24 in sparse pages.")
         .insert(&pool)
         .await;
     let last = SeedChunk::new(&sparse, "c", 9, "Appendix.")
@@ -316,7 +316,7 @@ async fn hits_expand_to_neighbouring_sections(pool: PgPool) {
         .await;
 
     let results = retriever(&pool, full_text_only())
-        .retrieve("SU24")
+        .retrieve("OP24")
         .await
         .unwrap();
 
@@ -336,16 +336,16 @@ async fn hits_expand_to_neighbouring_sections(pool: PgPool) {
     assert_eq!(results.len(), 6);
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn expansion_dedupes_and_caps_per_page(pool: PgPool) {
     let page = document(&pool, SourceKind::Markdown, "40", "Start checks").await;
     let mut sections = Vec::new();
     for (ordinal, text) in [
         "Overview of the start check.",
         "Kernel behaviour.",
-        "S_TCODE first, then S_TCODE again for each call.",
-        "S_TCODE once, with extra context words here.",
-        "Troubleshooting with ST01.",
+        "A_OPCODE first, then A_OPCODE again for each call.",
+        "A_OPCODE once, with extra context words here.",
+        "Troubleshooting with TR01.",
         "Related notes.",
     ]
     .into_iter()
@@ -359,7 +359,7 @@ async fn expansion_dedupes_and_caps_per_page(pool: PgPool) {
 
     // Both hits are kept; the better hit's neighbours fill the page up to the cap of three.
     let results = retriever(&pool, full_text_only())
-        .retrieve("S_TCODE")
+        .retrieve("A_OPCODE")
         .await
         .unwrap();
     assert_eq!(
@@ -371,7 +371,7 @@ async fn expansion_dedupes_and_caps_per_page(pool: PgPool) {
         max_chunks_per_document: 5,
         ..full_text_only()
     };
-    let results = retriever(&pool, roomy).retrieve("S_TCODE").await.unwrap();
+    let results = retriever(&pool, roomy).retrieve("A_OPCODE").await.unwrap();
     assert_eq!(
         ids(&results),
         [&sections[2], &sections[1], &sections[3], &sections[4]].map(|id| id.0.as_str())
@@ -379,7 +379,7 @@ async fn expansion_dedupes_and_caps_per_page(pool: PgPool) {
     assert!(results.windows(2).all(|w| w[0].score >= w[1].score));
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn adjacent_hits_expand_and_single_section_files_stand_alone(pool: PgPool) {
     let guide = document(
         &pool,
@@ -391,16 +391,16 @@ async fn adjacent_hits_expand_and_single_section_files_stand_alone(pool: PgPool)
     let symptom = SeedChunk::new(&guide, "symptom", 0, "Import fails on the role upload.")
         .insert(&pool)
         .await;
-    let cause = SeedChunk::new(&guide, "cause", 1, "Cause: SU24 data was missing.")
+    let cause = SeedChunk::new(&guide, "cause", 1, "Cause: OP24 data was missing.")
         .insert(&pool)
         .await;
-    let faq = document(&pool, SourceKind::Markdown, "su24-faq.md", "SU24 FAQ").await;
-    let answer = SeedChunk::new(&faq, "body", 0, "Is SU24 transported? Yes.")
+    let faq = document(&pool, SourceKind::Markdown, "op24-faq.md", "OP24 FAQ").await;
+    let answer = SeedChunk::new(&faq, "body", 0, "Is OP24 transported? Yes.")
         .insert(&pool)
         .await;
 
     let results = retriever(&pool, full_text_only())
-        .retrieve("SU24")
+        .retrieve("OP24")
         .await
         .unwrap();
     let mut found = ids(&results);
@@ -422,7 +422,7 @@ async fn adjacent_hits_expand_and_single_section_files_stand_alone(pool: PgPool)
     assert_eq!(context_for(&answer.0), None);
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn chunks_are_fully_populated(pool: PgPool) {
     let page = document(&pool, SourceKind::Markdown, "50", "Role design").await;
     let id = SeedChunk::new(
@@ -452,26 +452,26 @@ async fn chunks_are_fully_populated(pool: PgPool) {
     assert!(!chunk.authoritative);
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn mismatched_embedding_model_is_refused(pool: PgPool) {
     let titan = ModelRef::new("amazon.titan-embed-text-v2", "2");
     let doc = document(&pool, SourceKind::Markdown, "note-12.md", "Roles").await;
-    SeedChunk::new(&doc, "old", 0, "AGR_USERS old vectors.")
+    SeedChunk::new(&doc, "old", 0, "ROLE_USERS old vectors.")
         .model(titan.clone())
         .superseded()
         .insert(&pool)
         .await;
-    SeedChunk::new(&doc, "body", 1, "AGR_USERS maps users to roles.")
+    SeedChunk::new(&doc, "body", 1, "ROLE_USERS maps users to roles.")
         .insert(&pool)
         .await;
     let retriever = retriever(&pool, HybridConfig::default());
-    assert_eq!(retriever.retrieve("AGR_USERS").await.unwrap().len(), 1);
+    assert_eq!(retriever.retrieve("ROLE_USERS").await.unwrap().len(), 1);
 
-    SeedChunk::new(&doc, "comment", 2, "AGR_USERS re-embedded with Titan.")
+    SeedChunk::new(&doc, "comment", 2, "ROLE_USERS re-embedded with Titan.")
         .model(titan.clone())
         .insert(&pool)
         .await;
-    let error = retriever.retrieve("AGR_USERS").await.unwrap_err();
+    let error = retriever.retrieve("ROLE_USERS").await.unwrap_err();
     let mismatch = error
         .downcast_inner_ref::<EmbeddingModelMismatch>()
         .expect("a model mismatch");
@@ -483,18 +483,18 @@ async fn mismatched_embedding_model_is_refused(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn empty_corpus_and_blank_query_return_nothing(pool: PgPool) {
     let retriever = retriever(&pool, HybridConfig::default());
-    assert!(retriever.retrieve("AGR_USERS").await.unwrap().is_empty());
+    assert!(retriever.retrieve("ROLE_USERS").await.unwrap().is_empty());
     let doc = document(&pool, SourceKind::Markdown, "note-13.md", "Roles").await;
-    SeedChunk::new(&doc, "body", 0, "AGR_USERS")
+    SeedChunk::new(&doc, "body", 0, "ROLE_USERS")
         .insert(&pool)
         .await;
     assert!(retriever.retrieve("  ").await.unwrap().is_empty());
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn vector_side_uses_hnsw_beyond_its_default_ef_search(pool: PgPool) {
     for i in 0..60 {
         let doc = document(&pool, SourceKind::Markdown, &format!("V-{i}"), "filler").await;
@@ -531,7 +531,7 @@ async fn vector_side_uses_hnsw_beyond_its_default_ef_search(pool: PgPool) {
     assert_eq!(results.len(), 50);
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn recall_at_k_on_fixture_set(pool: PgPool) {
     let chunk = async |source: SourceKind, key: &str, text: &str| {
         let doc = document(&pool, source, key, key).await;
@@ -540,25 +540,25 @@ async fn recall_at_k_on_fixture_set(pool: PgPool) {
     let start = chunk(
         SourceKind::Markdown,
         "60",
-        "The kernel checks S_TCODE before any transaction starts.",
+        "The kernel checks A_OPCODE before any transaction starts.",
     )
     .await;
     let assignments = chunk(
         SourceKind::Markdown,
         "61",
-        "AGR_USERS lists which users hold which roles, with validity dates.",
+        "ROLE_USERS lists which users hold which roles, with validity dates.",
     )
     .await;
     let proposals = chunk(
         SourceKind::Markdown,
         "note-20.md",
-        "SU24 proposal values feed PFCG when roles are built.",
+        "OP24 proposal values feed ROLEADM when roles are built.",
     )
     .await;
     let tables = chunk(
         SourceKind::Markdown,
         "tables.md",
-        "S_TABU_DIS protects table maintenance by authorization group.",
+        "A_TABLE_GRP protects table maintenance by authorization group.",
     )
     .await;
     let leavers = chunk(
@@ -574,12 +574,12 @@ async fn recall_at_k_on_fixture_set(pool: PgPool) {
         chunk(SourceKind::Markdown, &format!("note-3{i}.md"), text).await;
     }
     let golden: [(&str, &[&ChunkId]); 5] = [
-        ("Is S_TCODE checked at transaction start?", &[&start]),
+        ("Is A_OPCODE checked at transaction start?", &[&start]),
         (
             "Where are role assignments for users stored?",
             &[&assignments],
         ),
-        ("Does SU24 feed PFCG?", &[&proposals]),
+        ("Does OP24 feed ROLEADM?", &[&proposals]),
         ("Which object protects table maintenance?", &[&tables]),
         ("What happens to leavers' roles?", &[&leavers, &assignments]),
     ];
@@ -594,7 +594,7 @@ async fn recall_at_k_on_fixture_set(pool: PgPool) {
     let mean = recall.iter().sum::<f64>() / recall.len() as f64;
     assert_eq!(mean, 1.0, "{recall:?}");
 
-    let results = retriever.retrieve("Does SU24 feed PFCG?").await.unwrap();
+    let results = retriever.retrieve("Does OP24 feed ROLEADM?").await.unwrap();
     assert_eq!(
         recall_at_k(&results, std::slice::from_ref(&proposals), 1),
         1.0
@@ -602,7 +602,7 @@ async fn recall_at_k_on_fixture_set(pool: PgPool) {
     assert_eq!(recall_at_k(&results, &[proposals, start], 1), 0.5);
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn a_glossary_synonym_retrieves_its_target(pool: PgPool) {
     let lexicon = document(&pool, SourceKind::Markdown, "LEXICON.md", "Lexicon").await;
     let row = SeedChunk::new(

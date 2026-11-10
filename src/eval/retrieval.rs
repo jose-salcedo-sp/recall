@@ -1,4 +1,4 @@
-//! `drew eval retrieval`: runs only [`Retrieve`] (embedder and database; no System One, no LLM) on every golden
+//! `recall eval retrieval`: runs only [`Retrieve`] (embedder and database; no System One, no LLM) on every golden
 //! question, reports recall over the retrieved matches, and compares each question with a baseline.
 
 use std::{
@@ -34,7 +34,7 @@ use super::{
 /// Retrieved matches that count for recall@10.
 pub const SHORT_RECALL_K: usize = 10;
 
-/// What `drew eval retrieval` reads and writes, independent of the retriever it runs.
+/// What `recall eval retrieval` reads and writes, independent of the retriever it runs.
 #[derive(Debug, clap::Args)]
 pub struct RetrievalArgs {
     /// Golden set, JSONL.
@@ -43,7 +43,7 @@ pub struct RetrievalArgs {
     /// Where to write the results JSON.
     #[arg(long)]
     pub out: Option<PathBuf>,
-    /// A `drew eval run` or `drew eval retrieval` results file to compare each question with; any question that
+    /// A `recall eval run` or `recall eval retrieval` results file to compare each question with; any question that
     /// loses recall exits non-zero.
     #[arg(long)]
     pub baseline: Option<PathBuf>,
@@ -55,7 +55,7 @@ pub struct RetrievalArgs {
     pub questions: Vec<String>,
 }
 
-/// The `drew eval retrieval` output file.
+/// The `recall eval retrieval` output file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RetrievalResults {
     /// What the runs ran with; `None` for retrievers built outside the command.
@@ -351,7 +351,7 @@ pub fn compare(
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BaselineRecords(HashMap<String, Option<RetrieveRecord>>);
 
-/// A run of either results file: `drew eval run` records a `report`, `drew eval retrieval` an `outcome`.
+/// A run of either results file: `recall eval run` records a `report`, `recall eval retrieval` an `outcome`.
 #[derive(Deserialize)]
 struct BaselineRun {
     golden: BaselineGolden,
@@ -382,7 +382,7 @@ impl BaselineRecords {
         self.0.get(id).and_then(Option::as_ref)
     }
 
-    /// Parses a `drew eval run` or `drew eval retrieval` results file.
+    /// Parses a `recall eval run` or `recall eval retrieval` results file.
     ///
     /// # Errors
     ///

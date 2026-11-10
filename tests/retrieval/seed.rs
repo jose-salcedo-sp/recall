@@ -2,12 +2,12 @@
 
 use std::collections::HashSet;
 
-use drew::{
+use pgvector::Vector;
+use recall::{
     domain::{ChunkId, DocumentId, SourceKind},
     llm::{EMBEDDING_DIM, EmbedPurpose, Embedder, ModelRef, fakes::HashEmbedder},
     retrieval::Retrieved,
 };
-use pgvector::Vector;
 use sqlx::PgPool;
 
 pub async fn document(
@@ -113,7 +113,7 @@ impl SeedChunk {
         };
         sqlx::query(
             "INSERT INTO chunks (id, version, document_id, ordinal, heading, url, text, authoritative, acl,
-                                 customer, sensitivity, embedding, embedding_model, embedding_model_version,
+                                 tenant, sensitivity, embedding, embedding_model, embedding_model_version,
                                  superseded_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7, false, '{group:arm}', NULL, 'internal', $8, $9, $10,
                      CASE WHEN $11 THEN now() END)",

@@ -201,7 +201,7 @@ impl ChunkStore {
         for ((id, version, ordinal, draft), embedding) in fresh.iter().zip(embeddings) {
             sqlx::query(
                 "INSERT INTO chunks (id, version, document_id, ordinal, heading, url, text, authoritative,
-                                     acl, customer, sensitivity, embedding, embedding_model,
+                                     acl, tenant, sensitivity, embedding, embedding_model,
                                      embedding_model_version)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
             )
@@ -214,7 +214,7 @@ impl ChunkStore {
             .bind(&draft.text)
             .bind(draft.authoritative)
             .bind(&document.labels.acl)
-            .bind(&document.labels.customer)
+            .bind(&document.labels.tenant)
             .bind(document.labels.sensitivity.as_str())
             .bind(Vector::from(embedding))
             .bind(&model.id)

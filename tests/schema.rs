@@ -5,15 +5,15 @@
     reason = "integration-test helpers; clippy exempts only #[test] functions"
 )]
 
-use drew::{
+use pgvector::Vector;
+use recall::{
     domain::{CategoryKind, Sensitivity, SourceKind},
     llm::EMBEDDING_DIM,
 };
-use pgvector::Vector;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn check_constraints_accept_every_enum_variant(pool: PgPool) -> sqlx::Result<()> {
     let document = |source: &str| {
         sqlx::query(
@@ -25,7 +25,7 @@ async fn check_constraints_accept_every_enum_variant(pool: PgPool) -> sqlx::Resu
     for source in SourceKind::ALL {
         document(source.as_str()).execute(&pool).await?;
     }
-    for source in ["unknown", "confluence", "jira", "slack"] {
+    for source in ["unknown", "wiki"] {
         assert!(document(source).execute(&pool).await.is_err(), "{source}");
     }
 
@@ -62,7 +62,7 @@ async fn check_constraints_accept_every_enum_variant(pool: PgPool) -> sqlx::Resu
     Ok(())
 }
 
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn a_chunk_has_one_current_version(pool: PgPool) -> sqlx::Result<()> {
     sqlx::query(
         "INSERT INTO documents (id, source, external_id, title, url, source_updated_at)
@@ -89,55 +89,5 @@ async fn a_chunk_has_one_current_version(pool: PgPool) -> sqlx::Result<()> {
         .execute(&pool)
         .await?;
     insert("v2").execute(&pool).await?;
-    Ok(())
-}
-
-#[sqlx::test(migrations = false)]
-async fn markdown_only_migration_removes_legacy_sources(pool: PgPool) -> sqlx::Result<()> {
-    const BEFORE: i64 = 20261012000000;
-    let migrator = &drew::store::MIGRATOR;
-    migrator.run_to(BEFORE, &pool).await?;
-
-    for (document, source) in [
-        ("confluence:1", "confluence"),
-        ("jira:ARM-1", "jira"),
-        ("slack:C1:1.0", "slack"),
-        ("markdown:roles.md", "markdown"),
-    ] {
-        sqlx::query(
-            "INSERT INTO documents (id, source, external_id, title, url, source_updated_at)
-             VALUES ($1, $2, $1, 'Roles', 'https://example.test/', now())",
-        )
-        .bind(document)
-        .bind(source)
-        .execute(&pool)
-        .await?;
-        for (locator, superseded) in [("old", true), ("intro", false)] {
-            sqlx::query(
-                "INSERT INTO chunks (id, version, document_id, ordinal, url, text, authoritative, acl,
-                                     sensitivity, embedding, embedding_model, embedding_model_version,
-                                     superseded_at)
-                 VALUES ($1 || '#' || $2, 'v1', $1, 0, 'https://example.test/', 'text', true, '{}',
-                         'internal', $3, 'fake', '1', CASE WHEN $4 THEN now() END)",
-            )
-            .bind(document)
-            .bind(locator)
-            .bind(Vector::from(vec![0.0; EMBEDDING_DIM]))
-            .bind(superseded)
-            .execute(&pool)
-            .await?;
-        }
-    }
-
-    migrator.run(&pool).await?;
-
-    let documents: Vec<String> = sqlx::query_scalar("SELECT id FROM documents ORDER BY id")
-        .fetch_all(&pool)
-        .await?;
-    assert_eq!(documents, ["markdown:roles.md"]);
-    let chunks: Vec<String> = sqlx::query_scalar("SELECT id FROM chunks ORDER BY id")
-        .fetch_all(&pool)
-        .await?;
-    assert_eq!(chunks, ["markdown:roles.md#intro", "markdown:roles.md#old"]);
     Ok(())
 }

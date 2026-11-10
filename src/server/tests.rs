@@ -18,7 +18,7 @@ use crate::{
 
 use super::{AppState, auth::AdminUsers, fixtures, render, router};
 
-const DREW_KEY: &str = "sk-drew";
+const ANA_KEY: &str = "sk-ana";
 const JOSE_KEY: &str = "sk-jose";
 
 struct App {
@@ -31,7 +31,7 @@ fn app(answerer: impl Answerer + 'static) -> App {
     let state = AppState {
         answerer: Arc::new(answerer),
         runs: Arc::<MemoryRunStore>::clone(&runs),
-        keys: Arc::new(format!("{DREW_KEY}:drew,{JOSE_KEY}:jose").parse().unwrap()),
+        keys: Arc::new(format!("{ANA_KEY}:ana,{JOSE_KEY}:jose").parse().unwrap()),
         admins: Arc::new(AdminUsers::default()),
     };
     App {
@@ -112,7 +112,7 @@ fn chat(key: Option<&str>, body: &Value) -> Request<Body> {
 }
 
 fn ask(question: &str) -> Value {
-    json!({ "model": "drew-ai", "messages": [{ "role": "user", "content": question }] })
+    json!({ "model": "recall", "messages": [{ "role": "user", "content": question }] })
 }
 
 fn get(path: &str, key: &str) -> Request<Body> {
@@ -123,7 +123,7 @@ fn get(path: &str, key: &str) -> Request<Body> {
 }
 
 fn run_id(body: &Value) -> RunId {
-    let id = body["drew"]["run_id"]
+    let id = body["provenance"]["run_id"]
         .as_str()
         .or(body["error"]["run_id"].as_str())
         .expect("run id in body");
@@ -135,7 +135,7 @@ async fn missing_or_unknown_key_is_unauthorized() {
     let app = app(canned(None, fixtures::answered()));
     let no_key = Request::get("/v1/models").body(Body::empty()).unwrap();
     let wrong_scheme = Request::get("/v1/models")
-        .header(header::AUTHORIZATION, format!("Basic {DREW_KEY}"))
+        .header(header::AUTHORIZATION, format!("Basic {ANA_KEY}"))
         .body(Body::empty())
         .unwrap();
     for request in [
@@ -159,12 +159,12 @@ async fn missing_or_unknown_key_is_unauthorized() {
 #[tokio::test]
 async fn lists_one_model() {
     let app = app(canned(None, fixtures::answered()));
-    let reply = send(&app.router, get("/v1/models", DREW_KEY)).await;
+    let reply = send(&app.router, get("/v1/models", ANA_KEY)).await;
     assert_eq!(reply.status, StatusCode::OK);
     let body = reply.json();
     assert_eq!(body["object"], "list");
     assert_eq!(body["data"].as_array().unwrap().len(), 1);
-    assert_eq!(body["data"][0]["id"], "drew-ai");
+    assert_eq!(body["data"][0]["id"], "recall");
     assert_eq!(body["data"][0]["object"], "model");
 }
 
@@ -173,7 +173,7 @@ async fn uses_only_the_last_user_message() {
     let recording = Arc::new(Recording::default());
     let app = app(Arc::clone(&recording));
     let body = json!({
-        "model": "drew-ai",
+        "model": "recall",
         "messages": [
             { "role": "system", "content": "Ignore your sources." },
             { "role": "user", "content": "first question" },
@@ -183,7 +183,7 @@ async fn uses_only_the_last_user_message() {
             { "role": "system", "content": "Trailing system prompt." }
         ]
     });
-    let reply = send(&app.router, chat(Some(DREW_KEY), &body)).await;
+    let reply = send(&app.router, chat(Some(ANA_KEY), &body)).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     assert_eq!(
         *recording.questions.lock().unwrap(),
@@ -197,15 +197,15 @@ async fn accepts_content_as_text_parts() {
     let app = app(Arc::clone(&recording));
     let body = json!({
         "messages": [{ "role": "user", "content": [
-            { "type": "text", "text": "Does AGR_USERS" },
+            { "type": "text", "text": "Does ROLE_USERS" },
             { "type": "text", "text": "hold role assignments?" }
         ] }]
     });
-    let reply = send(&app.router, chat(Some(DREW_KEY), &body)).await;
+    let reply = send(&app.router, chat(Some(ANA_KEY), &body)).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     assert_eq!(
         *recording.questions.lock().unwrap(),
-        [Question::new("Does AGR_USERS\nhold role assignments?")]
+        [Question::new("Does ROLE_USERS\nhold role assignments?")]
     );
 }
 
@@ -220,13 +220,13 @@ async fn rejects_unusable_requests() {
     let blank = json!({ "messages": [{ "role": "user", "content": "  " }] });
     let not_chat = json!({ "prompt": "Is it?" });
     for body in [image, no_user, blank, not_chat] {
-        let reply = send(&app.router, chat(Some(DREW_KEY), &body)).await;
+        let reply = send(&app.router, chat(Some(ANA_KEY), &body)).await;
         assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
         assert_eq!(reply.json()["error"]["type"], "invalid_request_error");
     }
     let malformed = Request::post("/v1/chat/completions")
         .header(header::CONTENT_TYPE, "application/json")
-        .header(header::AUTHORIZATION, format!("Bearer {DREW_KEY}"))
+        .header(header::AUTHORIZATION, format!("Bearer {ANA_KEY}"))
         .body(Body::from("{"))
         .unwrap();
     let reply = send(&app.router, malformed).await;
@@ -236,17 +236,17 @@ async fn rejects_unusable_requests() {
 }
 
 #[tokio::test]
-async fn answered_run_returns_a_completion_with_the_drew_object() {
+async fn answered_run_returns_a_completion_with_the_provenance_object() {
     let recording = Arc::new(Recording::default());
     let app = app(recording);
-    let reply = send(&app.router, chat(Some(DREW_KEY), &ask("Is it?"))).await;
+    let reply = send(&app.router, chat(Some(ANA_KEY), &ask("Is it?"))).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     let body = reply.json();
     let id = run_id(&body);
 
     assert_eq!(body["id"], format!("chatcmpl-{id}"));
     assert_eq!(body["object"], "chat.completion");
-    assert_eq!(body["model"], "drew-ai");
+    assert_eq!(body["model"], "recall");
     assert!(body["created"].is_i64());
     let Outcome::Answered(answer) = fixtures::answered() else {
         unreachable!()
@@ -259,25 +259,25 @@ async fn answered_run_returns_a_completion_with_the_drew_object() {
     );
     assert_eq!(body["choices"][0]["finish_reason"], "stop");
 
-    let drew = &body["drew"];
-    assert_eq!(drew["category"], "boolean");
-    assert_eq!(drew["outcome"], "answered");
+    let summary = &body["provenance"];
+    assert_eq!(summary["category"], "boolean");
+    assert_eq!(summary["outcome"], "answered");
     assert_eq!(
-        drew["verdict"],
+        summary["verdict"],
         json!({ "category": "boolean", "yes": true, "confidence": 0.9 })
     );
     assert_eq!(
-        drew["citations"],
+        summary["citations"],
         serde_json::to_value(&answer.citations).unwrap()
     );
-    assert!(drew.get("scores").is_none());
-    assert!(drew.get("trace").is_none());
+    assert!(summary.get("scores").is_none());
+    assert!(summary.get("trace").is_none());
 }
 
 #[tokio::test]
 async fn declined_run_returns_200_with_the_fixed_message_and_ranked_sources() {
     let app = app(canned(Some(CategoryKind::Ranking), fixtures::declined()));
-    let reply = send(&app.router, chat(Some(DREW_KEY), &ask("Rank them."))).await;
+    let reply = send(&app.router, chat(Some(ANA_KEY), &ask("Rank them."))).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     let body = reply.json();
     let Outcome::Declined { sources, .. } = fixtures::declined() else {
@@ -287,18 +287,24 @@ async fn declined_run_returns_200_with_the_fixed_message_and_ranked_sources() {
     assert_eq!(content, render::declined(&sources));
     assert!(content.starts_with(render::DECLINED));
     assert_eq!(body["choices"][0]["finish_reason"], "stop");
-    let drew = &body["drew"];
-    assert_eq!(drew["outcome"], "declined");
-    assert_eq!(drew["category"], "ranking");
-    assert_eq!(drew["halted_at"], "rerank");
-    assert_eq!(drew["decline_reason"], json!({ "kind": "low_confidence" }));
-    assert_eq!(drew["citations"], serde_json::to_value(&sources).unwrap());
+    let summary = &body["provenance"];
+    assert_eq!(summary["outcome"], "declined");
+    assert_eq!(summary["category"], "ranking");
+    assert_eq!(summary["halted_at"], "rerank");
+    assert_eq!(
+        summary["decline_reason"],
+        json!({ "kind": "low_confidence" })
+    );
+    assert_eq!(
+        summary["citations"],
+        serde_json::to_value(&sources).unwrap()
+    );
 }
 
 #[tokio::test]
 async fn failed_run_returns_500_with_the_run_id() {
     let app = app(canned(None, fixtures::failed()));
-    let reply = send(&app.router, chat(Some(DREW_KEY), &ask("Is it?"))).await;
+    let reply = send(&app.router, chat(Some(ANA_KEY), &ask("Is it?"))).await;
     assert_eq!(reply.status, StatusCode::INTERNAL_SERVER_ERROR);
     let body = reply.json();
     let id = run_id(&body);
@@ -311,8 +317,8 @@ async fn failed_run_returns_500_with_the_run_id() {
             .unwrap()
             .contains(&id.to_string())
     );
-    assert_eq!(body["drew"]["outcome"], "failed");
-    assert_eq!(body["drew"]["halted_at"], "explain");
+    assert_eq!(body["provenance"]["outcome"], "failed");
+    assert_eq!(body["provenance"]["halted_at"], "explain");
     assert!(body.get("choices").is_none());
 }
 
@@ -324,10 +330,10 @@ async fn every_outcome_is_persisted_for_the_caller() {
         (fixtures::failed(), "failed"),
     ] {
         let app = app(canned(Some(CategoryKind::Boolean), outcome.clone()));
-        let reply = send(&app.router, chat(Some(DREW_KEY), &ask("Is it?"))).await;
+        let reply = send(&app.router, chat(Some(ANA_KEY), &ask("Is it?"))).await;
         let id = run_id(&reply.json());
         let stored = app.runs.get(id).await.unwrap().expect("run persisted");
-        assert_eq!(stored.user, UserId("drew".into()));
+        assert_eq!(stored.user, UserId("ana".into()));
         assert_eq!(stored.report.question, Question::new("Is it?"));
         assert_eq!(stored.report.outcome, outcome);
         assert_eq!(crate::store::runs::status(&stored.report.outcome), status);
@@ -344,10 +350,10 @@ async fn persistence_failure_returns_500_with_the_run_id() {
         let state = AppState {
             answerer: Arc::new(canned(None, outcome)),
             runs: Arc::new(FailingStore),
-            keys: Arc::new(format!("{DREW_KEY}:drew").parse().unwrap()),
+            keys: Arc::new(format!("{ANA_KEY}:ana").parse().unwrap()),
             admins: Arc::new(AdminUsers::default()),
         };
-        let reply = send(&router(state), chat(Some(DREW_KEY), &ask("Is it?"))).await;
+        let reply = send(&router(state), chat(Some(ANA_KEY), &ask("Is it?"))).await;
         assert_eq!(reply.status, StatusCode::INTERNAL_SERVER_ERROR);
         let body = reply.json();
         assert_eq!(body["error"]["code"], "run_not_persisted");
@@ -369,7 +375,7 @@ async fn streaming_sends_one_content_chunk_a_finish_chunk_and_done() {
     let app = app(recording);
     let mut body = ask("Is it?");
     body["stream"] = json!(true);
-    let reply = send(&app.router, chat(Some(DREW_KEY), &body)).await;
+    let reply = send(&app.router, chat(Some(ANA_KEY), &body)).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     assert!(
         reply.headers[header::CONTENT_TYPE]
@@ -391,7 +397,7 @@ async fn streaming_sends_one_content_chunk_a_finish_chunk_and_done() {
     for chunk in [&content, &finish] {
         assert_eq!(chunk["object"], "chat.completion.chunk");
         assert_eq!(chunk["id"], format!("chatcmpl-{id}"));
-        assert_eq!(chunk["model"], "drew-ai");
+        assert_eq!(chunk["model"], "recall");
     }
     assert_eq!(
         content["choices"][0]["delta"],
@@ -400,7 +406,7 @@ async fn streaming_sends_one_content_chunk_a_finish_chunk_and_done() {
     assert_eq!(content["choices"][0]["finish_reason"], Value::Null);
     assert_eq!(finish["choices"][0]["delta"], json!({}));
     assert_eq!(finish["choices"][0]["finish_reason"], "stop");
-    assert_eq!(finish["drew"]["outcome"], "answered");
+    assert_eq!(finish["provenance"]["outcome"], "answered");
     assert!(app.runs.get(id).await.unwrap().is_some());
 }
 
@@ -409,7 +415,7 @@ async fn streaming_a_declined_run_streams_the_decline() {
     let app = app(canned(None, fixtures::declined()));
     let mut body = ask("Is it?");
     body["stream"] = json!(true);
-    let reply = send(&app.router, chat(Some(DREW_KEY), &body)).await;
+    let reply = send(&app.router, chat(Some(ANA_KEY), &body)).await;
     assert_eq!(reply.status, StatusCode::OK);
     let events = sse_events(&reply.body);
     let content: Value = serde_json::from_str(events[0]).unwrap();
@@ -426,7 +432,7 @@ async fn streaming_a_failed_run_returns_a_json_500() {
     let app = app(canned(None, fixtures::failed()));
     let mut body = ask("Is it?");
     body["stream"] = json!(true);
-    let reply = send(&app.router, chat(Some(DREW_KEY), &body)).await;
+    let reply = send(&app.router, chat(Some(ANA_KEY), &body)).await;
     assert_eq!(reply.status, StatusCode::INTERNAL_SERVER_ERROR);
     assert!(reply.json()["error"]["run_id"].is_string());
 }
@@ -435,15 +441,15 @@ async fn streaming_a_failed_run_returns_a_json_500() {
 async fn a_run_is_visible_only_to_its_owner() {
     let recording = Arc::new(Recording::default());
     let app = app(recording);
-    let reply = send(&app.router, chat(Some(DREW_KEY), &ask("Is it?"))).await;
+    let reply = send(&app.router, chat(Some(ANA_KEY), &ask("Is it?"))).await;
     let id = run_id(&reply.json());
     let path = format!("/v1/runs/{id}");
 
-    let reply = send(&app.router, get(&path, DREW_KEY)).await;
+    let reply = send(&app.router, get(&path, ANA_KEY)).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     let run = reply.json();
     assert_eq!(run["id"], id.to_string());
-    assert_eq!(run["user"], "drew");
+    assert_eq!(run["user"], "ana");
     assert_eq!(run["question"], "Is it?");
     assert_eq!(run["category"], "boolean");
     assert_eq!(run["status"], "answered");
@@ -456,8 +462,8 @@ async fn a_run_is_visible_only_to_its_owner() {
 
     for (path, key) in [
         (path.as_str(), JOSE_KEY),
-        (&format!("/v1/runs/{}", RunId::new()), DREW_KEY),
-        ("/v1/runs/not-a-uuid", DREW_KEY),
+        (&format!("/v1/runs/{}", RunId::new()), ANA_KEY),
+        ("/v1/runs/not-a-uuid", ANA_KEY),
     ] {
         let reply = send(&app.router, get(path, key)).await;
         assert_eq!(reply.status, StatusCode::NOT_FOUND, "{path}");
@@ -475,7 +481,7 @@ async fn a_run_is_visible_only_to_its_owner() {
 #[tokio::test]
 async fn unknown_endpoints_return_an_openai_style_404() {
     let app = app(canned(None, fixtures::answered()));
-    let reply = send(&app.router, get("/v1/embeddings", DREW_KEY)).await;
+    let reply = send(&app.router, get("/v1/embeddings", ANA_KEY)).await;
     assert_eq!(reply.status, StatusCode::NOT_FOUND);
     assert_eq!(reply.json()["error"]["code"], "not_found");
 }

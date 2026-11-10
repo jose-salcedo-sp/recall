@@ -1,15 +1,15 @@
-//! The `drew` binary: parses the command line and runs `serve`, `ingest`, `eval` or `models` from the library.
+//! The `recall` binary: parses the command line and runs `serve`, `ingest`, `eval` or `models` from the library.
 
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use drew::{eval, ingest, models, server};
+use recall::{eval, ingest, models, server};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(
-    name = "drew",
-    about = "Drew AI: answers about SAP and ARM internals, with provenance"
+    name = "recall",
+    about = "recall: answers from a corpus, with every claim's provenance checked and recorded"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -20,7 +20,7 @@ struct Cli {
 enum Command {
     /// Serve the OpenAI-compatible API.
     Serve(server::Args),
-    /// Ingest the markdown corpus snapshot from DREW_DOCS_DIR.
+    /// Ingest the markdown corpus snapshot from RECALL_DOCS_DIR.
     Ingest(ingest::Args),
     /// Run the golden set and report per-step metrics.
     Eval(eval::Args),

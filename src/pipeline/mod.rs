@@ -9,7 +9,7 @@
 //! Invalid pipelines do not compile. There is no `Answer<Open>` step, so `Decisive<Open>` is not a pipeline:
 //!
 //! ```compile_fail,E0599
-//! use drew::pipeline::{Open, Pipeline, Run, steps::{Decisive, Reranked}};
+//! use recall::pipeline::{Open, Pipeline, Run, steps::{Decisive, Reranked}};
 //!
 //! async fn decide(pipeline: &Decisive<Open>, run: Run<Open, Reranked>) {
 //!     let _ = pipeline.drive(run).await;
@@ -19,7 +19,7 @@
 //! Only the classification join can change a run's category:
 //!
 //! ```compile_fail,E0624
-//! use drew::pipeline::{Asked, Boolean, Run, Unclassified};
+//! use recall::pipeline::{Asked, Boolean, Run, Unclassified};
 //!
 //! fn skip_classify(run: Run<Unclassified, Asked>) -> Run<Boolean, Asked> {
 //!     run.classified()
@@ -30,19 +30,19 @@
 //! that no step produced. Each of these does not compile:
 //!
 //! ```compile_fail,E0423
-//! use drew::{domain::AtLeastOne, pipeline::steps::Candidates, retrieval::Retrieved};
+//! use recall::{domain::AtLeastOne, pipeline::steps::Candidates, retrieval::Retrieved};
 //!
 //! fn forge(hits: AtLeastOne<Retrieved>) -> Candidates { Candidates(hits) }
 //! ```
 //!
 //! ```compile_fail,E0423
-//! use drew::{pipeline::steps::Reranked, retrieval::Retrieved};
+//! use recall::{pipeline::steps::Reranked, retrieval::Retrieved};
 //!
 //! fn forge(hits: Vec<Retrieved>) -> Reranked { Reranked(hits) }
 //! ```
 //!
 //! ```compile_fail,E0451
-//! use drew::{domain::Probability, pipeline::steps::{Decided, Reranked}};
+//! use recall::{domain::Probability, pipeline::steps::{Decided, Reranked}};
 //!
 //! fn forge(sources: Reranked, confidence: Probability) -> Decided {
 //!     Decided { yes: true, confidence, sources }
@@ -50,7 +50,7 @@
 //! ```
 //!
 //! ```compile_fail,E0451
-//! use drew::pipeline::steps::{Explained, Explanation, Reranked};
+//! use recall::pipeline::steps::{Explained, Explanation, Reranked};
 //!
 //! fn forge(explanation: Explanation, sources: Reranked) -> Explained {
 //!     Explained { explanation, sources }
@@ -58,7 +58,7 @@
 //! ```
 //!
 //! ```compile_fail,E0451
-//! use drew::{domain::Probability, pipeline::steps::{Explained, ExplainedVerdict}};
+//! use recall::{domain::Probability, pipeline::steps::{Explained, ExplainedVerdict}};
 //!
 //! fn forge(explained: Explained, confidence: Probability) -> ExplainedVerdict {
 //!     ExplainedVerdict { explained, yes: true, confidence }
@@ -66,7 +66,7 @@
 //! ```
 //!
 //! ```compile_fail,E0451
-//! use drew::pipeline::steps::{Reranked, Verified, VerifiedAnswer};
+//! use recall::pipeline::steps::{Reranked, Verified, VerifiedAnswer};
 //!
 //! fn forge(answer: VerifiedAnswer, sources: Reranked) -> Verified {
 //!     Verified { answer, sources }
@@ -74,7 +74,7 @@
 //! ```
 //!
 //! ```compile_fail,E0451
-//! use drew::{domain::Probability, pipeline::steps::{Verified, VerifiedVerdict}};
+//! use recall::{domain::Probability, pipeline::steps::{Verified, VerifiedVerdict}};
 //!
 //! fn forge(verified: Verified, confidence: Probability) -> VerifiedVerdict {
 //!     VerifiedVerdict { verified, yes: true, confidence }
@@ -82,7 +82,7 @@
 //! ```
 //!
 //! ```compile_fail,E0451
-//! use drew::{domain::Cited, pipeline::steps::VerifiedAnswer};
+//! use recall::{domain::Cited, pipeline::steps::VerifiedAnswer};
 //!
 //! fn forge(claims: Vec<Cited<String>>) -> VerifiedAnswer { VerifiedAnswer { claims } }
 //! ```
@@ -234,7 +234,7 @@ impl<TOutput, TRecord> Scored<TOutput, TRecord> {
     }
 }
 
-/// Why a run declined: Drew answers "can't answer with certainty" rather than guess.
+/// Why a run declined: recall answers "can't answer with certainty" rather than guess.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
 pub enum DeclineReason {
@@ -333,7 +333,7 @@ pub struct Halted {
 #[serde(tag = "kind", rename_all = "snake_case")]
 /// How a run halted.
 pub enum Halt {
-    /// Drew cannot answer with certainty.
+    /// The run cannot answer with certainty.
     Declined {
         /// Why.
         reason: DeclineReason,
@@ -612,7 +612,7 @@ impl<TStep: Step> Pipeline for TStep {
 /// Composes two pipelines; only a valid pipeline when the first one's output is the second one's input.
 ///
 /// ```compile_fail,E0599
-/// use drew::{domain::Question, pipeline::{trace::VerifyRecord, *}};
+/// use recall::{domain::Question, pipeline::{trace::VerifyRecord, *}};
 ///
 /// struct A;
 /// struct B;

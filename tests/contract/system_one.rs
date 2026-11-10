@@ -3,10 +3,10 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use drew::llm::system_one::{
+use futures::future::BoxFuture;
+use recall::llm::system_one::{
     Decision, DecisionAnswer, DecisionRequest, DecisionResponse, Options, SystemOne,
 };
-use futures::future::BoxFuture;
 use serde_json::Value;
 
 /// An adapter set up to give one reply, and the wire body of every request it sent.
@@ -17,7 +17,7 @@ pub struct Adapter {
 
 fn request() -> DecisionRequest {
     DecisionRequest {
-        state: "Does AGR_USERS store role assignments?".into(),
+        state: "Does ROLE_USERS store role assignments?".into(),
         model: String::new(),
         questions: BTreeMap::from([
             (
@@ -106,7 +106,7 @@ macro_rules! system_one_contract {
 mod scripted {
     use std::sync::Arc;
 
-    use drew::llm::{fakes::ScriptedSystemOne, system_one::DecisionResponse};
+    use recall::llm::{fakes::ScriptedSystemOne, system_one::DecisionResponse};
 
     use super::Adapter;
 
@@ -132,7 +132,7 @@ mod scripted {
 mod http {
     use std::sync::Arc;
 
-    use drew::llm::system_one::{DecisionResponse, HttpSystemOne, SystemOne};
+    use recall::llm::system_one::{DecisionResponse, HttpSystemOne, SystemOne};
     use serde_json::json;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
@@ -228,7 +228,7 @@ mod http {
 mod workers_ai {
     use std::sync::Arc;
 
-    use drew::llm::{
+    use recall::llm::{
         system_one::{DecisionResponse, SystemOne},
         workers_ai::WorkersAiSystemOne,
     };

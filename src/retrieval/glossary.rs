@@ -1,5 +1,6 @@
-//! Question expansion through the corpus's own vocabulary registers (DaaS `canon/GLOSSARY.md` and
-//! `customer/LEXICON.md`): a question that uses one side of a register row also searches with the row's other words.
+//! Question expansion through the corpus's own vocabulary registers (the documents `retrieval.expansion.documents`
+//! names, such as a glossary or a lexicon): a question that uses one side of a register row also searches with the
+//! row's other words.
 //!
 //! The registers are ordinary ingested chunks, parsed on each retrieval, so an edit takes effect at the next ingest
 //! without a separate table. Only the words of pipe-table rows are kept: the map holds terms, never instructions.
@@ -213,7 +214,7 @@ fn acronyms(cell: &str) -> impl Iterator<Item = String> + '_ {
         .map(|acronym| acronym.to_lowercase())
 }
 
-/// Two or more capitals and no more lower-case letters than capitals: `SoD` and `NEW`, not `ErpMaestro`.
+/// Two or more capitals and no more lower-case letters than capitals: `SoD` and `NEW`, not `LegacyMaestro`.
 fn is_acronym(word: &str) -> bool {
     let upper = word.chars().filter(|c| c.is_uppercase()).count();
     upper >= 2 && upper >= word.chars().filter(|c| c.is_lowercase()).count()
@@ -311,7 +312,7 @@ mod tests {
 | **Segregation-of-duties risk** | Two conflicting business functions |
 | **Risk** | A5 `Risk Code` |
 | **EAM** | Emergency Access Management |
-| **ERPM / ErpMaestro** | The pre-SailPoint product name |";
+| **LGCY / LegacyMaestro** | The pre-rename product name |";
 
     fn glossary() -> Glossary {
         Glossary::parse([
@@ -330,7 +331,7 @@ mod tests {
             "Is this a risk?",
             "a new screen",
             "Who reviews EAM requests?",
-            "Check ErpMaestro.WebUI",
+            "Check LegacyMaestro.WebUI",
         ] {
             assert_eq!(
                 glossary.expand(question, 100),
@@ -381,11 +382,11 @@ mod tests {
 
     #[test]
     fn an_alternative_name_selects_its_row() {
-        let expansion = glossary().expand("Where does ERPM survive?", 100);
-        assert_eq!(expansion.matches()[0].matched, "erpm");
+        let expansion = glossary().expand("Where does LGCY survive?", 100);
+        assert_eq!(expansion.matches()[0].matched, "lgcy");
         assert_eq!(
             expansion.terms().collect::<Vec<_>>(),
-            ["erpmaestro", "pre", "sailpoint", "product", "name"]
+            ["legacymaestro", "pre", "rename", "product", "name"]
         );
     }
 

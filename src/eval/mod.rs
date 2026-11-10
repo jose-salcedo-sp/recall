@@ -1,9 +1,9 @@
-//! `drew eval`: golden-set metrics per step, and threshold tuning over persisted runs. See `docs/design.md`
+//! `recall eval`: golden-set metrics per step, and threshold tuning over persisted runs. See `docs/design.md`
 //! section 6.
 //!
-//! `drew eval run` answers every [`golden`] question through an [`Answerer`], scores each run from its trace
-//! ([`metrics`]), and gates against a baseline. `drew eval tune` re-applies candidate thresholds to a results file's
-//! recorded scores without calling any model ([`tune`]). `drew eval retrieval` runs only `Retrieve` and reports
+//! `recall eval run` answers every [`golden`] question through an [`Answerer`], scores each run from its trace
+//! ([`metrics`]), and gates against a baseline. `recall eval tune` re-applies candidate thresholds to a results file's
+//! recorded scores without calling any model ([`tune`]). `recall eval retrieval` runs only `Retrieve` and reports
 //! recall ([`retrieval`]). Eval reads runs; it never writes the database.
 
 pub mod golden;
@@ -40,7 +40,7 @@ use self::{
     tune::Candidate,
 };
 
-/// `drew eval` options.
+/// `recall eval` options.
 #[derive(Debug, clap::Args)]
 pub struct Args {
     /// `run`, `retrieval` or `tune`.
@@ -48,7 +48,7 @@ pub struct Args {
     pub command: Command,
 }
 
-/// The `drew eval` subcommands.
+/// The `recall eval` subcommands.
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
     /// Answer every golden question and report per-step metrics.
@@ -59,7 +59,7 @@ pub enum Command {
     Tune(TuneArgs),
 }
 
-/// `drew eval retrieval` options.
+/// `recall eval retrieval` options.
 #[derive(Debug, clap::Args)]
 pub struct RetrievalCommand {
     /// Inputs, outputs and selection.
@@ -76,7 +76,7 @@ pub struct RetrievalCommand {
     pub embed: EmbedArgs,
 }
 
-/// `drew eval run` options.
+/// `recall eval run` options.
 #[derive(Debug, clap::Args)]
 pub struct RunCommand {
     /// Inputs, outputs and selection.
@@ -90,7 +90,7 @@ pub struct RunCommand {
     pub pipeline: PipelineArgs,
 }
 
-/// What `drew eval run` reads and writes, independent of the pipeline it runs.
+/// What `recall eval run` reads and writes, independent of the pipeline it runs.
 #[derive(Debug, clap::Args)]
 pub struct RunArgs {
     /// Golden set, JSONL.
@@ -111,10 +111,10 @@ pub struct RunArgs {
     pub questions: Vec<String>,
 }
 
-/// `drew eval tune` options.
+/// `recall eval tune` options.
 #[derive(Debug, clap::Args)]
 pub struct TuneArgs {
-    /// Results JSON written by `drew eval run`.
+    /// Results JSON written by `recall eval run`.
     #[arg(long)]
     pub results: PathBuf,
     /// JSON array of candidates: `{"name", "thresholds": {step: min}, "per_category": {category: {step: min}}}`.
@@ -125,7 +125,7 @@ pub struct TuneArgs {
     pub out: Option<PathBuf>,
 }
 
-/// Runs `drew eval`.
+/// Runs `recall eval`.
 ///
 /// # Errors
 ///

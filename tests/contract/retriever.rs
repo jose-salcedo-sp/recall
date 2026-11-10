@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use drew::{
+use recall::{
     domain::{Chunk, ChunkId, ChunkVersion, DocumentId, Labels, Sensitivity, SourceKind},
     retrieval::Retriever,
 };
@@ -25,25 +25,25 @@ fn chunk(name: &str, text: &str) -> Chunk {
         authoritative: true,
         labels: Labels {
             acl: Vec::new(),
-            customer: None,
+            tenant: None,
             sensitivity: Sensitivity::Internal,
         },
     }
 }
 
-fn agr_users() -> Chunk {
+fn role_users() -> Chunk {
     chunk(
-        "agr-users",
-        "AGR_USERS maps users to roles, with validity dates per assignment.",
+        "role-users",
+        "ROLE_USERS maps users to roles, with validity dates per assignment.",
     )
 }
 
 fn corpus() -> Vec<Chunk> {
     vec![
-        agr_users(),
+        role_users(),
         chunk(
-            "usr02",
-            "USR02 stores user logon data; it does not map roles.",
+            "login02",
+            "LOGIN02 stores user logon data; it does not map roles.",
         ),
         chunk("lunch", "Lunch is at noon on Fridays."),
     ]
@@ -96,7 +96,7 @@ pub async fn the_best_match_ranks_first(
 
     let hits = retriever.retrieve(QUESTION).await?;
 
-    assert_eq!(hits[0].chunk.id, agr_users().id);
+    assert_eq!(hits[0].chunk.id, role_users().id);
     Ok(())
 }
 
@@ -120,11 +120,11 @@ pub async fn hits_are_best_first_without_duplicates(
 pub async fn equal_matches_rank_by_chunk_id(
     make: impl AsyncFnOnce(Vec<Chunk>) -> Box<dyn Retriever>,
 ) -> eros::Result<()> {
-    let text = "PFCG maintains roles.";
+    let text = "ROLEADM maintains roles.";
     let (later, earlier) = (chunk("pfcg-b", text), chunk("pfcg-a", text));
     let retriever = make(vec![later.clone(), earlier.clone()]).await;
 
-    let hits = retriever.retrieve("PFCG maintains roles").await?;
+    let hits = retriever.retrieve("ROLEADM maintains roles").await?;
 
     let order: Vec<_> = hits.iter().map(|hit| &hit.chunk.id).collect();
     assert_eq!(order, [&earlier.id, &later.id]);
@@ -172,7 +172,7 @@ macro_rules! retriever_contract {
 }
 
 mod keyword {
-    use drew::{
+    use recall::{
         domain::Chunk,
         retrieval::{Retriever, fakes::KeywordRetriever},
     };
@@ -187,7 +187,8 @@ mod keyword {
 mod hybrid {
     use std::sync::Arc;
 
-    use drew::{
+    use pgvector::Vector;
+    use recall::{
         domain::Chunk,
         llm::{EmbedPurpose, Embedder, fakes::HashEmbedder},
         retrieval::{
@@ -195,7 +196,6 @@ mod hybrid {
             hybrid::{HybridConfig, HybridRetriever},
         },
     };
-    use pgvector::Vector;
     use sqlx::PgPool;
 
     async fn seeded(pool: PgPool, chunks: Vec<Chunk>) -> Box<dyn Retriever> {
@@ -230,7 +230,7 @@ mod hybrid {
         let model = HashEmbedder.model();
         sqlx::query(
             "INSERT INTO chunks (id, version, document_id, ordinal, heading, url, text, authoritative, acl,
-                                 customer, sensitivity, embedding, embedding_model, embedding_model_version)
+                                 tenant, sensitivity, embedding, embedding_model, embedding_model_version)
              VALUES ($1, $2, $3, 0, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         )
         .bind(&chunk.id.0)
@@ -241,7 +241,7 @@ mod hybrid {
         .bind(&chunk.text)
         .bind(chunk.authoritative)
         .bind(&chunk.labels.acl)
-        .bind(&chunk.labels.customer)
+        .bind(&chunk.labels.tenant)
         .bind(chunk.labels.sensitivity.as_str())
         .bind(Vector::from(embedding))
         .bind(&model.id)
@@ -252,6 +252,6 @@ mod hybrid {
     }
 
     retriever_contract!(
-        #[sqlx::test(migrator = "drew::store::MIGRATOR")] (pool: PgPool) => |chunks| seeded(pool, chunks)
+        #[sqlx::test(migrator = "recall::store::MIGRATOR")] (pool: PgPool) => |chunks| seeded(pool, chunks)
     );
 }

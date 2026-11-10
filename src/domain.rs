@@ -66,7 +66,7 @@ impl fmt::Display for RunId {
     }
 }
 
-/// Who asked: the user mapped from an API bearer key, or `slack:{user_id}` for Slack runs.
+/// Who asked: the user mapped from an API bearer key.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct UserId(pub String);
@@ -287,7 +287,7 @@ pub enum Sensitivity {
     Public,
     /// Internal to the company; every markdown chunk is labelled this.
     Internal,
-    /// Restricted to a Drew-owned maintainers group.
+    /// Restricted to the corpus's maintainers.
     Confidential,
 }
 
@@ -323,8 +323,8 @@ impl TryFrom<&str> for Sensitivity {
 pub struct Labels {
     /// Principals inherited from the source ACL (groups, users, or channel membership).
     pub acl: Vec<String>,
-    /// The customer the content concerns, if any; `None` means visible to every customer.
-    pub customer: Option<String>,
+    /// The tenant the content concerns, if any; `None` means visible to every tenant.
+    pub tenant: Option<String>,
     /// Visibility tier.
     pub sensitivity: Sensitivity,
 }
@@ -338,7 +338,7 @@ pub struct Document {
     pub external_id: String,
     /// The first level-1 heading, else the file stem.
     pub title: String,
-    /// Citation link for the whole file: `DREW_DOCS_BASE_URL` joined with the path, else the bare path.
+    /// Citation link for the whole file: `RECALL_DOCS_BASE_URL` joined with the path, else the bare path.
     pub url: String,
     /// File modification time.
     pub updated_at: DateTime<Utc>,
@@ -372,7 +372,7 @@ pub struct ChunkDraft {
     pub url: String,
     /// Section body, trimmed, without its heading line.
     pub text: String,
-    /// Written by Drew.
+    /// In the authoritative layer: a settled answer, not supporting evidence.
     pub authoritative: bool,
 }
 
@@ -395,7 +395,7 @@ pub struct Chunk {
     pub url: String,
     /// Section body; delimit it as data in prompts.
     pub text: String,
-    /// Written by Drew; evidence chunks (`false`) rank below authoritative ones.
+    /// In the authoritative layer; evidence chunks (`false`) rank below authoritative ones.
     pub authoritative: bool,
     /// The document's labels.
     pub labels: Labels,
@@ -591,7 +591,7 @@ mod tests {
             updated_at: Utc::now(),
             labels: Labels {
                 acl: vec![],
-                customer: None,
+                tenant: None,
                 sensitivity: Sensitivity::Internal,
             },
             chunks: vec![],
@@ -600,7 +600,7 @@ mod tests {
             locator: "intro".into(),
             heading: None,
             url: document.url.clone(),
-            text: "AGR_USERS maps users to roles.".into(),
+            text: "ROLE_USERS maps users to roles.".into(),
             authoritative: true,
         };
         let titan = ModelRef::new("amazon.titan-embed-text-v2", "1");

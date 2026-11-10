@@ -1,4 +1,4 @@
-//! `drew models check`: one call to each model backend `drew serve` and `drew eval run` would use, with the same
+//! `recall models check`: one call to each model backend `recall serve` and `recall eval run` would use, with the same
 //! arguments, so a wrong URL, key, model id or AWS profile shows in seconds instead of mid-run.
 //!
 //! Backends are parsed and built by [`crate::llm::backend`], which also says what to print about a backend's
@@ -23,7 +23,7 @@ use crate::{
 const PROBE_MAX_TOKENS: u32 = 2048;
 const QUESTION_ID: &str = "check";
 
-/// `drew models` options.
+/// `recall models` options.
 #[derive(Debug, clap::Args)]
 pub struct Args {
     /// `check`.
@@ -31,7 +31,7 @@ pub struct Args {
     pub command: Command,
 }
 
-/// The `drew models` subcommands.
+/// The `recall models` subcommands.
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
     /// Call the embedder, the Explain LLM and System One once each, and report each one's model, latency and
@@ -97,7 +97,7 @@ impl Probe {
     }
 }
 
-/// What `drew models check` found.
+/// What `recall models check` found.
 #[derive(Debug)]
 pub struct Check {
     /// What each backend says about its ambient settings, such as Bedrock's AWS region, or why a port is not called.
@@ -144,7 +144,7 @@ impl fmt::Display for Check {
     }
 }
 
-/// Runs `drew models`.
+/// Runs `recall models`.
 ///
 /// # Errors
 ///
@@ -239,7 +239,7 @@ async fn probe_embeddings(args: &PipelineArgs) -> Probed {
 #[eros::context("embedding one query")]
 async fn embed_once(embedder: &dyn Embedder) -> eros::Result<()> {
     let vectors = embedder
-        .embed(&["drew models check".to_owned()], EmbedPurpose::Query)
+        .embed(&["recall models check".to_owned()], EmbedPurpose::Query)
         .await?;
     let dimensions: Vec<usize> = vectors.iter().map(Vec::len).collect();
     ensure!(
@@ -315,7 +315,7 @@ async fn probe_system_one(args: &PipelineArgs) -> Probed {
 async fn decide_once(system_one: &dyn SystemOne) -> eros::Result<()> {
     let response = system_one
         .decide(DecisionRequest {
-            state: "This message is a connectivity check from drew models check.".to_owned(),
+            state: "This message is a connectivity check from recall models check.".to_owned(),
             model: String::new(),
             questions: [(
                 QUESTION_ID.to_owned(),

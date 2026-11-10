@@ -1,11 +1,14 @@
-//! Drew AI answers questions about SAP and ARM internals from Drew Steinfatt's pre-audited markdown documentation.
-//! A small System One model answers the "what" (yes or no, a choice, a ranking) with calibrated probabilities; an
-//! LLM answers the "why". Every claim cites its source, and every run, answered, declined or failed, is persisted
-//! with its full trace. The design is in [`docs/design.md`]; read the section for a module before changing it.
+//! recall: a backend-agnostic provenance system. It answers questions from an ingested corpus so that every claim
+//! cites the exact chunk versions it came from, is checked against them before it is shown, and is recorded with the
+//! full trace of how it was produced. A decision model ("System One") answers the "what" (yes or no, a choice, a
+//! ranking) with calibrated probabilities; an LLM answers the "why"; a [`llm::judge::Judge`] admits sources and
+//! checks each claim's support. Every model, store and source sits behind a port, so a domain application supplies
+//! its corpus, its answering rules (`explain.instructions`) and its front end as adapters and config. The design is
+//! in [`docs/design.md`]; read the section for a module before changing it.
 //!
-//! One binary serves four commands: `drew ingest` loads the corpus, `drew serve` runs the OpenAI-compatible HTTP
-//! API and the Slack bot, `drew eval` measures each step against a golden set, and `drew models check` calls each
-//! model backend once.
+//! One binary serves four commands: `recall ingest` loads the corpus, `recall serve` runs the OpenAI-compatible HTTP
+//! API, `recall eval` measures each step against a golden set, and `recall models check` calls each model backend
+//! once.
 //!
 //! # Pipeline
 //!
@@ -39,18 +42,17 @@
 //! | [`retrieval::Retriever`] | [`retrieval::hybrid::HybridRetriever`], full-text and vector search in Postgres |
 //! | [`store::RunStore`] | [`store::runs::PgRunStore`] |
 //! | [`pipeline::report::Answerer`] | [`pipeline::answerer::PipelineAnswerer`] |
-//! | [`slack::api::SlackApi`] | [`slack::api::SlackClient`] |
 //!
 //! # Where to start
 //!
 //! - [`domain`]: the shared types: questions, chunks, provenance, [`domain::Probability`].
-//! - [`config`]: every pipeline tunable, loaded from `config/drew.json`.
+//! - [`config`]: every pipeline tunable, loaded from `config/recall.json`.
 //! - [`ingest`] and [`store`]: chunking, versioning and storing the corpus.
 //! - [`retrieval`], [`llm`] and [`pipeline`]: answering a question.
-//! - [`server`] and [`slack`]: the two front ends.
+//! - [`server`]: the OpenAI-compatible HTTP front end.
 //! - [`eval`]: golden-set metrics and threshold tuning.
 //!
-//! [`docs/design.md`]: https://github.com/jose-salcedo-sp/drew-ai/blob/master/docs/design.md
+//! [`docs/design.md`]: https://github.com/jose-salcedo-sp/recall/blob/main/docs/design.md
 
 pub mod config;
 pub mod domain;
@@ -61,5 +63,4 @@ pub mod models;
 pub mod pipeline;
 pub mod retrieval;
 pub mod server;
-pub mod slack;
 pub mod store;

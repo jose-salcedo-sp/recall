@@ -31,17 +31,17 @@ jobs:
       db:
         image: pgvector/pgvector:pg17
         env:
-          POSTGRES_USER: drew
-          POSTGRES_PASSWORD: drew
-          POSTGRES_DB: drew
+          POSTGRES_USER: recall
+          POSTGRES_PASSWORD: recall
+          POSTGRES_DB: recall
         ports:
           - 5433:5432
         options: >-
-          --health-cmd "pg_isready -U drew"
+          --health-cmd "pg_isready -U recall"
           --health-interval 2s
           --health-retries 15
     env:
-      DATABASE_URL: postgres://drew:drew@localhost:5433/drew
+      DATABASE_URL: postgres://recall:recall@localhost:5433/recall
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -12,7 +12,8 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use chrono::Utc;
-use drew::{
+use http_body_util::BodyExt;
+use recall::{
     domain::{ChunkDraft, Document, Labels, Sensitivity, SourceKind},
     ingest::{Source, fakes::StaticSource, ingest},
     llm::fakes::{HashEmbedder, ScriptedChat},
@@ -21,7 +22,6 @@ use drew::{
     server::{AppState, auth::AdminUsers, router},
     store::runs::PgRunStore,
 };
-use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tower::ServiceExt;
@@ -35,7 +35,7 @@ fn roles_page() -> Document {
         updated_at: Utc::now(),
         labels: Labels {
             acl: vec![],
-            customer: None,
+            tenant: None,
             sensitivity: Sensitivity::Internal,
         },
         chunks: vec![
@@ -43,7 +43,7 @@ fn roles_page() -> Document {
                 locator: "roles".into(),
                 heading: Some("Role assignments".into()),
                 url: "https://wiki.example.test/roles.md#roles".into(),
-                text: "AGR_USERS stores which users are assigned to which roles.".into(),
+                text: "ROLE_USERS stores which users are assigned to which roles.".into(),
                 authoritative: true,
             },
             ChunkDraft {
@@ -58,7 +58,7 @@ fn roles_page() -> Document {
 }
 
 /// Ingest, hybrid retrieval, the pipeline, the HTTP API, and the run store, with only the models faked.
-#[sqlx::test(migrator = "drew::store::MIGRATOR")]
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn an_ingested_page_answers_a_question_over_http(pool: PgPool) -> eros::Result<()> {
     let sources: Vec<Box<dyn Source>> = vec![Box::new(StaticSource {
         kind: SourceKind::Markdown,
@@ -73,7 +73,7 @@ async fn an_ingested_page_answers_a_question_over_http(pool: PgPool) -> eros::Re
     );
     let explain = ScriptedChat::replying([json!({
         "claims": [{
-            "text": "AGR_USERS holds the user-to-role assignments.",
+            "text": "ROLE_USERS holds the user-to-role assignments.",
             "chunk_ids": ["markdown:roles.md#roles"]
         }]
     })
@@ -103,8 +103,8 @@ async fn an_ingested_page_answers_a_question_over_http(pool: PgPool) -> eros::Re
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
                 json!({
-                    "model": "drew-ai",
-                    "messages": [{ "role": "user", "content": "Which table has AGR_USERS role assignments?" }]
+                    "model": "recall",
+                    "messages": [{ "role": "user", "content": "Which table has ROLE_USERS role assignments?" }]
                 })
                 .to_string(),
             ))?,
@@ -112,19 +112,19 @@ async fn an_ingested_page_answers_a_question_over_http(pool: PgPool) -> eros::Re
     .await;
 
     assert_eq!(status, StatusCode::OK, "{completion:#}");
-    assert_eq!(completion["drew"]["outcome"], "answered");
-    assert_eq!(completion["drew"]["category"], "open");
+    assert_eq!(completion["provenance"]["outcome"], "answered");
+    assert_eq!(completion["provenance"]["category"], "open");
     assert_eq!(
-        completion["drew"]["citations"][0]["chunk"]["id"],
+        completion["provenance"]["citations"][0]["chunk"]["id"],
         "markdown:roles.md#roles"
     );
-    assert!(completion["drew"].get("trace").is_none());
+    assert!(completion["provenance"].get("trace").is_none());
     let content = completion["choices"][0]["message"]["content"]
         .as_str()
         .unwrap();
     assert!(content.contains("[1]"), "{content}");
 
-    let id = completion["drew"]["run_id"].as_str().unwrap();
+    let id = completion["provenance"]["run_id"].as_str().unwrap();
     let (status, run) = send(
         Request::get(format!("/v1/runs/{id}"))
             .header(header::AUTHORIZATION, "Bearer sk-jose")

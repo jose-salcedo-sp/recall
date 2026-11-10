@@ -193,7 +193,7 @@ mod tests {
                 confidence: Probability::new(0.92).unwrap(),
             }),
             why: vec![
-                cited("AGR_USERS assigns roles to users.", &[1]),
+                cited("ROLE_USERS assigns roles to users.", &[1]),
                 cited("Assignments are time-bound.", &[2, 1]),
             ],
             citations: vec![citation(1), citation(2)],
@@ -202,7 +202,7 @@ mod tests {
             super::answer(&answer),
             "**Yes** (confidence 0.92)
 
-AGR\\_USERS assigns roles to users. [1] Assignments are time-bound. [2] [1]
+ROLE\\_USERS assigns roles to users. [1] Assignments are time-bound. [2] [1]
 
 **Sources**
 
@@ -217,22 +217,22 @@ AGR\\_USERS assigns roles to users. [1] Assignments are time-bound. [2] [1]
     fn choice() {
         let answer = Answer {
             verdict: Some(Verdict::Choice {
-                selected: from_prompt("PFCG"),
+                selected: from_prompt("ROLEADM"),
                 rejected: vec![Rejected {
-                    option: from_prompt("SU01"),
+                    option: from_prompt("USERADM"),
                     reason: "it edits users, not roles".into(),
                 }],
             }),
-            why: vec![cited("Roles are maintained in PFCG.", &[1])],
+            why: vec![cited("Roles are maintained in ROLEADM.", &[1])],
             citations: vec![citation(1)],
         };
         assert_eq!(
             super::answer(&answer),
-            "**PFCG** (from your question)
+            "**ROLEADM** (from your question)
 
-- Not SU01 (from your question): it edits users, not roles
+- Not USERADM (from your question): it edits users, not roles
 
-Roles are maintained in PFCG. [1]
+Roles are maintained in ROLEADM. [1]
 
 **Sources**
 
@@ -246,19 +246,19 @@ Roles are maintained in PFCG. [1]
         let answer = Answer {
             verdict: Some(Verdict::Ranking {
                 criterion: "risk".into(),
-                items: vec![cited("SAP_ALL", &[2]), cited("S_TCODE", &[1])],
+                items: vec![cited("GRANT_ALL", &[2]), cited("A_OPCODE", &[1])],
             }),
-            why: vec![cited("SAP_ALL grants everything.", &[2])],
+            why: vec![cited("GRANT_ALL grants everything.", &[2])],
             citations: vec![citation(1), citation(2)],
         };
         assert_eq!(
             super::answer(&answer),
             "Ranked by risk:
 
-1. SAP\\_ALL [2]
-2. S\\_TCODE [1]
+1. GRANT\\_ALL [2]
+2. A\\_OPCODE [1]
 
-SAP\\_ALL grants everything. [2]
+GRANT\\_ALL grants everything. [2]
 
 **Sources**
 
@@ -274,14 +274,14 @@ SAP\\_ALL grants everything. [2]
         let answer = Answer {
             verdict: None,
             why: vec![
-                cited("ARM syncs roles nightly.", &[1]),
+                cited("The directory syncs roles nightly.", &[1]),
                 cited("Failures land in the error queue.", &[1]),
             ],
             citations: vec![citation(1)],
         };
         assert_eq!(
             super::answer(&answer),
-            "ARM syncs roles nightly. [1] Failures land in the error queue. [1]
+            "The directory syncs roles nightly. [1] Failures land in the error queue. [1]
 
 **Sources**
 

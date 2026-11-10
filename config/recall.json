@@ -10,7 +10,7 @@
       "b": 0.75
     },
     "expansion": {
-      "documents": ["markdown:canon/GLOSSARY.md", "markdown:customer/LEXICON.md"],
+      "documents": [],
       "max_terms": 16
     }
   },
@@ -26,7 +26,7 @@
     "judge": "none"
   },
   "explain": {
-    "max_tokens": 8192
+    "max_tokens": 2048
   },
   "verify": {
     "support": {

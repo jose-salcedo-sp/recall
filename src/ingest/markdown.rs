@@ -20,21 +20,21 @@ const INTRO: &str = "intro";
 /// Where the markdown corpus is and how its paths split into layers.
 #[derive(Debug, clap::Args)]
 pub struct MarkdownArgs {
-    /// Root directory of Drew-audited markdown files.
-    #[arg(long, env = "DREW_DOCS_DIR")]
+    /// Root directory of the markdown corpus.
+    #[arg(long, env = "RECALL_DOCS_DIR")]
     pub docs: Option<PathBuf>,
     /// Optional base URL for citations (e.g. a GitHub blob URL ending in `/`).
-    #[arg(long, env = "DREW_DOCS_BASE_URL")]
+    #[arg(long, env = "RECALL_DOCS_BASE_URL")]
     pub docs_base_url: Option<String>,
-    /// Comma-separated paths under the docs root holding Drew's settled answers. Empty means the whole root.
-    #[arg(long, env = "DREW_DOCS_AUTHORITATIVE", value_delimiter = ',')]
+    /// Comma-separated paths under the docs root holding settled, authoritative answers. Empty means the whole root.
+    #[arg(long, env = "RECALL_DOCS_AUTHORITATIVE", value_delimiter = ',')]
     pub authoritative: Vec<PathBuf>,
     /// Comma-separated paths under the docs root ingested as supporting evidence, not authoritative.
     /// The longest listed path containing a file decides its layer; files under no listed path are skipped.
-    #[arg(long, env = "DREW_DOCS_EVIDENCE", value_delimiter = ',')]
+    #[arg(long, env = "RECALL_DOCS_EVIDENCE", value_delimiter = ',')]
     pub evidence: Vec<PathBuf>,
     /// Comma-separated paths under the docs root to leave out, even inside an authoritative or evidence path.
-    #[arg(long, env = "DREW_DOCS_SKIP", value_delimiter = ',')]
+    #[arg(long, env = "RECALL_DOCS_SKIP", value_delimiter = ',')]
     pub skip: Vec<PathBuf>,
 }
 
@@ -49,7 +49,7 @@ pub struct Connector {
 }
 
 impl Connector {
-    /// `None` when `DREW_DOCS_DIR` is unset, so the source is not configured.
+    /// `None` when `RECALL_DOCS_DIR` is unset, so the source is not configured.
     ///
     /// # Errors
     ///
@@ -143,7 +143,7 @@ impl Connector {
             updated_at,
             labels: Labels {
                 acl: vec![],
-                customer: None,
+                tenant: None,
                 sensitivity: Sensitivity::Internal,
             },
             chunks,
@@ -451,7 +451,7 @@ mod tests {
 
     impl TempDocs {
         fn new(files: &[&str]) -> Self {
-            let root = std::env::temp_dir().join(format!("drew-docs-{}", uuid::Uuid::now_v7()));
+            let root = std::env::temp_dir().join(format!("recall-docs-{}", uuid::Uuid::now_v7()));
             for file in files {
                 let path = root.join(file);
                 fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -512,33 +512,36 @@ mod tests {
     async fn longest_listed_path_decides_and_unlisted_files_are_skipped() {
         let docs = TempDocs::new(&[
             "AGENTS.md",
-            "canon/HIT-LOGIC.md",
-            "canonical/other.md",
+            "settled/RULES.md",
+            "settled-notes/other.md",
             "knowledge/notes.md",
             "knowledge/settled/ruling.md",
             "runbooks/01-setup.md",
             "runbooks/tools/README.md",
             "runbooks/tools/oracle/README.md",
-            "_ops/EVAL.md",
+            "_internal/NOTES.md",
         ]);
-        let mut args = docs.args(&["canon", "knowledge/settled"], &["knowledge", "runbooks"]);
+        let mut args = docs.args(
+            &["settled", "knowledge/settled"],
+            &["knowledge", "runbooks"],
+        );
         args.skip = vec!["runbooks/tools".into()];
         let connector = Connector::from_args(&args).unwrap().unwrap();
 
         assert_eq!(
             layers(connector).await,
             [
-                ("canon/HIT-LOGIC.md".into(), true),
                 ("knowledge/notes.md".into(), false),
                 ("knowledge/settled/ruling.md".into(), true),
                 ("runbooks/01-setup.md".into(), false),
+                ("settled/RULES.md".into(), true),
             ]
         );
     }
 
     #[tokio::test]
     async fn base_url_joins_with_one_slash() {
-        let docs = TempDocs::new(&["canon/a.md"]);
+        let docs = TempDocs::new(&["settled/a.md"]);
         for base in [
             "https://example.test/blob/master",
             "https://example.test/blob/master/",
@@ -553,18 +556,18 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 documents[0].url,
-                "https://example.test/blob/master/canon/a.md"
+                "https://example.test/blob/master/settled/a.md"
             );
         }
     }
 
     #[test]
     fn rejects_missing_escaping_and_repeated_paths() {
-        let docs = TempDocs::new(&["canon/a.md"]);
+        let docs = TempDocs::new(&["settled/a.md"]);
         for (authoritative, evidence) in [
             (&["missing"][..], &[][..]),
-            (&["../canon"][..], &[][..]),
-            (&["canon"][..], &["canon"][..]),
+            (&["../settled"][..], &[][..]),
+            (&["settled"][..], &["settled"][..]),
         ] {
             assert!(Connector::from_args(&docs.args(authoritative, evidence)).is_err());
         }

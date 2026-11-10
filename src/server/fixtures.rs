@@ -49,7 +49,7 @@ pub fn answered() -> Outcome {
             yes: true,
             confidence: Probability::new(0.9).unwrap(),
         }),
-        why: vec![cited("AGR_USERS assigns roles to users.", &[1])],
+        why: vec![cited("ROLE_USERS assigns roles to users.", &[1])],
         citations: vec![citation(1)],
     })
 }

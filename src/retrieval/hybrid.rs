@@ -1,10 +1,10 @@
 //! `Retriever` over Postgres: full-text and pgvector candidates merged with reciprocal rank fusion.
 //!
 //! Full text has two sides, both generated columns on `chunks`: `fts_prose` (English stemming, for questions written
-//! in prose) and `fts_tokens` (exact lowercased `[a-z0-9_]` tokens, for SAP identifiers such as `S_TCODE`, which the
+//! in prose) and `fts_tokens` (exact lowercased `[a-z0-9_]` tokens, for identifiers such as `A_OPCODE`, which the
 //! English configuration splits and stems). Prose words are OR-ed; identifier-shaped query tokens must match exactly
 //! and dominate the full-text ranking. Within the same identifier-match count, chunks rank by BM25 over `fts_prose`,
-//! with document frequencies and the average chunk length from the corpus statistics that `drew ingest` refreshes
+//! with document frequencies and the average chunk length from the corpus statistics that `recall ingest` refreshes
 //! (`fts_prose_terms`, `fts_prose_corpus`).
 //!
 //! Before searching, the question gains the words of the glossary rows it matches ([`super::glossary`]); both the
@@ -25,7 +25,7 @@ use crate::{
 
 use super::{Relevance, Retrieval, Retrieved, Retriever, glossary::Glossary};
 
-/// Retrieval knobs; `drew eval` tunes them.
+/// Retrieval knobs; `recall eval` tunes them.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HybridConfig {
@@ -376,7 +376,7 @@ impl HybridRetriever {
                  ) n
              )
              SELECT c.id, c.version, c.document_id, d.source, d.title, c.heading, c.url, c.text,
-                    c.authoritative, c.acl, c.customer, c.sensitivity, c.ordinal
+                    c.authoritative, c.acl, c.tenant, c.sensitivity, c.ordinal
              FROM chunks c JOIN documents d ON d.id = c.document_id
              WHERE c.superseded_at IS NULL AND (c.id = ANY($1) OR c.id IN (SELECT id FROM neighbours))",
         )
@@ -561,7 +561,7 @@ impl Expansion {
 
 /// Identifier-shaped query tokens, matched exactly against `chunks.fts_tokens`: tokens over `[A-Za-z0-9_]` (edge
 /// underscores trimmed, as in the migration) that contain a letter and either an underscore or a digit, such as
-/// `S_TCODE`, `AGR_USERS`, or `SU24`. Lowercased, sorted, and deduplicated.
+/// `A_OPCODE`, `ROLE_USERS`, or `OP24`. Lowercased, sorted, and deduplicated.
 pub fn identifier_terms(query: &str) -> Vec<String> {
     let mut terms: Vec<String> = query
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
@@ -590,7 +590,7 @@ struct ChunkRow {
     text: String,
     authoritative: bool,
     acl: Vec<String>,
-    customer: Option<String>,
+    tenant: Option<String>,
     sensitivity: String,
     ordinal: i32,
 }
@@ -615,7 +615,7 @@ impl TryFrom<ChunkRow> for Chunk {
             authoritative: row.authoritative,
             labels: Labels {
                 acl: row.acl,
-                customer: row.customer,
+                tenant: row.tenant,
                 sensitivity,
             },
         })
@@ -652,10 +652,10 @@ mod tests {
     }
 
     #[test]
-    fn identifier_terms_keep_sap_names_whole() {
+    fn identifier_terms_keep_identifiers_whole() {
         assert_eq!(
-            identifier_terms("Does S_TCODE gate _AGR_USERS_ or SU24, not su24? PFCG 2024"),
-            ["agr_users", "s_tcode", "su24"]
+            identifier_terms("Does A_OPCODE gate _ROLE_USERS_ or OP24, not op24? ACLS 2024"),
+            ["a_opcode", "op24", "role_users"]
         );
         assert!(identifier_terms("which table maps users to roles").is_empty());
     }

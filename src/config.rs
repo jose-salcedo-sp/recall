@@ -1,4 +1,4 @@
-//! Every pipeline tunable in one JSON file (`config/drew.json`), so `drew eval` can print and record what it ran with.
+//! Every pipeline tunable in one JSON file (`config/recall.json`), so `recall eval` can print and record what it ran with.
 
 use std::{
     collections::BTreeMap,
@@ -14,8 +14,8 @@ use crate::{
     retrieval::hybrid::HybridConfig,
 };
 
-/// Read when neither `--config` nor `DREW_CONFIG` names a file; relative to the working directory.
-pub const DEFAULT_PATH: &str = "config/drew.json";
+/// Read when neither `--config` nor `RECALL_CONFIG` names a file; relative to the working directory.
+pub const DEFAULT_PATH: &str = "config/recall.json";
 
 /// A step whose score `Run::then` checks against a threshold. `classify` has `classify.min_confidence` instead,
 /// which falls back to `open` rather than declining; `explain` and `verify` are not scored.
@@ -106,13 +106,13 @@ impl FromIterator<(StepName, Probability)> for Thresholds {
 /// Where to load the [`PipelineConfig`] from.
 #[derive(Clone, Debug, Default, clap::Args)]
 pub struct ConfigArgs {
-    /// Pipeline configuration JSON. Unset: `config/drew.json` when it exists, else built-in defaults.
-    #[arg(long = "config", env = "DREW_CONFIG")]
+    /// Pipeline configuration JSON. Unset: `config/recall.json` when it exists, else built-in defaults.
+    #[arg(long = "config", env = "RECALL_CONFIG")]
     pub path: Option<PathBuf>,
 }
 
 impl ConfigArgs {
-    /// Loads and validates the config. An empty `DREW_CONFIG`, as in `.env.example`, counts as unset.
+    /// Loads and validates the config. An empty `RECALL_CONFIG`, as in `.env.example`, counts as unset.
     ///
     /// # Errors
     ///
@@ -151,7 +151,7 @@ pub struct PipelineConfig {
     pub explain: ExplainConfig,
     /// How `Verify` checks each claim against the sources it cites, and what it publishes when one fails.
     pub verify: VerifyConfig,
-    /// The shape of a `drew eval tune` candidate's `thresholds`.
+    /// The shape of a `recall eval tune` candidate's `thresholds`.
     pub thresholds: Thresholds,
     /// Overrides `thresholds` for runs classified into that category.
     pub per_category: PerCategory,
@@ -166,12 +166,57 @@ pub struct ClassifyConfig {
 }
 
 /// [`PipelineConfig::explain`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ExplainConfig {
     /// Upper bound on the tokens Explain's model generates, reasoning included on a reasoning model.
     pub max_tokens: MaxTokens,
+    /// A domain's answering rules, added to Explain's system prompt after the generic ones; `None` for none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<Instructions>,
 }
+
+/// Operator-written answering rules for one domain: trimmed and non-empty. Trusted config, never ingested text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "String", try_from = "String")]
+pub struct Instructions(String);
+
+impl Instructions {
+    /// # Errors
+    ///
+    /// [`BlankInstructions`] when `text` is empty or only whitespace.
+    pub fn new(text: &str) -> Result<Self, BlankInstructions> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(BlankInstructions);
+        }
+        Ok(Self(text.to_owned()))
+    }
+
+    /// The rules, trimmed.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for Instructions {
+    type Error = BlankInstructions;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        Self::new(&text)
+    }
+}
+
+impl From<Instructions> for String {
+    fn from(instructions: Instructions) -> Self {
+        instructions.0
+    }
+}
+
+/// Blank `explain.instructions`; leave the key out instead.
+#[derive(Debug, thiserror::Error)]
+#[error("explain.instructions is blank; leave it out for no domain rules")]
+pub struct BlankInstructions;
 
 /// [`PipelineConfig::admit`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -552,7 +597,7 @@ mod tests {
 
     #[test]
     fn shipped_config_parses() {
-        let config = PipelineConfig::parse(include_str!("../config/drew.json")).unwrap();
+        let config = PipelineConfig::parse(include_str!("../config/recall.json")).unwrap();
         assert!(config.classify.min_confidence.is_some());
         assert!(
             config
@@ -568,7 +613,7 @@ mod tests {
         };
         assert!(empty.load().is_ok());
         let missing = ConfigArgs {
-            path: Some("no/such/drew.json".into()),
+            path: Some("no/such/recall.json".into()),
         };
         assert!(missing.load().is_err());
     }
@@ -612,7 +657,7 @@ mod tests {
 
     #[test]
     fn the_rerank_judge_is_none_or_system_one_with_its_candidates() {
-        let config = PipelineConfig::parse(include_str!("../config/drew.json")).unwrap();
+        let config = PipelineConfig::parse(include_str!("../config/recall.json")).unwrap();
         assert_eq!(config.rerank.judge(), RerankJudge::None);
         assert_eq!(RerankConfig::default().judge(), RerankJudge::None);
         let config = PipelineConfig::parse(
@@ -700,7 +745,7 @@ mod tests {
 
     #[test]
     fn shipped_config_round_trips() {
-        let config = PipelineConfig::parse(include_str!("../config/drew.json")).unwrap();
+        let config = PipelineConfig::parse(include_str!("../config/recall.json")).unwrap();
         let text = serde_json::to_string(&config).unwrap();
         assert_eq!(PipelineConfig::parse(&text).unwrap(), config);
     }
@@ -726,13 +771,13 @@ mod tests {
 
     #[test]
     fn the_hosted_config_differs_from_the_shipped_one_only_in_explain_max_tokens() {
-        let shipped = PipelineConfig::parse(include_str!("../config/drew.json")).unwrap();
+        let shipped = PipelineConfig::parse(include_str!("../config/recall.json")).unwrap();
         let mut hosted =
-            PipelineConfig::parse(include_str!("../config/drew-workers-ai.json")).unwrap();
+            PipelineConfig::parse(include_str!("../config/recall-workers-ai.json")).unwrap();
         hosted.explain.max_tokens = shipped.explain.max_tokens;
         assert_eq!(
             hosted, shipped,
-            "config/drew-workers-ai.json and config/drew.json differ in more than explain.max_tokens; change both \
+            "config/recall-workers-ai.json and config/recall.json differ in more than explain.max_tokens; change both \
              files, or record the deliberate difference in this test"
         );
     }
@@ -740,9 +785,10 @@ mod tests {
     #[test]
     fn explain_max_tokens_defaults_to_2048_and_is_bounded_on_every_load_path() {
         assert_eq!(PipelineConfig::default().explain.max_tokens.get(), 2048);
-        let shipped = PipelineConfig::parse(include_str!("../config/drew.json")).unwrap();
+        let shipped = PipelineConfig::parse(include_str!("../config/recall.json")).unwrap();
         assert_eq!(shipped.explain.max_tokens, MaxTokens::DEFAULT);
-        let hosted = PipelineConfig::parse(include_str!("../config/drew-workers-ai.json")).unwrap();
+        let hosted =
+            PipelineConfig::parse(include_str!("../config/recall-workers-ai.json")).unwrap();
         assert_eq!(hosted.explain.max_tokens.get(), 8192);
         let max = PipelineConfig::parse(r#"{"explain": {"max_tokens": 65536}}"#).unwrap();
         assert_eq!(max.explain.max_tokens.get(), MaxTokens::MAX);
@@ -776,7 +822,7 @@ mod tests {
         assert_eq!(defaults.verify.support, SupportCheck::Membership);
         assert_eq!(defaults.verify.publish, PublishPolicy::Decline);
 
-        let shipped = PipelineConfig::parse(include_str!("../config/drew.json")).unwrap();
+        let shipped = PipelineConfig::parse(include_str!("../config/recall.json")).unwrap();
         assert_eq!(shipped.admit.judge, AdmitJudge::None);
         assert_eq!(
             shipped.verify.support,
@@ -811,6 +857,28 @@ mod tests {
                 serde_json::from_str::<PipelineConfig>(bad).is_err(),
                 "{bad}"
             );
+        }
+    }
+
+    #[test]
+    fn explain_instructions_are_optional_and_never_blank() {
+        assert_eq!(PipelineConfig::default().explain.instructions, None);
+        let config =
+            PipelineConfig::parse(r#"{"explain": {"instructions": "  Answer for operators.  "}}"#)
+                .unwrap();
+        assert_eq!(
+            config
+                .explain
+                .instructions
+                .as_ref()
+                .map(Instructions::as_str),
+            Some("Answer for operators.")
+        );
+        for bad in [
+            r#"{"explain": {"instructions": "  "}}"#,
+            r#"{"explain": {"instructions": 3}}"#,
+        ] {
+            assert!(PipelineConfig::parse(bad).is_err(), "{bad}");
         }
     }
 

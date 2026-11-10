@@ -132,9 +132,9 @@ async fn a_quoted_span_missing_from_every_cited_chunk_is_fabricated_without_a_ju
     let input = explained(
         vec![hit(
             "a",
-            "Assignments live in `AGR_USERS`. relation=supports:0.9",
+            "Assignments live in `ROLE_USERS`. relation=supports:0.9",
         )],
-        &[("Assignments live in `AGR_USERZ`.", &["a"])],
+        &[("Assignments live in `ROLE_USERZ`.", &["a"])],
     )
     .await;
 
@@ -143,7 +143,7 @@ async fn a_quoted_span_missing_from_every_cited_chunk_is_fabricated_without_a_ju
     assert_eq!(
         verdicts(&record),
         [&ClaimVerdict::Fabricated {
-            span: "AGR_USERZ".into()
+            span: "ROLE_USERZ".into()
         }]
     );
     assert!(judge.requests().is_empty());
@@ -156,10 +156,10 @@ async fn quotes_mode_passes_spans_found_in_a_cited_chunk() {
     let input = explained(
         vec![hit(
             "a",
-            "Assignments live in\n`AGR_USERS`, per \"role assignment\".",
+            "Assignments live in\n`ROLE_USERS`, per \"role assignment\".",
         )],
         &[(
-            "They are in `agr_users`, the “Role  assignment” table.",
+            "They are in `role_users`, the “Role  assignment” table.",
             &["a"],
         )],
     )
@@ -290,8 +290,8 @@ async fn an_out_of_range_relation_declines_as_invalid_output() {
 #[test]
 fn quoted_spans_skip_apostrophes_and_unclosed_marks() {
     assert_eq!(
-        quoted_spans("Drew's `AGR_USERS` and \"the extract\" and “What-If” and `open"),
-        ["AGR_USERS", "the extract", "What-If"]
+        quoted_spans("The team's `ROLE_USERS` and \"the extract\" and “Dry-Run” and `open"),
+        ["ROLE_USERS", "the extract", "Dry-Run"]
     );
     assert!(quoted_spans("No quotes, it's plain.").is_empty());
     assert!(quoted_spans("Empty `` and \"  \".").is_empty());

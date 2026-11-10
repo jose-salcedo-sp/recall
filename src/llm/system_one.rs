@@ -287,7 +287,7 @@ mod tests {
 
     fn request() -> DecisionRequest {
         DecisionRequest {
-            state: "Does AGR_USERS store role assignments?".into(),
+            state: "Does ROLE_USERS store role assignments?".into(),
             model: String::new(),
             questions: BTreeMap::from([(
                 "category".into(),
@@ -309,7 +309,7 @@ mod tests {
             .and(path("/v1/systemone"))
             .and(header("authorization", "Bearer secret"))
             .and(body_json(json!({
-                "state": "Does AGR_USERS store role assignments?",
+                "state": "Does ROLE_USERS store role assignments?",
                 "model": "kev-latest",
                 "questions": { "category": {
                     "type": "choice",
