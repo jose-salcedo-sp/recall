@@ -96,6 +96,7 @@ pub fn router(state: AppState) -> Router {
 pub async fn run(args: Args) -> eros::Result<()> {
     let pool = store::connect(&args.db).await?;
     let answerer = PipelineAnswerer::from_args(pool.clone(), &args.pipeline).await?;
+    tracing::info!(plan = ?answerer.plan(), "pipeline assembled");
     let state = AppState {
         answerer: Arc::new(answerer),
         runs: Arc::new(PgRunStore::new(pool.clone())),

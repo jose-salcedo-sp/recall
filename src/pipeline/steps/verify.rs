@@ -3,7 +3,7 @@ use std::{collections::HashMap, marker::PhantomData, sync::Arc};
 use futures::{StreamExt, TryStreamExt, stream};
 
 use crate::{
-    config::{PublishPolicy, SupportCheck, SupportCutoff, VerifyConfig},
+    config::PublishPolicy,
     domain::{AtLeastOne, ChunkId, Cited, Probability, Provenance, Question},
     llm::{
         ModelRef,
@@ -47,44 +47,39 @@ const RELATIONS: [(RelationKind, JudgeOption); 3] = [
 ];
 
 /// Checks every claim before anything is shown. A claim must cite at least one chunk, and only this run's reranked
-/// sources; with [`SupportCheck::Quotes`] or a judge, every span it puts in backticks or double quotes must also
-/// appear in a chunk it cites, and with a judge, a cited chunk must support it. Under [`PublishPolicy::Decline`] any
-/// failed claim declines the run; under [`PublishPolicy::Strip`] failed claims are left out, and the run declines
-/// only when none is left.
+/// sources; with [`Support::Quotes`] or [`Support::Judged`], every span it puts in backticks or double quotes must
+/// also appear in a chunk it cites, and with a judge, a cited chunk must support it. Under [`PublishPolicy::Decline`]
+/// any failed claim declines the run; under [`PublishPolicy::Strip`] failed claims are left out, and the run
+/// declines only when none is left.
 pub struct Verify<TCategory> {
     support: Support,
     publish: PublishPolicy,
     category: PhantomData<TCategory>,
 }
 
-enum Support {
+/// The check each cited claim gets beyond membership: `verify.support` resolved against the judge the pipeline has.
+#[derive(Clone)]
+pub enum Support {
+    /// Citations only.
     Membership,
+    /// Also every quoted span; no model call.
     Quotes,
+    /// Also the quote check, then `judge` reads the cited chunks in order until one supports the claim with at least
+    /// `min_support`.
     Judged {
+        /// Asked one one-of question per cited chunk.
         judge: Arc<dyn Judge>,
+        /// The probability of "supports" a claim needs.
         min_support: Probability,
     },
 }
 
 impl<TCategory> Verify<TCategory> {
-    /// Membership only, declining on any failed claim.
-    pub fn new() -> Self {
-        Self::from_config(&VerifyConfig::default(), None)
-    }
-
-    /// The config's checks and policy. `judge` checks support only when the config's check is
-    /// [`SupportCheck::SystemOne`]; without one that check falls back to [`SupportCheck::Quotes`].
-    pub fn from_config(config: &VerifyConfig, judge: Option<Arc<dyn Judge>>) -> Self {
-        let support = match (config.support, judge) {
-            (SupportCheck::Membership, _) => Support::Membership,
-            (SupportCheck::Quotes, _) | (SupportCheck::SystemOne(_), None) => Support::Quotes,
-            (SupportCheck::SystemOne(SupportCutoff { min_support }), Some(judge)) => {
-                Support::Judged { judge, min_support }
-            }
-        };
+    /// Checks claims with `support`, and publishes by `publish`.
+    pub fn new(support: Support, publish: PublishPolicy) -> Self {
         Self {
             support,
-            publish: config.publish,
+            publish,
             category: PhantomData,
         }
     }
@@ -104,12 +99,6 @@ impl<TCategory> Verify<TCategory> {
             Support::Judged { judge, .. } => Some(judge.model()),
             Support::Membership | Support::Quotes => None,
         }
-    }
-}
-
-impl<TCategory> Default for Verify<TCategory> {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

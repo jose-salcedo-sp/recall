@@ -66,7 +66,7 @@ sequenceDiagram
     P->>L: Explain: question, 5 sources and any verdict, delimited as data
     L-->>P: claims as JSON citing chunk ids, a contradiction declines
     Note over P: Verify: an uncited claim, a citation outside this run's chunks,<br/>or a quoted span no cited chunk contains fails the claim
-    opt verify.support is system_one (shipped on)
+    opt verify.support is system_one (off by default)
         loop each claim, its cited chunks in order
             P->>K: does this text support, contradict, or say nothing about the claim?
             K-->>P: the chosen relation and its probability
@@ -177,13 +177,15 @@ Judging every match costs one System One call per candidate, so it is off unless
 `admit.judge` screens the reranked sources before Explain sees them:
 
 - `"none"` (the default and the shipped setting): no `admit` step; every reranked source reaches Explain.
-- `{"system_one": {}}`: one System One request per source, when System One is configured. A match is asked four yes/no questions and routed by the first cutoff it crosses: `injection_max` (0.7) excludes it, `relevant_min` (0.45) excludes it, `contradicts_min` (0.7) keeps it as a conflict, and `evidence_min` (0.55) keeps it, else it is excluded. Context is only screened for injection and otherwise rides with its match. No kept match declines the run with `no_sources`. The cutoffs are uncalibrated; fit them with `recall eval` before relying on them. The shipped config leaves it off, since it adds a System One request per source; turn it on for a corpus you do not curate yourself.
+- `{"system_one": {}}`: one System One request per source. A match is asked four yes/no questions and routed by the first cutoff it crosses: `injection_max` (0.7) excludes it, `relevant_min` (0.45) excludes it, `contradicts_min` (0.7) keeps it as a conflict, and `evidence_min` (0.55) keeps it, else it is excluded. Context is only screened for injection and otherwise rides with its match. No kept match declines the run with `no_sources`. The cutoffs are uncalibrated; fit them with `recall eval` before relying on them. The shipped config leaves it off, since it adds a System One request per source; turn it on for a corpus you do not curate yourself.
 
 `verify.support` is what a claim must pass besides citing this run's sources:
 
 - `"membership"` (the default): citations only.
-- `"quotes"`: also, every span in backticks or double quotes appears in a cited chunk; no model call.
-- `{"system_one": {"min_support": 0.75}}` (shipped): the quote check, then System One judges each cited chunk in order until one "supports" the claim with at least `min_support`. Without System One it falls back to `quotes`.
+- `"quotes"` (shipped): also, every span in backticks or double quotes appears in a cited chunk; no model call.
+- `{"system_one": {"min_support": 0.75}}`: the quote check, then System One judges each cited chunk in order until one "supports" the claim with at least `min_support`.
+
+A check that names a judge never runs as a quieter one: with `RECALL_SYSTEM_ONE_BACKEND=none`, a config whose `rerank.judge`, `admit.judge` or `verify.support` names `system_one` is a startup error listing each such key, and so is a `rerank` threshold while `rerank.judge` is `"none"` (the step is unscored). Without System One every question is classified `open`. `recall serve` logs the assembled plan (`classify`, `rerank`, `admit`, `support` modes) at startup, `recall eval run` records it as `plan` in the results file, and each run's Classify, Rerank and Verify trace records carry the mode they ran in.
 
 `verify.publish` is `"decline"` (the default and shipped: any failed claim declines the run) or `"strip"` (failed claims are left out and the rest published; the run declines only when none passes). Every verdict is in the Verify trace record, and `recall eval` reports the share of judged claims that are supported as `faithfulness`.
 

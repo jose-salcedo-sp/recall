@@ -233,8 +233,8 @@ pub enum AdmitJudge {
     /// No screening: every reranked source reaches `Explain`, and the run has no `admit` step.
     #[default]
     None,
-    /// System One answers four yes/no questions per match, when System One is configured; without it the run has
-    /// no `admit` step.
+    /// System One answers four yes/no questions per match. Needs a judge: without one the pipeline does not
+    /// assemble.
     SystemOne(AdmissionCutoffs),
 }
 
@@ -286,8 +286,8 @@ pub enum SupportCheck {
     Membership,
     /// Also: every span in backticks or double quotes appears in a cited chunk. No model call.
     Quotes,
-    /// Also the quote check, then System One judges whether a cited chunk supports the claim, when System One is
-    /// configured; without it, `quotes`.
+    /// Also the quote check, then System One judges whether a cited chunk supports the claim. Needs a judge: without
+    /// one the pipeline does not assemble.
     SystemOne(SupportCutoff),
 }
 
@@ -384,10 +384,11 @@ pub struct RerankConfig {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RerankJudge {
-    /// No model: matches keep retrieval order, with the evidence penalty, and the step is unscored.
+    /// No model: matches keep retrieval order, with the evidence penalty, and the step is unscored, so a `rerank`
+    /// threshold does not assemble.
     #[default]
     None,
-    /// System One judges the best matches by fused score, when System One is configured.
+    /// System One judges the best matches by fused score. Needs a judge: without one the pipeline does not assemble.
     SystemOne(SystemOneJudge),
 }
 
@@ -824,10 +825,7 @@ mod tests {
 
         let shipped = PipelineConfig::parse(include_str!("../config/recall.json")).unwrap();
         assert_eq!(shipped.admit.judge, AdmitJudge::None);
-        assert_eq!(
-            shipped.verify.support,
-            SupportCheck::SystemOne(SupportCutoff::default())
-        );
+        assert_eq!(shipped.verify.support, SupportCheck::Quotes);
 
         let config = PipelineConfig::parse(
             r#"{"admit": {"judge": {"system_one": {"evidence_min": 0.3}}}, "verify": {"support": "quotes", "publish": "strip"}}"#,

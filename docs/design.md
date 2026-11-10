@@ -153,7 +153,7 @@ Steps take their input by value and also see the question; they never see the tr
 | `Boolean`, `Choice`, `Ranking` | `Classify` ∥ `Retrieve` → `Rerank` [→ `Admit`] → `Answer` → `Explain` → `Verify` |
 | `Open` | `Classify` ∥ `Retrieve` → `Rerank` [→ `Admit`] → `Explain` → `Verify` |
 
-`Admit` is in a run only when `admit.judge` names a judge and one is configured; it maps `Reranked` to `Reranked`, so the pipeline types after it do not change.
+`Admit` is in a run only when `admit.judge` names a judge; it maps `Reranked` to `Reranked`, so the pipeline types after it do not change. The boolean path exists only when a judge classifies (5.8).
 
 A pipeline is a typed path through the same state machine. A `Step` is a one-transition pipeline, and `Seq` composes two pipelines only when the first one's output state is the second one's input state.
 
@@ -212,8 +212,8 @@ pub type OpenEnded = Seq<Explain<Open>, Verify<Open>>;
 `Classify` and `Retrieve` run concurrently on `Run<Unclassified, Asked>` through `Run::both`, which traces both entries even when one branch halts (retrieval does not depend on the category). Their join produces the one place where runtime data becomes a type:
 
 ```rust
-enum Classified {
-    Boolean(Run<Boolean, Reranked>),
+enum Classified<'a> {
+    Boolean(Run<Boolean, Reranked>, &'a Decisive<Boolean>), // assembled only when a judge classifies
     Choice(Run<Choice, Reranked>),
     Ranking(Run<Ranking, Reranked>),
     Open(Run<Open, Reranked>),
@@ -226,7 +226,7 @@ The join is the one transition that is not a `Pipeline`: it changes `TCategory` 
 
 ```rust
 let answered = match classified {
-    Classified::Boolean(run) => Answered::Boolean(self.boolean.drive(run).await?), // Decisive<Boolean>
+    Classified::Boolean(run, boolean) => Answered::Boolean(boolean.drive(run).await?), // Decisive<Boolean>
     Classified::Choice(run) => Answered::Choice(self.choice.drive(run).await?),    // Decisive<Choice>
     Classified::Ranking(run) => Answered::Ranking(self.ranking.drive(run).await?), // Decisive<Ranking>
     Classified::Open(run) => Answered::Open(self.open.drive(run).await?),          // OpenEnded
@@ -258,7 +258,7 @@ Rules:
 `Admit` and `Verify` ask through `llm::judge::Judge`, a vendor-neutral port (yes/no and one-of questions over a text, answered with probabilities); `SystemOneJudge` adapts any System One backend, so neither step builds a wire request.
 
 - **Admission** (`Admit`, `admit.judge`): each reranked match is asked whether it tries to change the assistant's instructions, addresses the question, contradicts its premise, and states usable evidence. It is routed by the first cutoff it crosses: injection and irrelevant matches are excluded, a contradicting match is kept as a conflict, and the rest are kept only with evidence. Context is screened for injection only and otherwise follows its match. No kept match declines with `NoSources`. The record lists every source's probabilities and route.
-- **Support** (`Verify`, `verify.support`): `membership` checks citations only; `quotes` also requires every span in backticks or double quotes to appear in a cited chunk (`Explain`'s prompt says such spans are verbatim); `system_one` adds a one-of question per cited chunk (supports, contradicts, says nothing), in citation order, until one supports the claim with at least `min_support`. The chosen option's own probability is compared, not an entropy confidence. Without a judge, `system_one` falls back to `quotes`, and the record says which check ran.
+- **Support** (`Verify`, `verify.support`): `membership` checks citations only; `quotes` also requires every span in backticks or double quotes to appear in a cited chunk (`Explain`'s prompt says such spans are verbatim); `system_one` adds a one-of question per cited chunk (supports, contradicts, says nothing), in citation order, until one supports the claim with at least `min_support`. The chosen option's own probability is compared, not an entropy confidence. Without a judge, `system_one` does not assemble (5.8); the record says which check ran.
 - **Publishing** (`verify.publish`): `decline` declines on any failed claim; `strip` leaves failed claims out and declines only when none is left, so what is shown is still verified.
 - **Audit**: the Admit and Verify records, with every probability and verdict, are part of the trace in `pipeline_runs`; `recall eval` reports `faithfulness`, the share of judged claims that are supported.
 
@@ -273,6 +273,16 @@ Each step contributes one entry:
 
 The trace is a flat list ordered by start time, serialized through the `TraceRecord` enum into a JSONB column in `pipeline_runs`. Answered, declined, and failed runs are all persisted. Chunk text is referenced by id and version, never copied.
 
+### 5.8 Assembly
+
+`pipeline::assembly` resolves the config against the model backends available (`Ports`: retriever, Explain LLM, optional judge) once, before any question, and builds every step. It is the only place that decides what an absent judge means:
+
+- A check the config names runs as named, or assembly fails with `Unassembled`: `rerank.judge`, `admit.judge` or `verify.support` naming a judge with none configured lists every such key in one error, and a `rerank` threshold while `rerank.judge` is `none` (the step is unscored) is an error too. No step falls back to a quieter check.
+- Without a judge, `Classify` records every question as `open` and there is no boolean path: no config key asks for classification, so this follows from the backends rather than downgrading a check.
+- Steps receive resolved modes (`RerankBy`, `Support`, `Option<Admit>`), never an optional client to test at run time.
+
+What was assembled is a `Plan` (the classify, rerank, admit and support modes), logged by `recall serve` at startup and recorded by `recall eval run`. Each run's Classify, Rerank and Verify trace records also carry the mode they ran in, and a run has an `admit` entry only when admission is on.
+
 ## 6. Evaluation
 
 - **Golden set**: JSON lines of questions with their category, expected answer and relevant chunk ids, held out of the corpus. A domain supplies its own; `eval/golden/example.jsonl` is a synthetic example of the format.
@@ -280,7 +290,7 @@ The trace is a flat list ordered by start time, serialized through the `TraceRec
 - **`recall eval retrieval`** runs only `Retrieve` (embedder and database) and reports recall@10 and recall@50 per question and category, with each question gained, lost or unchanged against a baseline results file. Retrieval changes are gated here first: a lost question exits non-zero.
 - **Baseline gate**: `--baseline` fails a run when any metric regresses past its tolerance, overall or per category.
 - **Threshold tuning**: re-applies candidate thresholds to persisted runs from their recorded scores, without calling any model. A candidate's `thresholds` and `per_category` have the same shape as those in `config/recall.json`, so a tuned candidate is pasted in as is.
-- **Configuration**: every tunable (retrieval candidates, BM25 `k1`/`b` and glossary expansion, `classify.min_confidence`, rerank `top_k`, `judge` (with its `candidates`) and `evidence_rank_penalty`, the `admit` judge and cutoffs, `explain.max_tokens` and `explain.instructions`, `verify.support` and `verify.publish`, step thresholds) is in one JSON file, `config/recall.json` or `RECALL_CONFIG`. Unknown keys are rejected. `recall eval run` prints it with the models in use and records both, with the git revision, in the results file; `models.rerank`, `models.admit` and `models.verify` name the judging models, `null` when none judged.
+- **Configuration**: every tunable (retrieval candidates, BM25 `k1`/`b` and glossary expansion, `classify.min_confidence`, rerank `top_k`, `judge` (with its `candidates`) and `evidence_rank_penalty`, the `admit` judge and cutoffs, `explain.max_tokens` and `explain.instructions`, `verify.support` and `verify.publish`, step thresholds) is in one JSON file, `config/recall.json` or `RECALL_CONFIG`. Unknown keys are rejected. `recall eval run` prints it with the models in use and the assembled plan, and records all three, with the git revision, in the results file; `models.rerank`, `models.admit` and `models.verify` name the judging models, `null` when none judged.
 
 ## 7. Steps and their defaults
 

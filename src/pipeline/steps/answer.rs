@@ -17,14 +17,14 @@ const QUESTION_ID: &str = "answer";
 
 /// System One answers the question over the reranked sources: the "what". `Explain` then writes the "why".
 pub struct Answer<TCategory> {
-    system_one: Option<Arc<dyn SystemOne>>,
+    system_one: Arc<dyn SystemOne>,
     threshold: Option<Probability>,
     category: PhantomData<TCategory>,
 }
 
 impl<TCategory> Answer<TCategory> {
-    /// Without a System One the step fails every run. `threshold` applies to the verdict's confidence.
-    pub fn new(system_one: Option<Arc<dyn SystemOne>>, threshold: Option<Probability>) -> Self {
+    /// `threshold` applies to the verdict's confidence.
+    pub fn new(system_one: Arc<dyn SystemOne>, threshold: Option<Probability>) -> Self {
         Self {
             system_one,
             threshold,
@@ -100,14 +100,12 @@ impl Step for Answer<Boolean> {
         question: &Question,
         sources: Reranked,
     ) -> Result<Scored<Decided, AnswerRecord>, StepError> {
-        let Some(system_one) = &self.system_one else {
-            return Err(eros::error!("the answer step needs a System One server").into());
-        };
         if sources.0.is_empty() {
             return Err(StepError::decline(DeclineReason::NoSources));
         }
-        let model = system_one.model();
-        let response = system_one
+        let model = self.system_one.model();
+        let response = self
+            .system_one
             .decide(request(question, &sources))
             .await
             .map_err(|error| {
@@ -180,18 +178,17 @@ mod tests {
 
     async fn run(p: f32) -> Result<Scored<Decided, AnswerRecord>, StepError> {
         let system_one = Arc::new(ScriptedSystemOne::new([Ok(noul(p))]));
-        Answer::<Boolean>::new(Some(system_one), None)
+        Answer::<Boolean>::new(system_one, None)
             .run(&Question::new("Can a control map to a role?"), sources())
             .await
     }
 
     async fn answer(p: f32) -> (Scored<Decided, AnswerRecord>, Arc<ScriptedSystemOne>) {
         let system_one = Arc::new(ScriptedSystemOne::new([Ok(noul(p))]));
-        let scored =
-            Answer::<Boolean>::new(Some(Arc::<ScriptedSystemOne>::clone(&system_one)), None)
-                .run(&Question::new("Can a control map to a role?"), sources())
-                .await
-                .unwrap();
+        let scored = Answer::<Boolean>::new(Arc::<ScriptedSystemOne>::clone(&system_one), None)
+            .run(&Question::new("Can a control map to a role?"), sources())
+            .await
+            .unwrap();
         (scored, system_one)
     }
 

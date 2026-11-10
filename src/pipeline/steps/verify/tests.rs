@@ -2,7 +2,7 @@ use serde_json::json;
 
 use super::*;
 use crate::{
-    config::MaxTokens,
+    config::{MaxTokens, SupportCheck, SupportCutoff, VerifyConfig},
     llm::{
         fakes::ScriptedChat,
         judge::{FnJudge, RawJudgement},
@@ -76,7 +76,15 @@ fn judged() -> SupportCheck {
 }
 
 fn verify(config: VerifyConfig, judge: &Arc<FnJudge>) -> Verify<Open> {
-    Verify::from_config(&config, Some(Arc::clone(judge) as Arc<dyn Judge>))
+    let support = match config.support {
+        SupportCheck::Membership => Support::Membership,
+        SupportCheck::Quotes => Support::Quotes,
+        SupportCheck::SystemOne(SupportCutoff { min_support }) => Support::Judged {
+            judge: Arc::clone(judge) as Arc<dyn Judge>,
+            min_support,
+        },
+    };
+    Verify::new(support, config.publish)
 }
 
 fn record(error: StepError) -> VerifyRecord {
@@ -151,8 +159,7 @@ async fn a_quoted_span_missing_from_every_cited_chunk_is_fabricated_without_a_ju
 
 #[tokio::test]
 async fn quotes_mode_passes_spans_found_in_a_cited_chunk() {
-    let step =
-        Verify::<Open>::from_config(&config(SupportCheck::Quotes, PublishPolicy::Decline), None);
+    let step = Verify::<Open>::new(Support::Quotes, PublishPolicy::Decline);
     let input = explained(
         vec![hit(
             "a",
@@ -169,13 +176,6 @@ async fn quotes_mode_passes_spans_found_in_a_cited_chunk() {
 
     assert_eq!(scored.record.support, SupportMode::Quotes);
     assert_eq!(verdicts(&scored.record), [&ClaimVerdict::QuotesFound]);
-}
-
-#[tokio::test]
-async fn a_judge_check_without_a_judge_falls_back_to_quotes() {
-    let step = Verify::<Open>::from_config(&config(judged(), PublishPolicy::Decline), None);
-    assert_eq!(step.support(), SupportMode::Quotes);
-    assert_eq!(step.judged_by(), None);
 }
 
 #[tokio::test]

@@ -6,8 +6,12 @@ use crate::{
     llm::fakes::ScriptedChat,
     pipeline::{
         DeclineReason,
+        assembly::{AdmitMode, JudgedCheck},
         steps::{PROMPT_VERSION, fixtures::chunk},
-        trace::{ClaimCheck, ClaimVerdict, StepOutcome, SupportMode, TraceRecord},
+        trace::{
+            ClaimCheck, ClaimVerdict, ClassifyMode, RerankMode, StepOutcome, SupportMode,
+            TraceRecord,
+        },
     },
     retrieval::fakes::KeywordRetriever,
 };
@@ -316,6 +320,7 @@ async fn explain_sends_the_configured_max_tokens() {
 
         answerer(corpus(), &chat)
             .with_config(PipelineConfig::parse(config).unwrap())
+            .unwrap()
             .answer(Question::new(QUESTION))
             .await;
 
@@ -402,6 +407,7 @@ async fn ask_kev(kev: FakeKev, chat: &Arc<ScriptedChat>, config: &str) -> RunRep
     answerer(corpus(), chat)
         .with_system_one(Arc::new(kev))
         .with_config(PipelineConfig::parse(config).unwrap())
+        .unwrap()
         .answer(Question::new(YES_NO))
         .await
 }
@@ -590,7 +596,8 @@ async fn the_reranker_asks_system_one_about_each_match() {
         let system_one = Arc::new(Counting::default());
         let answerer = answerer(corpus(), &chat)
             .with_system_one(Arc::<Counting>::clone(&system_one))
-            .with_config(PipelineConfig::parse(config).unwrap());
+            .with_config(PipelineConfig::parse(config).unwrap())
+            .unwrap();
         let models = answerer.models();
         let report = answerer.answer(Question::new(QUESTION)).await;
 
@@ -677,7 +684,8 @@ async fn admission_and_the_support_check_run_on_system_one_when_configured() {
     ]))]));
     let answerer = answerer(corpus(), &chat)
         .with_system_one(Arc::new(ProvenanceKev))
-        .with_config(PipelineConfig::parse(PROVENANCE).unwrap());
+        .with_config(PipelineConfig::parse(PROVENANCE).unwrap())
+        .unwrap();
     let models = answerer.models();
 
     let report = answerer.answer(Question::new(QUESTION)).await;
@@ -715,24 +723,64 @@ async fn admission_and_the_support_check_run_on_system_one_when_configured() {
     assert_eq!(models.verify, judge);
 }
 
+#[test]
+fn without_a_judge_judged_checks_fail_assembly_instead_of_running_quieter_ones() {
+    let chat = Arc::new(ScriptedChat::replying(Vec::<String>::new()));
+
+    let error = answerer(corpus(), &chat)
+        .with_config(PipelineConfig::parse(PROVENANCE).unwrap())
+        .err()
+        .unwrap();
+
+    assert_eq!(error.checks(), [JudgedCheck::Admit, JudgedCheck::Support]);
+}
+
 #[tokio::test]
-async fn without_system_one_admission_is_skipped_and_support_falls_back_to_quotes() {
-    let agr = role_users();
+async fn the_plan_and_each_step_s_record_say_what_ran() {
     let chat = Arc::new(ScriptedChat::replying([reply(&json!([
-        { "text": "`ROLE_USERS` maps users to roles.", "chunk_ids": [agr.id] },
+        { "text": "`ROLE_USERS` maps users to roles.", "chunk_ids": [role_users().id] },
     ]))]));
-    let answerer =
-        answerer(corpus(), &chat).with_config(PipelineConfig::parse(PROVENANCE).unwrap());
-    let models = answerer.models();
+    let answerer = answerer(corpus(), &chat)
+        .with_config(PipelineConfig::parse(r#"{"verify": {"support": "quotes"}}"#).unwrap())
+        .unwrap();
+    assert_eq!(
+        answerer.plan(),
+        Plan {
+            classify: ClassifyMode::AllOpen,
+            rerank: RerankMode::RetrievalOrder,
+            admit: AdmitMode::Off,
+            support: SupportMode::Quotes,
+        }
+    );
 
     let report = answerer.answer(Question::new(QUESTION)).await;
 
     assert!(matches!(report.outcome, Outcome::Answered(_)));
+    assert!(matches!(
+        record(&report, "classify"),
+        TraceRecord::Classify(r) if r.mode == ClassifyMode::AllOpen
+    ));
+    assert!(matches!(
+        record(&report, "rerank"),
+        TraceRecord::Rerank(r) if r.mode == RerankMode::RetrievalOrder
+    ));
     assert!(!steps(&report).iter().any(|(step, _)| *step == "admit"));
-    let TraceRecord::Verify(verify) = record(&report, "verify") else {
-        panic!("expected the verify record");
-    };
-    assert_eq!(verify.support, SupportMode::Quotes);
-    assert_eq!(models.admit, None);
-    assert_eq!(models.verify, None);
+    assert!(matches!(
+        record(&report, "verify"),
+        TraceRecord::Verify(r) if r.support == SupportMode::Quotes
+    ));
+
+    let judged = answerer
+        .with_system_one(Arc::new(ProvenanceKev))
+        .with_config(PipelineConfig::parse(PROVENANCE).unwrap())
+        .unwrap();
+    assert_eq!(
+        judged.plan(),
+        Plan {
+            classify: ClassifyMode::Judged,
+            rerank: RerankMode::RetrievalOrder,
+            admit: AdmitMode::Judged,
+            support: SupportMode::Judged,
+        }
+    );
 }

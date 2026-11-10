@@ -113,10 +113,36 @@ pub struct RankedChunk {
     pub context_for: Option<ChunkId>,
 }
 
+/// How `Classify` chose the category, as the pipeline was assembled.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClassifyMode {
+    /// A judge chose the category.
+    #[default]
+    Judged,
+    /// No judge is configured, so every question is `open`, unscored.
+    AllOpen,
+}
+
+/// How `Rerank` ordered the matches, as the pipeline was assembled.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RerankMode {
+    /// Retrieval rank and the evidence penalty only; unscored.
+    #[default]
+    RetrievalOrder,
+    /// A judge's probability per match, fused with retrieval rank; scored.
+    Judged,
+}
+
 /// What `Classify` asked for and got.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ClassifyRecord {
-    /// System One's answer as JSON; `None` when no System One is configured or it gave no answer.
+    /// How the category was chosen. Records written before it existed read as `judged`; their `raw` is `None` when
+    /// every question was `open`.
+    #[serde(default)]
+    pub mode: ClassifyMode,
+    /// System One's answer as JSON; `None` under `all_open` or when it gave no answer.
     pub raw: Option<String>,
     /// The category the run continued with; `None` when the answer was invalid.
     pub category: Option<CategoryKind>,
@@ -139,7 +165,11 @@ pub struct RetrieveRecord {
 /// Hit@5 is computed from `chunks`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RerankRecord {
-    /// System One's probability of yes per judged chunk id, as a JSON object; `None` without System One.
+    /// How the matches were ordered. Records written before it existed read as `retrieval_order`; their `raw` is set
+    /// when a judge ordered them.
+    #[serde(default)]
+    pub mode: RerankMode,
+    /// System One's probability of yes per judged chunk id, as a JSON object; `None` under `retrieval_order`.
     pub raw: Option<String>,
     /// The kept matches best first, then the context chunks attached to them.
     pub chunks: Vec<RankedChunk>,
@@ -252,7 +282,8 @@ fn is_zero(n: &usize) -> bool {
     *n == 0
 }
 
-/// The check `Verify` ran on each cited claim, after resolving the config against the models available.
+/// The check `Verify` ran on each cited claim: `verify.support` as configured, since a pipeline whose check needs a
+/// judge does not assemble without one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SupportMode {

@@ -88,6 +88,7 @@
 //! ```
 
 pub mod answerer;
+pub mod assembly;
 pub mod report;
 pub mod steps;
 pub mod trace;

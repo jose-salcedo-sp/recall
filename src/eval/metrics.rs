@@ -15,6 +15,7 @@ use crate::{
     domain::{CategoryKind, ChunkId, ChunkRef, Provenance},
     pipeline::{
         answerer::Models,
+        assembly::Plan,
         report::{Answer, Answerer, Outcome, RunReport, Verdict},
         trace::{
             ClassifyRecord, RerankRecord, RetrieveRecord, SupportMode, TraceRecord, VerifyRecord,
@@ -66,6 +67,9 @@ pub struct RunSetup {
     pub config: PipelineConfig,
     /// The models it called.
     pub models: Models,
+    /// What each step did, as assembled; `None` in files written before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<Plan>,
 }
 
 /// Files written before `rerank.judge` existed record a flat `rerank.candidates`, which System One judged.

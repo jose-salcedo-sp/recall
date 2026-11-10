@@ -4,7 +4,8 @@ use crate::{
     domain::{CategoryKind, Probability, Question},
     llm::system_one::{Decision, DecisionRequest, DecisionResponse, Options, SystemOne},
     pipeline::{
-        Asked, DeclineReason, Scored, Step, StepError, Unclassified, trace::ClassifyRecord,
+        Asked, DeclineReason, Scored, Step, StepError, Unclassified,
+        trace::{ClassifyMode, ClassifyRecord},
     },
 };
 
@@ -29,29 +30,47 @@ const OPTIONS: [(CategoryKind, &str); 4] = [
     ),
 ];
 
-/// Asks System One which category the question is. Without a System One every question is `open`.
+/// Asks System One which category the question is, or, when the pipeline has no judge, records every question as
+/// `open`.
 ///
 /// A decisive category chosen with a probability below `min_confidence` falls back to `open`: an explanation
 /// cannot be wrong the way a forced yes or no can. The step's score stays System One's probability.
 pub struct Classify {
-    system_one: Option<Arc<dyn SystemOne>>,
-    min_confidence: Option<Probability>,
+    mode: Classifier,
+}
+
+enum Classifier {
+    AllOpen,
+    Judged {
+        system_one: Arc<dyn SystemOne>,
+        min_confidence: Option<Probability>,
+    },
 }
 
 impl Classify {
-    /// `None` classifies every question as `open`, unscored.
-    pub fn new(system_one: Option<Arc<dyn SystemOne>>) -> Self {
+    /// Every question is `open`, unscored.
+    pub fn all_open() -> Self {
         Self {
-            system_one,
-            min_confidence: None,
+            mode: Classifier::AllOpen,
         }
     }
 
-    /// Sets the probability below which a decisive category falls back to `open`; `None` never falls back.
-    pub fn with_min_confidence(self, min_confidence: Option<Probability>) -> Self {
+    /// `system_one` chooses the category. Below `min_confidence` a decisive category falls back to `open`; `None`
+    /// never falls back.
+    pub fn judged(system_one: Arc<dyn SystemOne>, min_confidence: Option<Probability>) -> Self {
         Self {
-            min_confidence,
-            ..self
+            mode: Classifier::Judged {
+                system_one,
+                min_confidence,
+            },
+        }
+    }
+
+    /// How the step chooses the category.
+    pub fn mode(&self) -> ClassifyMode {
+        match self.mode {
+            Classifier::AllOpen => ClassifyMode::AllOpen,
+            Classifier::Judged { .. } => ClassifyMode::Judged,
         }
     }
 
@@ -101,14 +120,21 @@ impl Step for Classify {
         question: &Question,
         _input: Asked,
     ) -> Result<Scored<CategoryKind, ClassifyRecord>, StepError> {
-        let Some(system_one) = &self.system_one else {
-            let category = CategoryKind::Open;
-            let record = ClassifyRecord {
-                raw: None,
-                category: Some(category),
-                fallback_from: None,
-            };
-            return Ok(Scored::new(category, record));
+        let (system_one, min_confidence) = match &self.mode {
+            Classifier::AllOpen => {
+                let category = CategoryKind::Open;
+                let record = ClassifyRecord {
+                    mode: ClassifyMode::AllOpen,
+                    raw: None,
+                    category: Some(category),
+                    fallback_from: None,
+                };
+                return Ok(Scored::new(category, record));
+            }
+            Classifier::Judged {
+                system_one,
+                min_confidence,
+            } => (system_one, *min_confidence),
         };
 
         let model = system_one.model();
@@ -123,19 +149,21 @@ impl Step for Classify {
         let (chosen, score) = parse(&response).map_err(|reason| {
             StepError::decline(reason)
                 .with_record(ClassifyRecord {
+                    mode: ClassifyMode::Judged,
                     raw: raw.clone(),
                     category: None,
                     fallback_from: None,
                 })
                 .with_model(model.clone(), CLASSIFY_PROMPT_VERSION)
         })?;
-        let unsure = self.min_confidence.is_some_and(|min| score < min);
+        let unsure = min_confidence.is_some_and(|min| score < min);
         let (category, fallback_from) = if unsure && chosen != CategoryKind::Open {
             (CategoryKind::Open, Some(chosen))
         } else {
             (chosen, None)
         };
         let record = ClassifyRecord {
+            mode: ClassifyMode::Judged,
             raw,
             category: Some(category),
             fallback_from,
@@ -172,7 +200,7 @@ mod tests {
     async fn classify(
         system_one: &Arc<ScriptedSystemOne>,
     ) -> Result<Scored<CategoryKind, ClassifyRecord>, StepError> {
-        Classify::new(Some(Arc::<ScriptedSystemOne>::clone(system_one)))
+        Classify::judged(Arc::<ScriptedSystemOne>::clone(system_one), None)
             .run(
                 &Question::new("Does ROLE_USERS hold role assignments?"),
                 Asked,
@@ -188,6 +216,7 @@ mod tests {
 
         assert_eq!(scored.output, CategoryKind::Boolean);
         assert_eq!(scored.score, Some(p(0.87)));
+        assert_eq!(scored.record.mode, ClassifyMode::Judged);
         assert_eq!(scored.prompt_version, Some(CLASSIFY_PROMPT_VERSION));
         let request = &system_one.requests()[0];
         assert_eq!(request.state, "Does ROLE_USERS hold role assignments?");
@@ -203,8 +232,7 @@ mod tests {
         let unsure = |category: &str, probability: f32| {
             let system_one = Arc::new(ScriptedSystemOne::new([Ok(choice(category, probability))]));
             async move {
-                Classify::new(Some(system_one))
-                    .with_min_confidence(Some(p(0.6)))
+                Classify::judged(system_one, Some(p(0.6)))
                     .run(&Question::new("q"), Asked)
                     .await
                     .unwrap()
@@ -258,12 +286,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn without_system_one_every_question_is_open_and_unscored() {
-        let scored = Classify::new(None)
-            .run(&Question::new("anything"), Asked)
-            .await
-            .unwrap();
+    async fn all_open_records_every_question_as_open_and_unscored() {
+        let step = Classify::all_open();
+        assert_eq!(step.mode(), ClassifyMode::AllOpen);
+        let scored = step.run(&Question::new("anything"), Asked).await.unwrap();
         assert_eq!(scored.output, CategoryKind::Open);
         assert_eq!(scored.score, None);
+        assert_eq!(scored.record.mode, ClassifyMode::AllOpen);
     }
 }
