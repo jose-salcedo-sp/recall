@@ -38,7 +38,7 @@ async fn explained(sources: Vec<Retrieved>, claims: &[(&str, &[&str])]) -> Expla
         Arc::new(ScriptedChat::replying([reply.to_string()])),
         MaxTokens::DEFAULT,
     )
-    .run(&Question::new("q"), Reranked(sources))
+    .run(&Ask::unrestricted("q"), Reranked(sources))
     .await
     .unwrap()
     .output

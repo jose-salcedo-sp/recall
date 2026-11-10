@@ -11,15 +11,49 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use crate::{
-    domain::{CategoryKind, Question, RunId, UserId},
+    access::{
+        AccessDecision, Authorizer, Decision, DenyReason, Principal,
+        fakes::FailingAuthorizer,
+        rules::{AccessConfig, RulePolicy},
+    },
+    clock::{Clock, fakes::FixedClock},
+    domain::{CategoryKind, ChunkId, ChunkRef, ChunkVersion, Question, RunId, UserId},
     pipeline::report::{Answerer, CannedAnswerer, Outcome, RunReport},
-    store::{RunStore, StoredRun, fakes::MemoryRunStore},
+    store::{
+        RunStore,
+        fakes::{FailingRunStore, MemoryRunStore},
+    },
 };
 
-use super::{AppState, auth::AdminUsers, fixtures, render, router};
+use super::{AppState, fixtures, render, router};
 
 const ANA_KEY: &str = "sk-ana";
 const JOSE_KEY: &str = "sk-jose";
+const AUDITOR_KEY: &str = "sk-audit";
+
+fn policy() -> Arc<dyn Authorizer> {
+    Arc::new(RulePolicy::new(
+        AccessConfig::parse(
+            r#"{
+                "roles": {
+                    "reader": { "clearance": "internal", "runs": "own" },
+                    "auditor": { "clearance": "confidential", "tenants": "any", "runs": "any" }
+                },
+                "everyone": ["reader"],
+                "members": { "audit": ["auditor"] }
+            }"#,
+        )
+        .unwrap(),
+    ))
+}
+
+fn keys() -> Arc<super::auth::ApiKeys> {
+    Arc::new(
+        format!("{ANA_KEY}:ana,{JOSE_KEY}:jose,{AUDITOR_KEY}:audit")
+            .parse()
+            .unwrap(),
+    )
+}
 
 struct App {
     router: Router,
@@ -31,8 +65,9 @@ fn app(answerer: impl Answerer + 'static) -> App {
     let state = AppState {
         answerer: Arc::new(answerer),
         runs: Arc::<MemoryRunStore>::clone(&runs),
-        keys: Arc::new(format!("{ANA_KEY}:ana,{JOSE_KEY}:jose").parse().unwrap()),
-        admins: Arc::new(AdminUsers::default()),
+        keys: keys(),
+        authorizer: policy(),
+        clock: Arc::new(FixedClock::default()),
     };
     App {
         router: router(state),
@@ -44,17 +79,19 @@ fn canned(category: Option<CategoryKind>, outcome: Outcome) -> CannedAnswerer {
     CannedAnswerer { category, outcome }
 }
 
-/// Answers with a fixed outcome and trace, and records the questions it was asked.
+/// Answers with a fixed outcome and trace, and records the questions it was asked and who asked them.
 #[derive(Default)]
 struct Recording {
     outcome: Option<Outcome>,
     questions: Mutex<Vec<Question>>,
+    principals: Mutex<Vec<Principal>>,
 }
 
 #[async_trait]
 impl Answerer for Arc<Recording> {
-    async fn answer(&self, question: Question) -> RunReport {
+    async fn answer(&self, principal: &Principal, question: Question) -> RunReport {
         self.questions.lock().unwrap().push(question.clone());
+        self.principals.lock().unwrap().push(principal.clone());
         RunReport {
             id: RunId::new(),
             question,
@@ -62,19 +99,6 @@ impl Answerer for Arc<Recording> {
             outcome: self.outcome.clone().unwrap_or_else(fixtures::answered),
             trace: fixtures::trace(),
         }
-    }
-}
-
-struct FailingStore;
-
-#[async_trait]
-impl RunStore for FailingStore {
-    async fn save(&self, _: &UserId, _: &RunReport) -> eros::Result<()> {
-        eros::bail!("database is down")
-    }
-
-    async fn get(&self, _: RunId) -> eros::Result<Option<StoredRun>> {
-        eros::bail!("database is down")
     }
 }
 
@@ -349,9 +373,10 @@ async fn persistence_failure_returns_500_with_the_run_id() {
     ] {
         let state = AppState {
             answerer: Arc::new(canned(None, outcome)),
-            runs: Arc::new(FailingStore),
-            keys: Arc::new(format!("{ANA_KEY}:ana").parse().unwrap()),
-            admins: Arc::new(AdminUsers::default()),
+            runs: Arc::new(FailingRunStore),
+            keys: keys(),
+            authorizer: policy(),
+            clock: Arc::new(FixedClock::default()),
         };
         let reply = send(&router(state), chat(Some(ANA_KEY), &ask("Is it?"))).await;
         assert_eq!(reply.status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -484,4 +509,93 @@ async fn unknown_endpoints_return_an_openai_style_404() {
     let reply = send(&app.router, get("/v1/embeddings", ANA_KEY)).await;
     assert_eq!(reply.status, StatusCode::NOT_FOUND);
     assert_eq!(reply.json()["error"]["code"], "not_found");
+}
+
+#[tokio::test]
+async fn the_answerer_is_asked_on_behalf_of_the_authenticated_user() {
+    let recording = Arc::new(Recording::default());
+    let app = app(Arc::clone(&recording));
+
+    send(&app.router, chat(Some(ANA_KEY), &ask("Is it?"))).await;
+
+    let principals = recording.principals.lock().unwrap().clone();
+    assert_eq!(principals, [Principal::new(UserId("ana".into()))]);
+}
+
+/// A run whose retrieve entry denied one chunk.
+async fn run_with_a_denial(runs: &MemoryRunStore) -> RunId {
+    let mut report = RunReport {
+        id: RunId::new(),
+        question: Question::new("Is it?"),
+        category: Some(CategoryKind::Boolean),
+        outcome: fixtures::answered(),
+        trace: fixtures::trace(),
+    };
+    let mut json = serde_json::to_value(&report.trace).unwrap();
+    let denied = AccessDecision {
+        chunk: ChunkRef {
+            id: ChunkId("markdown:hr/pay.md#bands".into()),
+            version: ChunkVersion("v1".into()),
+        },
+        decision: Decision::Denied {
+            reason: DenyReason::NoGrant,
+        },
+    };
+    json[1]["access"] = json!([denied]);
+    report.trace = serde_json::from_value(json).unwrap();
+    runs.save(&UserId("ana".into()), &report).await.unwrap();
+    report.id
+}
+
+#[tokio::test]
+async fn an_auditor_reads_any_run_with_its_denials_and_an_owner_reads_its_own_without() {
+    let app = app(canned(None, fixtures::answered()));
+    let id = run_with_a_denial(&app.runs).await;
+    let path = format!("/v1/runs/{id}");
+
+    let audited = send(&app.router, get(&path, AUDITOR_KEY)).await;
+    assert_eq!(audited.status, StatusCode::OK, "{}", audited.body);
+    assert_eq!(
+        audited.json()["trace"][1]["access"][0]["chunk"]["id"],
+        "markdown:hr/pay.md#bands"
+    );
+
+    let own = send(&app.router, get(&path, ANA_KEY)).await;
+    assert_eq!(own.status, StatusCode::OK, "{}", own.body);
+    assert!(own.json()["trace"][1].get("access").is_none());
+    assert!(!own.body.contains("hr/pay.md"));
+
+    let other = send(&app.router, get(&path, JOSE_KEY)).await;
+    assert_eq!(other.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_policy_that_cannot_answer_hides_every_run() {
+    let runs = Arc::new(MemoryRunStore::default());
+    let id = run_with_a_denial(&runs).await;
+    let router = router(AppState {
+        answerer: Arc::new(canned(None, fixtures::answered())),
+        runs,
+        keys: keys(),
+        authorizer: Arc::new(FailingAuthorizer),
+        clock: Arc::new(FixedClock::default()),
+    });
+
+    let reply = send(&router, get(&format!("/v1/runs/{id}"), ANA_KEY)).await;
+
+    assert_eq!(reply.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(reply.json()["error"]["code"], "authorizer_unavailable");
+    assert!(!reply.body.contains("Is it?"));
+}
+
+#[tokio::test]
+async fn completions_and_stored_runs_are_stamped_by_the_injected_clock() {
+    let app = app(canned(None, fixtures::answered()));
+
+    let reply = send(&app.router, chat(Some(ANA_KEY), &ask("Is it?"))).await;
+
+    let now = FixedClock::default().now();
+    assert_eq!(reply.json()["created"], now.timestamp());
+    let stored = app.runs.get(run_id(&reply.json())).await.unwrap().unwrap();
+    assert_eq!(stored.created_at, now);
 }

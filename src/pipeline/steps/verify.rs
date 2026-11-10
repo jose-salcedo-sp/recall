@@ -4,19 +4,19 @@ use futures::{StreamExt, TryStreamExt, stream};
 
 use crate::{
     config::PublishPolicy,
-    domain::{AtLeastOne, ChunkId, Cited, Probability, Provenance, Question},
+    domain::{AtLeastOne, ChunkId, Cited, Probability, Provenance},
     llm::{
         ModelRef,
         judge::{Judge, JudgeOption, JudgeQuestion, JudgeRequest},
     },
     pipeline::{
-        Boolean, DeclineReason, Open, Scored, Step, StepError,
+        Ask, Boolean, DeclineReason, Open, Scored, Step, StepError,
         trace::{ClaimCheck, ClaimVerdict, Relation, RelationKind, SupportMode, VerifyRecord},
     },
     retrieval::Retrieved,
 };
 
-use super::{CONCURRENT_REQUESTS, Explained, ExplainedVerdict, Reranked, judged_text};
+use super::{CONCURRENT_REQUESTS, Explained, ExplainedVerdict, Reranked, judged_text, with_access};
 
 /// Recorded as the trace entry's prompt version when a judge checks support; bump on any change to the question.
 pub const SUPPORT_PROMPT_VERSION: &str = "support-v1";
@@ -167,10 +167,10 @@ impl Step for Verify<Open> {
 
     async fn run(
         &self,
-        _question: &Question,
+        ask: &Ask,
         input: Explained,
     ) -> Result<Scored<Verified, VerifyRecord>, StepError> {
-        self.verify(input).await
+        self.enforced(ask, input).await
     }
 }
 
@@ -183,7 +183,7 @@ impl Step for Verify<Boolean> {
 
     async fn run(
         &self,
-        _question: &Question,
+        ask: &Ask,
         input: ExplainedVerdict,
     ) -> Result<Scored<VerifiedVerdict, VerifyRecord>, StepError> {
         let ExplainedVerdict {
@@ -197,7 +197,8 @@ impl Step for Verify<Boolean> {
             score,
             model,
             prompt_version,
-        } = self.verify(explained).await?;
+            access,
+        } = self.enforced(ask, explained).await?;
         Ok(Scored {
             output: VerifiedVerdict {
                 verified: output,
@@ -208,11 +209,30 @@ impl Step for Verify<Boolean> {
             score,
             model,
             prompt_version,
+            access,
         })
     }
 }
 
 impl<TCategory> Verify<TCategory> {
+    /// Rechecks the sources first, so a claim citing a chunk outside the run's scope cites an unknown chunk.
+    async fn enforced(
+        &self,
+        ask: &Ask,
+        input: Explained,
+    ) -> Result<Scored<Verified, VerifyRecord>, StepError> {
+        let Explained {
+            explanation,
+            sources,
+        } = input;
+        let (sources, access) = sources.enforce(ask.access());
+        let input = Explained {
+            explanation,
+            sources,
+        };
+        with_access(self.verify(input).await, access)
+    }
+
     async fn verify(&self, input: Explained) -> Result<Scored<Verified, VerifyRecord>, StepError> {
         let by_id: HashMap<&ChunkId, &Retrieved> = input
             .sources

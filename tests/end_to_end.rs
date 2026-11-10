@@ -14,13 +14,21 @@ use axum::{
 use chrono::Utc;
 use http_body_util::BodyExt;
 use recall::{
+    access::{
+        Authorizer, ConnectorLabels,
+        rules::{AccessConfig, LabelRules, RulePolicy},
+    },
+    clock::{SystemClock, UuidV7},
     domain::{ChunkDraft, Document, Labels, Sensitivity},
     ingest::{Sources, fakes::StaticSource, ingest, markdown},
-    llm::fakes::{HashEmbedder, ScriptedChat},
-    pipeline::answerer::PipelineAnswerer,
+    llm::{
+        ChatModel,
+        fakes::{HashEmbedder, ScriptedChat},
+    },
+    pipeline::{answerer::PipelineAnswerer, assembly::Ports},
     retrieval::hybrid::{HybridConfig, HybridRetriever},
-    server::{AppState, auth::AdminUsers, router},
-    store::runs::PgRunStore,
+    server::{AppState, router},
+    store::{chunks::PgChunkStore, runs::PgRunStore},
 };
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -57,6 +65,29 @@ fn roles_page() -> Document {
     }
 }
 
+fn ports(
+    retriever: HybridRetriever,
+    explain: Arc<dyn ChatModel>,
+    authorizer: &Arc<dyn Authorizer>,
+) -> Ports {
+    Ports {
+        retriever: Arc::new(retriever),
+        embedding: None,
+        explain,
+        judge: None,
+        authorizer: Arc::clone(authorizer),
+        clock: Arc::new(SystemClock),
+        ids: Arc::new(UuidV7),
+    }
+}
+
+/// The policy `config/access.json` ships: every user is a `reader` of internal chunks and its own runs.
+fn shipped_policy() -> Arc<dyn Authorizer> {
+    Arc::new(RulePolicy::new(
+        AccessConfig::parse(include_str!("../config/access.json")).unwrap(),
+    ))
+}
+
 /// Ingest, hybrid retrieval, the pipeline, the HTTP API, and the run store, with only the models faked.
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn an_ingested_page_answers_a_question_over_http(pool: PgPool) -> eros::Result<()> {
@@ -64,7 +95,14 @@ async fn an_ingested_page_answers_a_question_over_http(pool: PgPool) -> eros::Re
         name: markdown::NAME.clone(),
         documents: vec![roles_page()],
     })])?;
-    ingest(&pool, &HashEmbedder, &sources, false).await?;
+    ingest(
+        &PgChunkStore::new(pool.clone()),
+        &HashEmbedder,
+        &ConnectorLabels,
+        &sources,
+        false,
+    )
+    .await?;
 
     let retriever = HybridRetriever::new(
         pool.clone(),
@@ -78,14 +116,17 @@ async fn an_ingested_page_answers_a_question_over_http(pool: PgPool) -> eros::Re
         }]
     })
     .to_string()]);
+    let authorizer = shipped_policy();
     let app = router(AppState {
-        answerer: Arc::new(PipelineAnswerer::new(
-            Arc::new(retriever),
+        answerer: Arc::new(PipelineAnswerer::new(ports(
+            retriever,
             Arc::new(explain),
-        )),
-        runs: Arc::new(PgRunStore::new(pool)),
+            &authorizer,
+        ))),
+        runs: Arc::new(PgRunStore::new(pool, Arc::new(SystemClock))),
+        clock: Arc::new(SystemClock),
         keys: Arc::new("sk-jose:jose".parse().unwrap()),
-        admins: Arc::new(AdminUsers::default()),
+        authorizer,
     });
     let send = |request: Request<Body>| {
         let app = app.clone();
@@ -141,7 +182,106 @@ async fn an_ingested_page_answers_a_question_over_http(pool: PgPool) -> eros::Re
         .collect();
     assert_eq!(
         steps,
-        ["classify", "retrieve", "rerank", "explain", "verify"]
+        [
+            "authorize",
+            "classify",
+            "retrieve",
+            "rerank",
+            "explain",
+            "verify"
+        ]
     );
+    assert_eq!(run["trace"][0]["record"]["principal"]["id"], "jose");
+    Ok(())
+}
+
+fn pay_page() -> Document {
+    Document {
+        source: markdown::NAME.clone(),
+        external_id: "hr/pay.md".into(),
+        title: "Pay".into(),
+        url: "https://wiki.example.test/hr/pay.md".into(),
+        updated_at: Utc::now(),
+        labels: roles_page().labels,
+        chunks: vec![ChunkDraft {
+            locator: "bands".into(),
+            heading: Some("Role pay bands".into()),
+            url: "https://wiki.example.test/hr/pay.md#bands".into(),
+            text: "ROLE_USERS role assignments set each user's pay band.".into(),
+            authoritative: true,
+        }],
+    }
+}
+
+/// A document the label rules make confidential is never retrieved, prompted, cited or listed for a reader, even
+/// when the model cites it.
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
+async fn a_relabelled_confidential_page_never_reaches_a_reader(pool: PgPool) -> eros::Result<()> {
+    let sources = Sources::new(vec![Box::new(StaticSource {
+        name: markdown::NAME.clone(),
+        documents: vec![roles_page(), pay_page()],
+    })])?;
+    let rules = AccessConfig::parse(
+        r#"{ "roles": {}, "labels": [{ "documents": "markdown:hr/", "sensitivity": "confidential" }] }"#,
+    )?;
+    ingest(
+        &PgChunkStore::new(pool.clone()),
+        &HashEmbedder,
+        &LabelRules::new(rules.labels()),
+        &sources,
+        false,
+    )
+    .await?;
+
+    let explain = Arc::new(ScriptedChat::replying([json!({
+        "claims": [{
+            "text": "ROLE_USERS sets pay bands.",
+            "chunk_ids": ["markdown:hr/pay.md#bands"]
+        }]
+    })
+    .to_string()]));
+    let retriever = HybridRetriever::new(
+        pool.clone(),
+        Arc::new(HashEmbedder),
+        HybridConfig::default(),
+    );
+    let authorizer = shipped_policy();
+    let app = router(AppState {
+        answerer: Arc::new(PipelineAnswerer::new(ports(
+            retriever,
+            Arc::<ScriptedChat>::clone(&explain) as Arc<dyn ChatModel>,
+            &authorizer,
+        ))),
+        runs: Arc::new(PgRunStore::new(pool, Arc::new(SystemClock))),
+        clock: Arc::new(SystemClock),
+        keys: Arc::new("sk-jose:jose".parse().unwrap()),
+        authorizer,
+    });
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/chat/completions")
+                .header(header::AUTHORIZATION, "Bearer sk-jose")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "messages": [{ "role": "user", "content": "Do ROLE_USERS role assignments set pay bands?" }]
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await
+        .unwrap();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let completion: Value = serde_json::from_slice(&body)?;
+
+    assert_eq!(
+        completion["provenance"]["outcome"], "declined",
+        "{completion:#}"
+    );
+    assert!(!String::from_utf8_lossy(&body).contains("hr/pay.md"));
+    let prompt = &explain.requests()[0].user;
+    assert!(prompt.contains("markdown:roles.md#roles"));
+    assert!(!prompt.contains("each user's pay band"), "{prompt}");
     Ok(())
 }

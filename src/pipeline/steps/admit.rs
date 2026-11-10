@@ -10,13 +10,13 @@ use crate::{
         judge::{Judge, JudgeQuestion, JudgeRequest},
     },
     pipeline::{
-        Category, DeclineReason, Scored, Step, StepError,
+        Ask, Category, DeclineReason, Scored, Step, StepError,
         trace::{AdmissionRoute, AdmitRecord, AdmittedSource, Screen},
     },
     retrieval::Retrieved,
 };
 
-use super::{CONCURRENT_REQUESTS, Reranked, judged_text};
+use super::{CONCURRENT_REQUESTS, Reranked, judged_text, with_access};
 
 /// Recorded as the trace entry's prompt version; bump on any change to the screening questions.
 pub const ADMIT_PROMPT_VERSION: &str = "admit-v1";
@@ -140,6 +140,17 @@ impl<TCategory: Category> Step for Admit<TCategory> {
     type Record = AdmitRecord;
 
     async fn run(
+        &self,
+        ask: &Ask,
+        input: Reranked,
+    ) -> Result<Scored<Reranked, AdmitRecord>, StepError> {
+        let (input, access) = input.enforce(ask.access());
+        with_access(self.admit(ask.question(), input).await, access)
+    }
+}
+
+impl<TCategory> Admit<TCategory> {
+    async fn admit(
         &self,
         question: &Question,
         input: Reranked,
@@ -312,7 +323,7 @@ mod tests {
     async fn admit(sources: Vec<Retrieved>) -> Result<Scored<Reranked, AdmitRecord>, StepError> {
         Admit::<Open>::new(by_text(), AdmissionCutoffs::default())
             .run(
-                &Question::new("Which table stores role assignments?"),
+                &Ask::unrestricted("Which table stores role assignments?"),
                 Reranked(sources),
             )
             .await

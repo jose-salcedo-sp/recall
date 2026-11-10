@@ -1,4 +1,5 @@
 use recall::{
+    clock::{Clock, fakes::FixedClock},
     domain::{RunId, UserId},
     store::RunStore,
 };
@@ -43,6 +44,15 @@ pub async fn a_duplicate_id_is_rejected_and_the_first_run_kept(
     Ok(())
 }
 
+pub async fn the_store_s_clock_stamps_each_run(store: &dyn RunStore) -> eros::Result<()> {
+    let (report, _) = reports().remove(0);
+    store.save(&UserId("ana".into()), &report).await?;
+
+    let stored = store.get(report.id).await?.expect("the run was saved");
+    assert_eq!(stored.created_at, FixedClock::default().now());
+    Ok(())
+}
+
 macro_rules! run_store_contract {
     (#[$attr:meta] ($($arg:ident: $ty:ty),*) => $make:expr) => {
         #[$attr]
@@ -59,6 +69,11 @@ macro_rules! run_store_contract {
         async fn a_duplicate_id_is_rejected_and_the_first_run_kept($($arg: $ty),*) -> eros::Result<()> {
             crate::run_store::a_duplicate_id_is_rejected_and_the_first_run_kept(&$make).await
         }
+
+        #[$attr]
+        async fn the_store_s_clock_stamps_each_run($($arg: $ty),*) -> eros::Result<()> {
+            crate::run_store::the_store_s_clock_stamps_each_run(&$make).await
+        }
     };
 }
 
@@ -72,6 +87,6 @@ mod postgres {
     use recall::store::runs::PgRunStore;
 
     run_store_contract!(
-        #[sqlx::test(migrator = "recall::store::MIGRATOR")] (pool: sqlx::PgPool) => PgRunStore::new(pool)
+        #[sqlx::test(migrator = "recall::store::MIGRATOR")] (pool: sqlx::PgPool) => PgRunStore::new(pool, std::sync::Arc::new(recall::clock::fakes::FixedClock::default()))
     );
 }

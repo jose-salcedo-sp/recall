@@ -45,6 +45,103 @@ fn hash_embed(text: &str) -> Vec<f32> {
     vector
 }
 
+/// [`HashEmbedder`] vectors under any model name, recording every batch it embeds.
+pub struct RecordingEmbedder {
+    model: ModelRef,
+    batches: Mutex<Vec<Vec<String>>>,
+}
+
+impl RecordingEmbedder {
+    /// Records under `model`, so a test can stand for an embedder other than [`HashEmbedder`].
+    pub fn named(model: ModelRef) -> Self {
+        Self {
+            model,
+            batches: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Every batch embedded so far, in order.
+    pub fn batches(&self) -> Vec<Vec<String>> {
+        self.batches
+            .lock()
+            .expect("lock poisoned: a test thread panicked while holding it")
+            .clone()
+    }
+}
+
+/// Records under [`HashEmbedder`]'s model.
+impl Default for RecordingEmbedder {
+    fn default() -> Self {
+        Self::named(HashEmbedder.model())
+    }
+}
+
+#[async_trait]
+impl Embedder for RecordingEmbedder {
+    fn model(&self) -> ModelRef {
+        self.model.clone()
+    }
+
+    async fn embed(&self, texts: &[String], purpose: EmbedPurpose) -> eros::Result<Vec<Vec<f32>>> {
+        self.batches
+            .lock()
+            .expect("lock poisoned: a test thread panicked while holding it")
+            .push(texts.to_vec());
+        HashEmbedder.embed(texts, purpose).await
+    }
+}
+
+/// Fails every call to every model port, as an unreachable backend would, for error-path tests.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FailingModel;
+
+const UNREACHABLE: &str =
+    "error sending request for url (http://models.internal/v1): connection refused";
+
+#[async_trait]
+impl Embedder for FailingModel {
+    fn model(&self) -> ModelRef {
+        ModelRef::new("fake-failing", "1")
+    }
+
+    async fn embed(&self, _: &[String], _: EmbedPurpose) -> eros::Result<Vec<Vec<f32>>> {
+        eros::bail!("{UNREACHABLE}")
+    }
+}
+
+#[async_trait]
+impl ChatModel for FailingModel {
+    fn model(&self) -> ModelRef {
+        ModelRef::new("fake-failing", "1")
+    }
+
+    async fn complete(&self, _: ChatRequest) -> eros::Result<ChatResponse> {
+        eros::bail!("{UNREACHABLE}")
+    }
+}
+
+#[async_trait]
+impl SystemOne for FailingModel {
+    fn model(&self) -> ModelRef {
+        ModelRef::new("fake-failing", "1")
+    }
+
+    async fn decide(&self, _: DecisionRequest) -> eros::Result<DecisionResponse> {
+        eros::bail!("{UNREACHABLE}")
+    }
+}
+
+#[async_trait]
+impl Judge for FailingModel {
+    fn model(&self) -> ModelRef {
+        ModelRef::new("fake-failing", "1")
+    }
+
+    async fn judge(&self, _: JudgeRequest) -> eros::Result<Judgements> {
+        eros::bail!("{UNREACHABLE}")
+    }
+}
+
 /// Returns queued responses in order and records every request it received.
 pub struct ScriptedChat {
     model: ModelRef,

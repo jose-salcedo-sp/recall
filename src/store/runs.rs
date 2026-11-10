@@ -5,7 +5,10 @@ use chrono::{DateTime, Utc};
 use eros::Context;
 use sqlx::{PgPool, Row, types::Json};
 
+use std::sync::Arc;
+
 use crate::{
+    clock::Clock,
     domain::{CategoryKind, Question, RunId, UserId},
     pipeline::{
         report::{Outcome, RunReport},
@@ -18,12 +21,13 @@ use super::{RunStore, StoredRun};
 /// The production [`RunStore`].
 pub struct PgRunStore {
     pool: PgPool,
+    clock: Arc<dyn Clock>,
 }
 
 impl PgRunStore {
-    /// Wraps a pool whose migrations have run.
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    /// Wraps a pool whose migrations have run; `clock` stamps [`StoredRun::created_at`].
+    pub fn new(pool: PgPool, clock: Arc<dyn Clock>) -> Self {
+        Self { pool, clock }
     }
 }
 
@@ -40,8 +44,8 @@ pub fn status(outcome: &Outcome) -> &'static str {
 impl RunStore for PgRunStore {
     async fn save(&self, user: &UserId, report: &RunReport) -> eros::Result<()> {
         sqlx::query(
-            "INSERT INTO pipeline_runs (id, user_id, question, category, status, outcome, trace)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO pipeline_runs (id, user_id, question, category, status, outcome, trace, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(report.id.as_uuid())
         .bind(&user.0)
@@ -50,6 +54,7 @@ impl RunStore for PgRunStore {
         .bind(status(&report.outcome))
         .bind(Json(&report.outcome))
         .bind(Json(&report.trace))
+        .bind(self.clock.now())
         .execute(&self.pool)
         .await
         .with_context(|| format!("saving run {}", report.id))?;

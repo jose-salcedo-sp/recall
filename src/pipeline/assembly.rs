@@ -11,6 +11,8 @@ use std::{fmt, sync::Arc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    access::Authorizer,
+    clock::{Clock, RunIds},
     config::{
         AdmitJudge, PipelineConfig, RerankCandidates, RerankJudge, StepName, SupportCheck,
         SupportCutoff,
@@ -41,6 +43,12 @@ pub struct Ports {
     /// Classifies, answers yes or no, and judges for every check whose config names a judge. `None`: every
     /// question is `open`, and a config whose checks need a judge does not assemble.
     pub judge: Option<Arc<dyn Judge>>,
+    /// Decides what each run's principal may read; asked once per run, before retrieval.
+    pub authorizer: Arc<dyn Authorizer>,
+    /// Stamps every trace entry.
+    pub clock: Arc<dyn Clock>,
+    /// Names every run.
+    pub ids: Arc<dyn RunIds>,
 }
 
 /// What each step does, as assembled: the config's checks exactly, since a check that cannot run as configured

@@ -11,7 +11,7 @@ The core is domain-free. A domain application brings its corpus (a `Source` conn
 | OpenAI-compatible HTTP API | Other front ends (chat bots and the like): consumers of the API or the library, not core modules |
 | Batch ingestion through the `Source` port; a markdown-directory connector | Event-driven ingestion, revocation SLAs |
 | Admission and support checks behind the `Judge` port | Regeneration after a failed claim |
-| Permission/sensitivity labels **recorded** on every chunk | RBAC/RLS **enforcement** |
+| Labels on every chunk, enforced by the `Authorizer` port at every stage (section 8) | Postgres RLS, per-question principals in eval |
 | Dockerfile + env config | A deployment target |
 
 Guiding constraints:
@@ -33,7 +33,7 @@ The `Source` port returns a full snapshot of documents; `ingest` versions, embed
 Ingestion:
 
 - `recall ingest` reads the full snapshot on each run. Documents no longer in the snapshot have their current chunks superseded.
-- Each chunk records, even though nothing enforces them yet: ACL (empty for markdown), tenant (if any), sensitivity (`public` / `internal` / `confidential`).
+- Each chunk records labels: ACL (empty for markdown), tenant (if any), sensitivity (`public` < `internal` < `confidential`). The `Labeler` port sets them per document before versioning; the shipped `LabelRules` relabels by document-id prefix from the access policy, and a document it cannot label is not stored.
 - Chunks are **immutable and content-addressed**. Re-ingestion inserts new versions and marks old ones superseded, so traces stay reproducible.
 - Every chunk records the embedding model and version. Changing models means a full re-embed; mixing is never allowed.
 - Ingested text is treated as data: delimited in prompts, never as instructions.
@@ -44,7 +44,7 @@ Ingestion:
 |---|---|
 | Language | Rust, one library crate and one binary: `recall serve`, `recall ingest`, `recall eval`, `recall models check` |
 | Modules | `ingest`, `retrieval`, `pipeline`, `llm`, `store`, `server`, `eval` |
-| Store | Postgres + pgvector |
+| Store | Postgres + pgvector, behind the `ChunkStore` and `RunStore` ports; time and run ids behind `Clock` and `RunIds`, eval's files behind `Files` |
 | Retrieval | Hybrid: full-text + vector, merged with reciprocal rank fusion (identifiers like `A_OPCODE` or `ROLE_USERS` embed poorly). Full text ranks exact identifier matches first, then BM25 in plain SQL over corpus statistics that `recall ingest` refreshes (no extension). Before searching, a question can gain the words of the glossary table rows it names by a part, alternative or acronym of their term (`retrieval.expansion.documents` lists the glossary documents; parsed from their current chunks on each retrieval, capped per question, recorded in the `Retrieve` trace) |
 | Embeddings, "why" LLM | Adapters for Amazon Bedrock and any OpenAI-compatible server (locally Ollama or llama.cpp; hosted, Cloudflare Workers AI). Each port names its backend (`RECALL_EMBED_BACKEND`, `RECALL_EXPLAIN_BACKEND`), with no default |
 | System One | Adapters for the System One API (`POST /v1/systemone`: yes/no, choice, and score questions over a text, answered with calibrated probabilities), served locally by [Kev](https://github.com/jaredpalmer/kev) and hosted by system-one.dev, and for Cloudflare's Clef models on Workers AI. `RECALL_SYSTEM_ONE_BACKEND` is `none`, `system-one` or `workers-ai` |
@@ -59,14 +59,14 @@ OpenAI-compatible:
 - `POST /v1/chat/completions`
   - Only the last `user` message is used. Client `system` messages and history are ignored.
   - `stream: true` is accepted; the verified answer is returned as a single chunk (citations must be verified before anything is shown).
-  - Auth: per-user bearer key, mapped to a user id in the run record.
+  - Auth: per-user bearer key, mapped to a user id in the run record and to the run's principal (section 8).
 - `GET /v1/runs/{id}` → a persisted run with its trace.
 
 Response:
 
 - `choices[0].message.content` — markdown answer in the per-category format, with numbered citations.
 - Top-level `provenance` object — run id, category, outcome (`answered` / `declined` / `failed`), optional halt metadata, verdict, and citations (chunk id, version, title, URL, excerpt). **No trace or per-step scores** in the chat response; those are audit data on `GET /v1/runs/{id}`.
-- `RECALL_ADMIN_USERS` may read any persisted run.
+- The access policy decides who reads a persisted run (`runs`: `own` or `any`); a run the reader may not read is a 404. A reader of its own runs only does not see denied access checks.
 
 Per-category format:
 
@@ -116,7 +116,7 @@ pub trait Step: Send + Sync {
 
     fn threshold(&self) -> Option<Probability> { None }
 
-    fn run(&self, question: &Question, input: Self::Input)
+    fn run(&self, ask: &Ask, input: Self::Input) // question, principal, access
         -> impl Future<Output = Result<Scored<Self::Output, Self::Record>, StepError>> + Send;
 }
 
@@ -144,7 +144,7 @@ pub enum Halt {
 
 Steps are generic over the categories they support (`Answer<Boolean>` is a step; `Answer<Open>` is not), rather than `Step` being generic over the category. With `Step<TCategory>`, the blanket `Pipeline` impl below conflicts with the `Seq` impl, because another crate could implement `Step<TheirType>` for `Seq`.
 
-Steps take their input by value and also see the question; they never see the trace. A step returns `StepError::decline(reason)` for a domain decline (for example invalid model output) and attaches its record so the raw output stays in the trace. Any other error is a failure.
+Steps take their input by value and also see the `Ask`: the question, who asked, and what they may read; they never see the trace. `Run::authorize` builds it from the `Authorizer` and records it as the run's first trace entry. A step returns `StepError::decline(reason)` for a domain decline (for example invalid model output) and attaches its record so the raw output stays in the trace. Any other error is a failure.
 
 ### 5.3 Pipelines per category
 
@@ -268,7 +268,7 @@ Not built: regenerating once after a failed claim (a loop back to `Explain` that
 
 Each step contributes one entry:
 
-- Shared part: step name, parallel group, start time, duration, model id and version, prompt version, outcome.
+- Shared part: step name, parallel group, start time, duration, model id and version, prompt version, outcome, and one access decision per chunk the step checked.
 - Step record (`Step::Record`): raw model output, parsed output, chunk ids and versions, score, threshold.
 
 The trace is a flat list ordered by start time, serialized through the `TraceRecord` enum into a JSONB column in `pipeline_runs`. Answered, declined, and failed runs are all persisted. Chunk text is referenced by id and version, never copied.
@@ -299,13 +299,16 @@ What was assembled is a `Plan` (the classify, rerank, admit and support modes), 
   - `{"candidates": 25}`: one yes/no question to the judge per match ("does this text help answer the question?") over the top 25 matches by fused score. Matches are ordered by reciprocal rank fusion of their retrieval rank and their probability-of-yes rank, with the same evidence penalty in both; the best kept probability scores the step. `candidates` belongs to this variant, so a config cannot give candidates without a judge; it must be at least `top_k`. Neighbouring sections added by retrieval are context for their match, not candidates of their own.
 - `Answer<Boolean>`: one yes/no question to the judge over the reranked sources; the probability of yes is the verdict, `max(p, 1 - p)` scores the step against `answer`'s threshold, and `Explain<Boolean>` declines the run (`ContradictsVerdict`) when the sources contradict the verdict. A `boolean`, `choice` or `ranking` classification below `classify.min_confidence` falls back to `open`. `choice` and `ranking` take the `open` path until their `Answer` steps exist.
 
-## 8. Deferred: permissions
+## 8. Access control
 
-Designed, not built:
+Every run is asked by a `Principal` (a user id and the roles its authenticator asserts). The `Authorizer` port, injected in `Ports`, compiles it once per run into `Access`: a `ChunkScope` (the principal's ACL members and one grant per role, each a sensitivity clearance and the tenants it reads) and a `RunAccess`. A chunk is readable when its ACL is empty or names a member, and a grant clears its sensitivity and tenant. Deny by default: an unknown principal gets nothing, and an authorizer error fails the run at `authorize`, before retrieval.
 
-- Postgres RLS policies over the recorded labels; filter inside the vector query, recheck before LLM context.
-- Users retrieve only what their groups may read; `confidential` chunks only for the corpus's maintainers; a chunk with a `tenant` label only for that tenant.
-- Ingestion on change to the source, with bounded revocation and freshness delays.
+- **Retrieval** filters by the scope in SQL: glossary, full-text, vector (HNSW iterative scan) and neighbour queries. The `Retriever` contract checks that exactly the readable chunks come back.
+- **Every step that reads chunks** (`Retrieve`, `Rerank`, `Admit`, `Answer`, `Explain`, `Verify`) rechecks its sources against the same scope and records one decision per chunk, so a retriever that leaks still leaks nothing into a prompt, a citation or a decline.
+- **Ingestion** labels through the `Labeler` port; **eval** asks as an explicit `--as` principal.
+- `RulePolicy` (roles, `everyone`, `members`, label rules from `config/access.json`) is the shipped adapter; `access::contract` holds the port's rules for other adapters.
+
+Not built: Postgres RLS, ingestion on change with bounded revocation delays, and per-question principals in eval.
 
 ## 9. Open items
 

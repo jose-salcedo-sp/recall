@@ -1,0 +1,9 @@
+{
+  "roles": {
+    "reader": { "clearance": "internal", "tenants": [], "runs": "own" },
+    "maintainer": { "clearance": "confidential", "tenants": "any", "runs": "any" }
+  },
+  "everyone": ["reader"],
+  "members": {},
+  "labels": []
+}

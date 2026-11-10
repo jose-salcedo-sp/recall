@@ -4,7 +4,7 @@ use crate::{
     domain::{CategoryKind, Probability, Question},
     llm::judge::{Judge, JudgeOption, JudgeQuestion, JudgeRequest},
     pipeline::{
-        Asked, DeclineReason, Scored, Step, StepError, Unclassified,
+        Ask, Asked, DeclineReason, Scored, Step, StepError, Unclassified,
         trace::{ClassifyMode, ClassifyRecord},
     },
 };
@@ -108,9 +108,10 @@ impl Step for Classify {
 
     async fn run(
         &self,
-        question: &Question,
+        ask: &Ask,
         _input: Asked,
     ) -> Result<Scored<CategoryKind, ClassifyRecord>, StepError> {
+        let question = ask.question();
         let (judge, min_confidence) = match &self.mode {
             Classifier::AllOpen => {
                 let category = CategoryKind::Open;
@@ -200,7 +201,7 @@ mod tests {
     ) -> Result<Scored<CategoryKind, ClassifyRecord>, StepError> {
         Classify::judged(Arc::<FnJudge>::clone(judge), min_confidence)
             .run(
-                &Question::new("Does ROLE_USERS hold role assignments?"),
+                &Ask::unrestricted("Does ROLE_USERS hold role assignments?"),
                 Asked,
             )
             .await
@@ -292,7 +293,10 @@ mod tests {
     async fn all_open_records_every_question_as_open_and_unscored() {
         let step = Classify::all_open();
         assert_eq!(step.mode(), ClassifyMode::AllOpen);
-        let scored = step.run(&Question::new("anything"), Asked).await.unwrap();
+        let scored = step
+            .run(&Ask::unrestricted("anything"), Asked)
+            .await
+            .unwrap();
         assert_eq!(scored.output, CategoryKind::Open);
         assert_eq!(scored.score, None);
         assert_eq!(scored.record.mode, ClassifyMode::AllOpen);

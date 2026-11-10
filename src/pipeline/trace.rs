@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    access::{Access, AccessDecision, PolicyRef, Principal},
     domain::{CategoryKind, ChunkId, ChunkRef, Probability},
     llm::ModelRef,
     retrieval::{Relevance, glossary::Expansion},
@@ -47,6 +48,21 @@ pub struct TraceEntry {
     pub outcome: StepOutcome,
     /// The step's own data; `None` when it failed before producing any.
     pub record: Option<TraceRecord>,
+    /// One access check per chunk the step touched, in order; empty for a step that reads no chunk. Entries written
+    /// before access was enforced have none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub access: Vec<AccessDecision>,
+}
+
+impl Trace {
+    /// The trace without denied access checks, for a reader who may only see its own runs: a denied check names a
+    /// chunk the asker may not know exists.
+    pub fn without_denials(mut self) -> Self {
+        for entry in &mut self.0 {
+            entry.access.retain(|check| check.decision.is_allowed());
+        }
+        self
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -80,6 +96,8 @@ pub enum StepOutcome {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TraceRecord {
+    /// From [`super::Run::authorize`], the first entry of every run.
+    Authorize(AuthorizeRecord),
     /// From `Classify`.
     Classify(ClassifyRecord),
     /// From `Retrieve`.
@@ -94,6 +112,17 @@ pub enum TraceRecord {
     Explain(ExplainRecord),
     /// From `Verify`.
     Verify(VerifyRecord),
+}
+
+/// Who asked, which policy decided, and what it gave them.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AuthorizeRecord {
+    /// Who asked, with the roles their authenticator asserted.
+    pub principal: Principal,
+    /// The policy that decided.
+    pub policy: PolicyRef,
+    /// What the policy gave the principal; `None` when it could not answer.
+    pub access: Option<Access>,
 }
 
 /// A chunk in a retrieve or rerank result, in result order.
@@ -374,6 +403,7 @@ macro_rules! into_trace_record {
 }
 
 into_trace_record! {
+    AuthorizeRecord => Authorize,
     ClassifyRecord => Classify,
     RetrieveRecord => Retrieve,
     RerankRecord => Rerank,

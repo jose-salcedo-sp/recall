@@ -35,17 +35,23 @@
 //! | Port | Production adapter |
 //! |---|---|
 //! | [`ingest::Source`] | [`ingest::markdown::Connector`], the markdown directory; a domain passes its own connectors to [`ingest::run_with`] |
+//! | [`access::Authorizer`] | [`access::rules::RulePolicy`], roles from `config/access.json`; asked once per run, enforced at every step |
+//! | [`access::Labeler`] | [`access::rules::LabelRules`], by document-id prefix; [`access::ConnectorLabels`] keeps the connector's |
 //! | [`llm::Embedder`] | Bedrock or an OpenAI-compatible server (Ollama, Workers AI), chosen by [`llm::embedder`] |
 //! | [`llm::ChatModel`] | Bedrock or an OpenAI-compatible server (Ollama, Workers AI), chosen by [`llm::explain_model`] |
 //! | [`llm::system_one::SystemOne`] | [`llm::system_one::HttpSystemOne`] (Kev, system-one.dev) or [`llm::workers_ai::WorkersAiSystemOne`], chosen by [`llm::system_one_client`] |
 //! | [`llm::judge::Judge`] | [`llm::judge::SystemOneJudge`], over whichever System One is configured, chosen by [`llm::judge()`]; every judged step asks through it |
 //! | [`retrieval::Retriever`] | [`retrieval::hybrid::HybridRetriever`], full-text and vector search in Postgres |
 //! | [`store::RunStore`] | [`store::runs::PgRunStore`] |
+//! | [`store::chunks::ChunkStore`] | [`store::chunks::PgChunkStore`]; [`ingest::ingest`] writes through it |
+//! | [`clock::Clock`], [`clock::RunIds`] | [`clock::SystemClock`], [`clock::UuidV7`]: trace, run and eval timestamps and run ids |
+//! | [`eval::files::Files`] | [`eval::files::LocalFiles`]: golden sets, baselines and results |
 //! | [`pipeline::report::Answerer`] | [`pipeline::answerer::PipelineAnswerer`] |
 //!
 //! # Where to start
 //!
 //! - [`domain`]: the shared types: questions, chunks, provenance, [`domain::Probability`].
+//! - [`access`]: who is asking and what they may read.
 //! - [`config`]: every pipeline tunable, loaded from `config/recall.json`.
 //! - [`ingest`] and [`store`]: chunking, versioning and storing the corpus.
 //! - [`retrieval`], [`llm`] and [`pipeline`]: answering a question.
@@ -54,6 +60,8 @@
 //!
 //! [`docs/design.md`]: https://github.com/jose-salcedo-sp/recall/blob/main/docs/design.md
 
+pub mod access;
+pub mod clock;
 pub mod config;
 pub mod domain;
 pub mod eval;

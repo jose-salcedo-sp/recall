@@ -5,57 +5,29 @@
     reason = "integration-test helpers; clippy exempts only #[test] functions"
 )]
 
-use std::sync::Mutex;
-
-use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use recall::{
+    access::{
+        ConnectorLabels,
+        fakes::FailingLabeler,
+        rules::{AccessConfig, LabelRules},
+    },
     domain::{ChunkDraft, Document, Labels, Sensitivity, SourceName},
     ingest::{
         EmbeddingModelMismatch, Source, Sources,
         fakes::{FailingSource, StaticSource},
         ingest, markdown,
     },
-    llm::{EmbedPurpose, Embedder, ModelRef, fakes::HashEmbedder},
-    store::chunks::{ChunkStore, Stored},
+    llm::{
+        Embedder, ModelRef,
+        fakes::{FailingModel, HashEmbedder, RecordingEmbedder},
+    },
+    store::{
+        chunks::{ChunkStore, PgChunkStore, Stored},
+        fakes::{FailingChunkStore, MemoryChunkStore},
+    },
 };
 use sqlx::PgPool;
-
-/// `HashEmbedder` vectors under a configurable model name, recording every batch it embeds.
-struct RecordingEmbedder {
-    model: ModelRef,
-    batches: Mutex<Vec<Vec<String>>>,
-}
-
-impl RecordingEmbedder {
-    fn new() -> Self {
-        Self::named(HashEmbedder.model())
-    }
-
-    fn named(model: ModelRef) -> Self {
-        Self {
-            model,
-            batches: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn batches(&self) -> Vec<Vec<String>> {
-        self.batches.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl Embedder for RecordingEmbedder {
-    fn model(&self) -> ModelRef {
-        self.model.clone()
-    }
-
-    async fn embed(&self, texts: &[String], purpose: EmbedPurpose) -> eros::Result<Vec<Vec<f32>>> {
-        assert_eq!(purpose, EmbedPurpose::Document);
-        self.batches.lock().unwrap().push(texts.to_vec());
-        HashEmbedder.embed(texts, purpose).await
-    }
-}
 
 fn updated(day: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 1, day, 0, 0, 0).unwrap()
@@ -133,8 +105,8 @@ fn stored(new_versions: u64, superseded: u64) -> Stored {
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn first_ingest_inserts_every_chunk(pool: PgPool) {
-    let store = ChunkStore::new(pool.clone());
-    let embedder = RecordingEmbedder::new();
+    let store = PgChunkStore::new(pool.clone());
+    let embedder = RecordingEmbedder::default();
 
     let result = store
         .store(&page(&[("a", "alpha"), ("b", "beta")]), &embedder)
@@ -163,8 +135,8 @@ async fn first_ingest_inserts_every_chunk(pool: PgPool) {
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn identical_reingest_writes_nothing(pool: PgPool) {
-    let store = ChunkStore::new(pool.clone());
-    let embedder = RecordingEmbedder::new();
+    let store = PgChunkStore::new(pool.clone());
+    let embedder = RecordingEmbedder::default();
     let doc = page(&[("a", "alpha"), ("b", "beta")]);
     store.store(&doc, &embedder).await.unwrap();
 
@@ -175,8 +147,8 @@ async fn identical_reingest_writes_nothing(pool: PgPool) {
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn changed_chunk_supersedes_its_old_version(pool: PgPool) {
-    let store = ChunkStore::new(pool.clone());
-    let embedder = RecordingEmbedder::new();
+    let store = PgChunkStore::new(pool.clone());
+    let embedder = RecordingEmbedder::default();
     store
         .store(&page(&[("a", "alpha"), ("b", "beta")]), &embedder)
         .await
@@ -202,8 +174,8 @@ async fn changed_chunk_supersedes_its_old_version(pool: PgPool) {
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn removed_chunk_is_superseded(pool: PgPool) {
-    let store = ChunkStore::new(pool.clone());
-    let embedder = RecordingEmbedder::new();
+    let store = PgChunkStore::new(pool.clone());
+    let embedder = RecordingEmbedder::default();
     store
         .store(&page(&[("a", "alpha"), ("b", "beta")]), &embedder)
         .await
@@ -224,8 +196,8 @@ async fn removed_chunk_is_superseded(pool: PgPool) {
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn reverted_chunk_revives_its_earlier_version_without_embedding(pool: PgPool) {
-    let store = ChunkStore::new(pool.clone());
-    let embedder = RecordingEmbedder::new();
+    let store = PgChunkStore::new(pool.clone());
+    let embedder = RecordingEmbedder::default();
     store
         .store(&page(&[("a", "alpha")]), &embedder)
         .await
@@ -251,8 +223,8 @@ async fn reverted_chunk_revives_its_earlier_version_without_embedding(pool: PgPo
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn reordered_chunks_keep_their_versions_and_take_new_ordinals(pool: PgPool) {
-    let store = ChunkStore::new(pool.clone());
-    let embedder = RecordingEmbedder::new();
+    let store = PgChunkStore::new(pool.clone());
+    let embedder = RecordingEmbedder::default();
     store
         .store(&page(&[("a", "alpha"), ("b", "beta")]), &embedder)
         .await
@@ -276,7 +248,7 @@ async fn reordered_chunks_keep_their_versions_and_take_new_ordinals(pool: PgPool
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn duplicate_locators_are_rejected(pool: PgPool) {
-    let store = ChunkStore::new(pool.clone());
+    let store = PgChunkStore::new(pool.clone());
     let doc = page(&[("a", "alpha"), ("a", "again")]);
 
     assert!(store.store(&doc, &HashEmbedder).await.is_err());
@@ -286,10 +258,26 @@ async fn duplicate_locators_are_rejected(pool: PgPool) {
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn embedding_model_mismatch_is_refused(pool: PgPool) {
     let sources = sources(vec![static_source(vec![page(&[("a", "alpha")])])]);
-    ingest(&pool, &HashEmbedder, &sources, false).await.unwrap();
+    ingest(
+        &PgChunkStore::new(pool.clone()),
+        &HashEmbedder,
+        &ConnectorLabels,
+        &sources,
+        false,
+    )
+    .await
+    .unwrap();
 
     let other = RecordingEmbedder::named(ModelRef::new("amazon.titan-embed-text-v2:0", "x"));
-    let error = ingest(&pool, &other, &sources, false).await.unwrap_err();
+    let error = ingest(
+        &PgChunkStore::new(pool.clone()),
+        &other,
+        &ConnectorLabels,
+        &sources,
+        false,
+    )
+    .await
+    .unwrap_err();
 
     assert!(error.to_string().contains("--reembed"));
     let mismatch = error
@@ -306,15 +294,27 @@ async fn reembed_replaces_every_chunk_with_the_configured_model(pool: PgPool) {
         page(&[("a", "alpha"), ("b", "beta")]),
         document(&markdown::NAME, "other.md", &[("c", "gamma")]),
     ]);
-    ingest(&pool, &HashEmbedder, &sources(vec![first]), false)
-        .await
-        .unwrap();
+    ingest(
+        &PgChunkStore::new(pool.clone()),
+        &HashEmbedder,
+        &ConnectorLabels,
+        &sources(vec![first]),
+        false,
+    )
+    .await
+    .unwrap();
 
     let subset = static_source(vec![page(&[("a", "alpha"), ("b", "beta")])]);
     let titan = RecordingEmbedder::named(ModelRef::new("titan", "1"));
-    let reports = ingest(&pool, &titan, &sources(vec![subset]), true)
-        .await
-        .unwrap();
+    let reports = ingest(
+        &PgChunkStore::new(pool.clone()),
+        &titan,
+        &ConnectorLabels,
+        &sources(vec![subset]),
+        true,
+    )
+    .await
+    .unwrap();
 
     assert!(reports[0].error.is_none());
     assert_eq!(reports[0].documents, 1);
@@ -327,7 +327,7 @@ async fn reembed_replaces_every_chunk_with_the_configured_model(pool: PgPool) {
         ]
     );
     assert_eq!(
-        ChunkStore::new(pool.clone())
+        PgChunkStore::new(pool.clone())
             .current_embedding_models()
             .await
             .unwrap(),
@@ -341,11 +341,27 @@ async fn snapshot_supersedes_documents_missing_from_fetch(pool: PgPool) {
         page(&[("a", "alpha")]),
         document(&markdown::NAME, "removed.md", &[("intro", "gone")]),
     ])]);
-    ingest(&pool, &HashEmbedder, &sources, false).await.unwrap();
+    ingest(
+        &PgChunkStore::new(pool.clone()),
+        &HashEmbedder,
+        &ConnectorLabels,
+        &sources,
+        false,
+    )
+    .await
+    .unwrap();
     assert_eq!(count(&pool, "superseded_at IS NULL").await, 2);
 
     let sources = self::sources(vec![static_source(vec![page(&[("a", "alpha")])])]);
-    let reports = ingest(&pool, &HashEmbedder, &sources, false).await.unwrap();
+    let reports = ingest(
+        &PgChunkStore::new(pool.clone()),
+        &HashEmbedder,
+        &ConnectorLabels,
+        &sources,
+        false,
+    )
+    .await
+    .unwrap();
     assert_eq!(reports[0].stored.superseded, 1);
     assert_eq!(count(&pool, "superseded_at IS NULL").await, 1);
     assert_eq!(
@@ -384,7 +400,15 @@ async fn ingest_refreshes_term_stats_from_current_chunks(pool: PgPool) {
         document(&markdown::NAME, "a.md", &[("role", "payroll payroll")]),
         document(&markdown::NAME, "b.md", &[("role", "role owners review")]),
     ])]);
-    ingest(&pool, &HashEmbedder, &sources, false).await.unwrap();
+    ingest(
+        &PgChunkStore::new(pool.clone()),
+        &HashEmbedder,
+        &ConnectorLabels,
+        &sources,
+        false,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         term_stats(&pool, &["role", "payrol", "owner"]).await,
         ((2, Some(3.5)), vec![Some(2), Some(1), Some(1)])
@@ -395,7 +419,15 @@ async fn ingest_refreshes_term_stats_from_current_chunks(pool: PgPool) {
         "b.md",
         &[("role", "role owners review")],
     )])]);
-    ingest(&pool, &HashEmbedder, &sources, false).await.unwrap();
+    ingest(
+        &PgChunkStore::new(pool.clone()),
+        &HashEmbedder,
+        &ConnectorLabels,
+        &sources,
+        false,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         term_stats(&pool, &["role", "payrol", "owner"]).await,
         ((1, Some(4.0)), vec![Some(1), None, Some(1)])
@@ -412,7 +444,15 @@ async fn one_failing_source_does_not_stop_the_others(pool: PgPool) {
         ]),
     ]);
 
-    let reports = ingest(&pool, &HashEmbedder, &sources, false).await.unwrap();
+    let reports = ingest(
+        &PgChunkStore::new(pool.clone()),
+        &HashEmbedder,
+        &ConnectorLabels,
+        &sources,
+        false,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(reports[0].source, wiki());
     assert!(format!("{:#?}", reports[0].error.as_ref().unwrap()).contains("source wiki is down"));
@@ -435,8 +475,9 @@ async fn a_source_named_outside_the_crate_supersedes_only_its_own_documents(pool
         )
     };
     ingest(
-        &pool,
+        &PgChunkStore::new(pool.clone()),
         &HashEmbedder,
+        &ConnectorLabels,
         &sources(vec![markdown(), wiki_pages(&["home", "roles"])]),
         false,
     )
@@ -444,8 +485,9 @@ async fn a_source_named_outside_the_crate_supersedes_only_its_own_documents(pool
     .unwrap();
 
     let reports = ingest(
-        &pool,
+        &PgChunkStore::new(pool.clone()),
         &HashEmbedder,
+        &ConnectorLabels,
         &sources(vec![wiki_pages(&["home"])]),
         false,
     )
@@ -476,9 +518,15 @@ async fn a_document_under_another_source_name_fails_its_source(pool: PgPool) {
         documents: vec![page(&[("a", "alpha")])],
     });
 
-    let reports = ingest(&pool, &HashEmbedder, &sources(vec![mislabelled]), false)
-        .await
-        .unwrap();
+    let reports = ingest(
+        &PgChunkStore::new(pool.clone()),
+        &HashEmbedder,
+        &ConnectorLabels,
+        &sources(vec![mislabelled]),
+        false,
+    )
+    .await
+    .unwrap();
 
     let error = format!("{:#?}", reports[0].error.as_ref().unwrap());
     assert!(
@@ -486,4 +534,156 @@ async fn a_document_under_another_source_name_fails_its_source(pool: PgPool) {
         "{error}"
     );
     assert_eq!(count(&pool, "true").await, 0);
+}
+
+/// `(id, acl, sensitivity)` of current chunks, ordered by id.
+async fn current_labels(pool: &PgPool) -> Vec<(String, Vec<String>, String)> {
+    sqlx::query_as(
+        "SELECT id, acl, sensitivity FROM chunks WHERE superseded_at IS NULL ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
+async fn label_rules_set_the_stored_labels_and_relabelling_makes_a_new_version(pool: PgPool) {
+    let documents = || {
+        static_source(vec![
+            document(&markdown::NAME, "hr/pay.md", &[("bands", "Salary bands.")]),
+            document(&markdown::NAME, "eng/roles.md", &[("intro", "Roles.")]),
+        ])
+    };
+    let rules = LabelRules::new(
+        AccessConfig::parse(
+            r#"{ "roles": {}, "labels": [
+                { "documents": "markdown:hr/", "acl": ["hr"], "sensitivity": "confidential" }
+            ] }"#,
+        )
+        .unwrap()
+        .labels(),
+    );
+    ingest(
+        &PgChunkStore::new(pool.clone()),
+        &HashEmbedder,
+        &ConnectorLabels,
+        &sources(vec![documents()]),
+        false,
+    )
+    .await
+    .unwrap();
+
+    let reports = ingest(
+        &PgChunkStore::new(pool.clone()),
+        &HashEmbedder,
+        &rules,
+        &sources(vec![documents()]),
+        false,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(reports[0].stored, stored(1, 1));
+    assert_eq!(
+        current_labels(&pool).await,
+        [
+            (
+                "markdown:eng/roles.md#intro".into(),
+                vec!["group:arm".into()],
+                "internal".into()
+            ),
+            (
+                "markdown:hr/pay.md#bands".into(),
+                vec!["hr".into()],
+                "confidential".into()
+            ),
+        ]
+    );
+}
+
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
+async fn a_document_that_cannot_be_labelled_is_not_stored(pool: PgPool) {
+    let sources = sources(vec![static_source(vec![page(&[("a", "alpha")])])]);
+
+    let reports = ingest(
+        &PgChunkStore::new(pool.clone()),
+        &HashEmbedder,
+        &FailingLabeler,
+        &sources,
+        false,
+    )
+    .await
+    .unwrap();
+
+    let error = reports[0].error.as_ref().expect("the source failed");
+    assert!(
+        format!("{error:#?}").contains("labels for markdown:roles.md"),
+        "{error:#?}"
+    );
+    assert_eq!(count(&pool, "true").await, 0);
+}
+
+#[tokio::test]
+async fn a_failing_embedder_fails_only_its_source() {
+    let store = MemoryChunkStore::default();
+    let sources = sources(vec![static_source(vec![page(&[("a", "alpha")])])]);
+
+    let reports = ingest(&store, &FailingModel, &ConnectorLabels, &sources, false)
+        .await
+        .unwrap();
+
+    let error = reports[0].error.as_ref().expect("the source failed");
+    assert!(
+        format!("{error:#?}").contains("connection refused"),
+        "{error:#?}"
+    );
+    assert!(store.current().is_empty());
+}
+
+#[tokio::test]
+async fn a_store_that_cannot_answer_fails_ingestion_before_any_source() {
+    let sources = sources(vec![static_source(vec![page(&[("a", "alpha")])])]);
+
+    let error = ingest(
+        &FailingChunkStore,
+        &HashEmbedder,
+        &ConnectorLabels,
+        &sources,
+        false,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("the chunk store failed"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn ingestion_into_memory_is_readable_by_a_retriever() {
+    use recall::{
+        access::fakes::unrestricted,
+        retrieval::{Retriever, fakes::KeywordRetriever},
+    };
+    let store = MemoryChunkStore::default();
+    let mut roles = page(&[
+        ("roles", "ROLE_USERS maps users to roles."),
+        ("lunch", "Lunch is at noon."),
+    ]);
+    roles.labels.acl.clear();
+    let sources = sources(vec![static_source(vec![roles])]);
+    ingest(&store, &HashEmbedder, &ConnectorLabels, &sources, false)
+        .await
+        .unwrap();
+
+    let retriever = KeywordRetriever {
+        chunks: store.current(),
+    };
+    let hits = retriever
+        .retrieve("Which table maps users to roles?", unrestricted().chunks())
+        .await
+        .unwrap();
+
+    assert_eq!(hits[0].chunk.id.0, "markdown:roles.md#roles");
 }

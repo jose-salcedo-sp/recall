@@ -305,6 +305,19 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn a_system_one_that_cannot_answer_fails_the_judgement() {
+        let judge = SystemOneJudge::new(Arc::new(crate::llm::fakes::FailingModel));
+        let request = JudgeRequest {
+            text: "text".into(),
+            questions: vec![JudgeQuestion::YesNo {
+                instructions: "?".into(),
+            }],
+        };
+        let error = judge.judge(request).await.unwrap_err();
+        assert!(error.to_string().contains("connection refused"), "{error}");
+    }
+
     #[test]
     fn a_choice_missing_an_option_reads_as_missing() {
         let question = JudgeQuestion::OneOf {

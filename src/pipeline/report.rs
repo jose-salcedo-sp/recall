@@ -3,7 +3,10 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{CategoryKind, ChunkRef, Cited, Probability, Question, RunId};
+use crate::{
+    access::Principal,
+    domain::{CategoryKind, ChunkRef, Cited, Probability, Question, RunId},
+};
 
 use super::{DeclineReason, trace::Trace};
 
@@ -110,11 +113,13 @@ pub struct Citation {
     pub excerpt: String,
 }
 
-/// Runs the whole pipeline for one question. Never errors: failures are an `Outcome`.
+/// Runs the whole pipeline for one question, on behalf of the principal who asked it. Never errors: failures are an
+/// `Outcome`.
 #[async_trait]
 pub trait Answerer: Send + Sync {
-    /// Answers, declines or fails, always with a report to persist.
-    async fn answer(&self, question: Question) -> RunReport;
+    /// Answers, declines or fails, always with a report to persist. The answer, its citations and its decline
+    /// sources only come from chunks `principal` may read.
+    async fn answer(&self, principal: &Principal, question: Question) -> RunReport;
 }
 
 /// Returns the same outcome for every question, under a fresh run id.
@@ -127,7 +132,7 @@ pub struct CannedAnswerer {
 
 #[async_trait]
 impl Answerer for CannedAnswerer {
-    async fn answer(&self, question: Question) -> RunReport {
+    async fn answer(&self, _principal: &Principal, question: Question) -> RunReport {
         RunReport {
             id: RunId::new(),
             question,

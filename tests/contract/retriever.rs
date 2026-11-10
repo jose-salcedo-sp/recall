@@ -1,13 +1,19 @@
 //! Retrieval does not judge relevance: a non-blank query over a non-empty corpus returns its nearest chunks, and
-//! Rerank decides which of them answer the question.
+//! Rerank decides which of them answer the question. It does judge access: only chunks the scope admits come back,
+//! as matches or as context.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use recall::{
+    access::{ChunkGrant, ChunkScope, Role, TenantScope, fakes::unrestricted},
     domain::{Chunk, ChunkId, ChunkVersion, DocumentId, Labels, Sensitivity},
     ingest::markdown,
     retrieval::Retriever,
 };
+
+fn everything() -> ChunkScope {
+    unrestricted().chunks().clone()
+}
 
 const QUESTION: &str = "Which table maps users to roles?";
 
@@ -59,7 +65,12 @@ pub async fn an_empty_corpus_returns_nothing(
 ) -> eros::Result<()> {
     let retriever = make(Vec::new()).await;
 
-    assert!(retriever.retrieve(QUESTION).await?.is_empty());
+    assert!(
+        retriever
+            .retrieve(QUESTION, &everything())
+            .await?
+            .is_empty()
+    );
     Ok(())
 }
 
@@ -68,8 +79,8 @@ pub async fn a_blank_query_returns_nothing(
 ) -> eros::Result<()> {
     let retriever = make(corpus()).await;
 
-    assert!(retriever.retrieve("").await?.is_empty());
-    assert!(retriever.retrieve(" \n\t").await?.is_empty());
+    assert!(retriever.retrieve("", &everything()).await?.is_empty());
+    assert!(retriever.retrieve(" \n\t", &everything()).await?.is_empty());
     Ok(())
 }
 
@@ -80,7 +91,7 @@ pub async fn an_unrelated_query_still_returns_the_nearest_chunks(
 
     for query in ["Cafeteria opening hours?", "???"] {
         let found: Vec<_> = retriever
-            .retrieve(query)
+            .retrieve(query, &everything())
             .await?
             .into_iter()
             .map(|hit| hit.chunk)
@@ -95,7 +106,7 @@ pub async fn the_best_match_ranks_first(
 ) -> eros::Result<()> {
     let retriever = make(corpus()).await;
 
-    let hits = retriever.retrieve(QUESTION).await?;
+    let hits = retriever.retrieve(QUESTION, &everything()).await?;
 
     assert_eq!(hits[0].chunk.id, role_users().id);
     Ok(())
@@ -106,7 +117,7 @@ pub async fn hits_are_best_first_without_duplicates(
 ) -> eros::Result<()> {
     let retriever = make(corpus()).await;
 
-    let hits = retriever.retrieve(QUESTION).await?;
+    let hits = retriever.retrieve(QUESTION, &everything()).await?;
 
     assert!(
         hits.windows(2)
@@ -125,7 +136,9 @@ pub async fn equal_matches_rank_by_chunk_id(
     let (later, earlier) = (chunk("pfcg-b", text), chunk("pfcg-a", text));
     let retriever = make(vec![later.clone(), earlier.clone()]).await;
 
-    let hits = retriever.retrieve("ROLEADM maintains roles").await?;
+    let hits = retriever
+        .retrieve("ROLEADM maintains roles", &everything())
+        .await?;
 
     let order: Vec<_> = hits.iter().map(|hit| &hit.chunk.id).collect();
     assert_eq!(order, [&earlier.id, &later.id]);
@@ -137,7 +150,7 @@ pub async fn chunks_come_back_as_stored(
 ) -> eros::Result<()> {
     let retriever = make(corpus()).await;
 
-    let hits = retriever.retrieve(QUESTION).await?;
+    let hits = retriever.retrieve(QUESTION, &everything()).await?;
 
     for hit in &hits {
         let stored = corpus()
@@ -146,6 +159,124 @@ pub async fn chunks_come_back_as_stored(
             .expect("every hit is from the corpus");
         assert_eq!(hit.chunk, stored);
         assert_eq!(hit.context_for, None);
+    }
+    Ok(())
+}
+
+fn labelled(document: &str, locator: &str, text: &str, labels: Labels) -> Chunk {
+    let document_id = DocumentId::new(&markdown::NAME, &format!("{document}.md"));
+    Chunk {
+        id: ChunkId::new(&document_id, locator),
+        labels,
+        document_id,
+        title: format!("{document} notes"),
+        ..chunk(locator, text)
+    }
+}
+
+fn labels(sensitivity: Sensitivity, tenant: Option<&str>, acl: &[&str]) -> Labels {
+    Labels {
+        acl: acl.iter().map(|entry| (*entry).to_owned()).collect(),
+        tenant: tenant.map(str::to_owned),
+        sensitivity,
+    }
+}
+
+/// Every chunk is about the question, so only the scope decides which come back. `roles` has an internal section
+/// followed by a confidential one, which a retriever that adds neighbouring sections would add as context.
+fn labelled_corpus() -> Vec<Chunk> {
+    let about = "ROLE_USERS maps users to roles.";
+    vec![
+        labelled(
+            "roles",
+            "public",
+            about,
+            labels(Sensitivity::Internal, None, &[]),
+        ),
+        labelled(
+            "roles",
+            "secret",
+            "ROLE_USERS overrides: ROLE_ROOT maps users to every role.",
+            labels(Sensitivity::Confidential, None, &[]),
+        ),
+        labelled(
+            "acme",
+            "plant",
+            about,
+            labels(Sensitivity::Internal, Some("acme"), &[]),
+        ),
+        labelled(
+            "hr",
+            "pay",
+            about,
+            labels(Sensitivity::Public, None, &["hr"]),
+        ),
+        labelled("faq", "open", about, labels(Sensitivity::Public, None, &[])),
+    ]
+}
+
+fn scope(members: &[&str], clearance: Sensitivity, tenants: TenantScope) -> ChunkScope {
+    ChunkScope::new(
+        members.iter().copied(),
+        [ChunkGrant::new(
+            Role::new("reader").unwrap(),
+            clearance,
+            tenants,
+        )],
+    )
+}
+
+fn scopes() -> Vec<(&'static str, ChunkScope)> {
+    vec![
+        ("none", ChunkScope::none()),
+        (
+            "internal",
+            scope(&["eve"], Sensitivity::Internal, TenantScope::default()),
+        ),
+        (
+            "public",
+            scope(&["eve"], Sensitivity::Public, TenantScope::default()),
+        ),
+        (
+            "acme",
+            scope(
+                &["ana"],
+                Sensitivity::Internal,
+                TenantScope::Only(BTreeSet::from(["acme".to_owned()])),
+            ),
+        ),
+        (
+            "hr",
+            scope(&["eve", "hr"], Sensitivity::Public, TenantScope::default()),
+        ),
+        ("everything", everything()),
+    ]
+}
+
+/// Exactly the readable chunks come back, as matches or as context: a chunk outside the scope is not returned, and
+/// none takes the place of a readable one.
+pub async fn only_chunks_the_scope_admits_come_back(
+    make: impl AsyncFnOnce(Vec<Chunk>) -> Box<dyn Retriever>,
+) -> eros::Result<()> {
+    let corpus = labelled_corpus();
+    let retriever = make(corpus.clone()).await;
+
+    for (name, scope) in scopes() {
+        let hits = retriever.retrieve(QUESTION, &scope).await?;
+        let found: HashSet<_> = hits.iter().map(|hit| hit.chunk.id.clone()).collect();
+        let readable: HashSet<_> = corpus
+            .iter()
+            .filter(|chunk| scope.admits(&chunk.labels))
+            .map(|chunk| chunk.id.clone())
+            .collect();
+        assert_eq!(found, readable, "{name}");
+        for hit in &hits {
+            assert!(
+                scope.admits(&hit.chunk.labels),
+                "{name}: {}",
+                hit.chunk.id.0
+            );
+        }
     }
     Ok(())
 }
@@ -160,6 +291,7 @@ macro_rules! retriever_contract {
             hits_are_best_first_without_duplicates,
             equal_matches_rank_by_chunk_id,
             chunks_come_back_as_stored,
+            only_chunks_the_scope_admits_come_back,
         );
     };
     (@cases #[$attr:meta] $args:tt => $make:expr; $($case:ident,)*) => {
@@ -200,8 +332,11 @@ mod hybrid {
     use sqlx::PgPool;
 
     async fn seeded(pool: PgPool, chunks: Vec<Chunk>) -> Box<dyn Retriever> {
+        let mut ordinals = std::collections::HashMap::new();
         for chunk in &chunks {
-            insert(&pool, chunk).await;
+            let ordinal: &mut i32 = ordinals.entry(chunk.document_id.clone()).or_default();
+            insert(&pool, chunk, *ordinal).await;
+            *ordinal += 1;
         }
         Box::new(HybridRetriever::new(
             pool,
@@ -210,10 +345,10 @@ mod hybrid {
         ))
     }
 
-    async fn insert(pool: &PgPool, chunk: &Chunk) {
+    async fn insert(pool: &PgPool, chunk: &Chunk, ordinal: i32) {
         sqlx::query(
             "INSERT INTO documents (id, source, external_id, title, url, source_updated_at)
-             VALUES ($1, $2, $3, $4, $5, now())",
+             VALUES ($1, $2, $3, $4, $5, now()) ON CONFLICT (id) DO NOTHING",
         )
         .bind(&chunk.document_id.0)
         .bind(chunk.source.as_str())
@@ -232,7 +367,7 @@ mod hybrid {
         sqlx::query(
             "INSERT INTO chunks (id, version, document_id, ordinal, heading, url, text, authoritative, acl,
                                  tenant, sensitivity, embedding, embedding_model, embedding_model_version)
-             VALUES ($1, $2, $3, 0, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+             VALUES ($1, $2, $3, $14, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
         )
         .bind(&chunk.id.0)
         .bind(&chunk.version.0)
@@ -247,6 +382,7 @@ mod hybrid {
         .bind(Vector::from(embedding))
         .bind(&model.id)
         .bind(&model.version)
+        .bind(ordinal)
         .execute(pool)
         .await
         .unwrap();

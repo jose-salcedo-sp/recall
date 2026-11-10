@@ -1,6 +1,6 @@
-//! Batch ingestion (`recall ingest`): a [`Source`] returns a full snapshot of documents; [`ingest`] versions, embeds
-//! and stores their chunks through [`crate::store::chunks::ChunkStore`], and supersedes what the snapshot no longer
-//! contains. Ingestion never reads or writes pipeline runs.
+//! Batch ingestion (`recall ingest`): a [`Source`] returns a full snapshot of documents; [`ingest`] labels them through
+//! the [`Labeler`] port, versions, embeds and stores their chunks through the [`ChunkStore`] port, and
+//! supersedes what the snapshot no longer contains. Ingestion never reads or writes pipeline runs.
 //!
 //! A connector is any [`Source`]: it names itself with a [`SourceName`], and nothing in the core or the schema lists
 //! the names. [`markdown`] is the shipped connector; a domain application passes its own to [`run_with`] or
@@ -14,15 +14,18 @@ pub mod markdown;
 use std::{collections::HashSet, fmt};
 
 use async_trait::async_trait;
-use eros::{IntoUnion, ReshapeUnion};
-use sqlx::PgPool;
+use eros::{Context, IntoUnion, ReshapeUnion};
 
 use crate::{
+    access::{
+        Labeler,
+        rules::{AccessArgs, LabelRules},
+    },
     domain::{Document, SourceName},
     llm::{self, Embedder, ModelRef, backend::EmbedArgs},
     store::{
         self, DbArgs,
-        chunks::{ChunkStore, Stored},
+        chunks::{ChunkStore, ChunkStoreFailed, PgChunkStore, Stored},
     },
 };
 
@@ -97,6 +100,9 @@ pub struct IngestArgs {
     /// Re-ingest every source unit from scratch with the configured embedding model, replacing chunks embedded with any other model.
     #[arg(long)]
     pub reembed: bool,
+    /// The access policy, whose label rules set each document's labels.
+    #[command(flatten)]
+    pub access: AccessArgs,
 }
 
 /// `recall ingest` options.
@@ -127,15 +133,16 @@ pub async fn run(args: Args) -> eros::Result<()> {
 ///
 /// # Errors
 ///
-/// When `sources` is empty, the database or embedder cannot be set up, [`ingest`] fails, or any source's report
-/// carries an error.
+/// When `sources` is empty, the access policy does not load, the database or embedder cannot be set up, [`ingest`]
+/// fails, or any source's report carries an error.
 #[eros::context("ingesting sources {:?}", sources)]
 pub async fn run_with(args: &IngestArgs, sources: &Sources) -> eros::Result<()> {
     eros::ensure!(!sources.is_empty(), "no sources are configured");
-    let pool = store::connect(&args.db).await?;
+    let labeler = LabelRules::new(args.access.load()?.labels());
+    let store = PgChunkStore::new(store::connect(&args.db).await?);
     let embedder = llm::embedder(&args.embed).await?;
 
-    let reports = ingest(&pool, embedder.as_ref(), sources, args.reembed).await?;
+    let reports = ingest(&store, embedder.as_ref(), &labeler, sources, args.reembed).await?;
     let failed: Vec<&str> = reports
         .iter()
         .filter(|r| r.error.is_some())
@@ -176,7 +183,8 @@ pub struct SourceReport {
 }
 
 /// Ingests every source independently: a failing source does not stop the others; its error is in its report.
-/// Each source's snapshot supersedes only documents stored under its own name.
+/// Each source's snapshot supersedes only documents stored under its own name. Each document is stored with the
+/// labels `labeler` gives it; a document it cannot label is not stored, and its source fails.
 ///
 /// With `reembed`, and only when every source succeeded, chunks embedded with any other model are superseded too.
 /// Last, the full-text statistics that BM25 ranking reads are recomputed from the current chunks, in their own
@@ -186,14 +194,14 @@ pub struct SourceReport {
 /// # Errors
 ///
 /// [`EmbeddingModelMismatch`], before touching any source, when current chunks use another model and `reembed` is
-/// off; [`sqlx::Error`] when the model check, the final supersede, or the statistics refresh fails.
+/// off; [`ChunkStoreFailed`] when the model check, the final supersede, or the statistics refresh fails.
 pub async fn ingest(
-    pool: &PgPool,
+    store: &dyn ChunkStore,
     embedder: &dyn Embedder,
+    labeler: &dyn Labeler,
     sources: &Sources,
     reembed: bool,
-) -> eros::Result<Vec<SourceReport>, (EmbeddingModelMismatch, sqlx::Error)> {
-    let store = ChunkStore::new(pool.clone());
+) -> eros::Result<Vec<SourceReport>, (EmbeddingModelMismatch, ChunkStoreFailed)> {
     let model = embedder.model();
 
     let current = store.current_embedding_models().await.widen()?;
@@ -214,7 +222,7 @@ pub async fn ingest(
             stored: Stored::default(),
             error: None,
         };
-        let result = ingest_source(&store, embedder, source, &mut report).await;
+        let result = ingest_source(store, embedder, labeler, source, &mut report).await;
         match result {
             Ok(()) => tracing::info!(
                 source = name.as_str(),
@@ -254,21 +262,27 @@ pub async fn ingest(
 
 #[eros::context("ingesting source {}", source.name())]
 async fn ingest_source(
-    store: &ChunkStore,
+    store: &dyn ChunkStore,
     embedder: &dyn Embedder,
+    labeler: &dyn Labeler,
     source: &dyn Source,
     report: &mut SourceReport,
 ) -> eros::Result<()> {
     let name = source.name();
     let documents = source.fetch_all().await?;
     let mut seen = Vec::with_capacity(documents.len());
-    for document in &documents {
+    for document in documents {
         eros::ensure!(
             document.source == *name,
             "{name} source returned document {}",
             document.id().0
         );
-        report.stored += store.store(document, embedder).await?;
+        let labels = labeler
+            .label(&document)
+            .await
+            .with_context(|| format!("labelling document {}", document.id().0))?;
+        let document = Document { labels, ..document };
+        report.stored += store.store(&document, embedder).await?;
         report.documents += 1;
         seen.push(document.id());
     }

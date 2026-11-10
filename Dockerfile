@@ -20,6 +20,8 @@ RUN apt-get update \
 COPY --from=build /usr/local/bin/recall /usr/local/bin/recall
 COPY config/recall.json /etc/recall/recall.json
 ENV RECALL_CONFIG=/etc/recall/recall.json
+COPY config/access.json /etc/recall/access.json
+ENV RECALL_ACCESS=/etc/recall/access.json
 # Numeric, so Kubernetes `runAsNonRoot` can verify it.
 USER 10001
 ENV RECALL_BIND=0.0.0.0:8080

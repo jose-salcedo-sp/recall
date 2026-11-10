@@ -10,17 +10,34 @@ mod seed;
 use std::sync::Arc;
 
 use recall::{
-    domain::{ChunkId, SourceName},
+    access::{ChunkGrant, ChunkScope, Role, TenantScope},
+    domain::{ChunkId, Sensitivity, SourceName},
     ingest::markdown,
     llm::{Embedder, ModelRef, fakes::HashEmbedder},
     retrieval::{
         Relevance, Retrieved, Retriever,
         hybrid::{EmbeddingModelMismatch, ExpansionConfig, HybridConfig, HybridRetriever},
     },
-    store::chunks::ChunkStore,
+    store::chunks::{ChunkStore, PgChunkStore},
 };
-use seed::{SeedChunk, document, embed, recall_at_k, similar_to};
+use seed::{ACL_GROUP, SeedChunk, document, embed, recall_at_k, similar_to};
 use sqlx::{PgPool, postgres::PgPoolOptions};
+
+fn scope(clearance: Sensitivity) -> ChunkScope {
+    ChunkScope::new(
+        [ACL_GROUP],
+        [ChunkGrant::new(
+            Role::new("reader").unwrap(),
+            clearance,
+            TenantScope::Any,
+        )],
+    )
+}
+
+/// Every seeded chunk.
+fn everything() -> ChunkScope {
+    scope(Sensitivity::Confidential)
+}
 
 fn retriever(pool: &PgPool, config: HybridConfig) -> HybridRetriever {
     HybridRetriever::new(pool.clone(), Arc::new(HashEmbedder), config)
@@ -76,20 +93,26 @@ async fn identifier_queries_match_exactly_via_full_text(pool: PgPool) {
     let retriever = retriever(&pool, full_text_only());
 
     // English stems both chunks to `opcode`; only the exact token side tells them apart.
-    let results = retriever.retrieve("A_OPCODE").await.unwrap();
+    let results = retriever.retrieve("A_OPCODE", &everything()).await.unwrap();
     assert_eq!(results[0].chunk.id, a_opcode);
     assert!(position(&results, &opcode_prose) > Some(0));
 
-    let results = retriever.retrieve("Who reads ROLE_USERS?").await.unwrap();
+    let results = retriever
+        .retrieve("Who reads ROLE_USERS?", &everything())
+        .await
+        .unwrap();
     assert_eq!(results[0].chunk.id, role_users);
     assert!(position(&results, &role_users_t) > Some(0));
 
-    let results = retriever.retrieve("what is op24").await.unwrap();
+    let results = retriever
+        .retrieve("what is op24", &everything())
+        .await
+        .unwrap();
     assert_eq!(ids(&results), [op24.0.as_str()]);
     assert_eq!(position(&results, &op24n), None);
 
     let results = retriever
-        .retrieve("Which table is _ROLE_USERS_?")
+        .retrieve("Which table is _ROLE_USERS_?", &everything())
         .await
         .unwrap();
     assert_eq!(results[0].chunk.id, role_users);
@@ -108,9 +131,12 @@ async fn identifiers_in_headings_and_markdown_are_indexed(pool: PgPool) {
         .await;
     let retriever = retriever(&pool, full_text_only());
 
-    let results = retriever.retrieve("ROLE_1251").await.unwrap();
+    let results = retriever
+        .retrieve("ROLE_1251", &everything())
+        .await
+        .unwrap();
     assert_eq!(ids(&results), [heading.0.as_str()]);
-    let results = retriever.retrieve("usobt_c").await.unwrap();
+    let results = retriever.retrieve("usobt_c", &everything()).await.unwrap();
     assert_eq!(ids(&results), [italic.0.as_str()]);
 }
 
@@ -129,13 +155,13 @@ async fn a_rare_term_outranks_repeats_of_a_common_one(pool: PgPool) {
     for i in 0..5 {
         chunk(&format!("note-{i}.md"), &format!("Note {i} on the role.")).await;
     }
-    ChunkStore::new(pool.clone())
+    PgChunkStore::new(pool.clone())
         .refresh_term_stats()
         .await
         .unwrap();
 
     let results = retriever(&pool, full_text_only())
-        .retrieve("Which role handles payroll?")
+        .retrieve("Which role handles payroll?", &everything())
         .await
         .unwrap();
     assert_eq!(results[0].chunk.id, rare);
@@ -150,7 +176,7 @@ async fn tsquery_syntax_in_a_question_is_plain_text(pool: PgPool) {
         .insert(&pool)
         .await;
     let results = retriever(&pool, full_text_only())
-        .retrieve(r"O'Brien & !(built-in):* | 'roles\")
+        .retrieve(r"O'Brien & !(built-in):* | 'roles\", &everything())
         .await
         .unwrap();
     assert_eq!(ids(&results), [id.0.as_str()]);
@@ -179,13 +205,13 @@ async fn prose_query_hits_via_vectors(pool: PgPool) {
     }
 
     let full_text = retriever(&pool, full_text_only())
-        .retrieve(question)
+        .retrieve(question, &everything())
         .await
         .unwrap();
     assert_eq!(position(&full_text, &leavers), None);
 
     let hybrid = retriever(&pool, HybridConfig::default())
-        .retrieve(question)
+        .retrieve(question, &everything())
         .await
         .unwrap();
     assert_eq!(hybrid[0].chunk.id, leavers);
@@ -217,7 +243,7 @@ async fn fusion_orders_by_reciprocal_rank(pool: PgPool) {
     }
 
     let results = retriever(&pool, HybridConfig::default())
-        .retrieve(query)
+        .retrieve(query, &everything())
         .await
         .unwrap();
 
@@ -273,7 +299,7 @@ async fn superseded_versions_are_never_returned(pool: PgPool) {
         .await;
 
     let results = retriever(&pool, HybridConfig::default())
-        .retrieve("A_OPCODE")
+        .retrieve("A_OPCODE", &everything())
         .await
         .unwrap();
 
@@ -317,7 +343,7 @@ async fn hits_expand_to_neighbouring_sections(pool: PgPool) {
         .await;
 
     let results = retriever(&pool, full_text_only())
-        .retrieve("OP24")
+        .retrieve("OP24", &everything())
         .await
         .unwrap();
 
@@ -360,7 +386,7 @@ async fn expansion_dedupes_and_caps_per_page(pool: PgPool) {
 
     // Both hits are kept; the better hit's neighbours fill the page up to the cap of three.
     let results = retriever(&pool, full_text_only())
-        .retrieve("A_OPCODE")
+        .retrieve("A_OPCODE", &everything())
         .await
         .unwrap();
     assert_eq!(
@@ -372,7 +398,10 @@ async fn expansion_dedupes_and_caps_per_page(pool: PgPool) {
         max_chunks_per_document: 5,
         ..full_text_only()
     };
-    let results = retriever(&pool, roomy).retrieve("A_OPCODE").await.unwrap();
+    let results = retriever(&pool, roomy)
+        .retrieve("A_OPCODE", &everything())
+        .await
+        .unwrap();
     assert_eq!(
         ids(&results),
         [&sections[2], &sections[1], &sections[3], &sections[4]].map(|id| id.0.as_str())
@@ -395,7 +424,7 @@ async fn adjacent_hits_expand_and_single_section_files_stand_alone(pool: PgPool)
         .await;
 
     let results = retriever(&pool, full_text_only())
-        .retrieve("OP24")
+        .retrieve("OP24", &everything())
         .await
         .unwrap();
     let mut found = ids(&results);
@@ -431,7 +460,7 @@ async fn chunks_are_fully_populated(pool: PgPool) {
     .await;
 
     let results = retriever(&pool, HybridConfig::default())
-        .retrieve("Z_ARM_ADMIN")
+        .retrieve("Z_ARM_ADMIN", &everything())
         .await
         .unwrap();
 
@@ -460,13 +489,23 @@ async fn mismatched_embedding_model_is_refused(pool: PgPool) {
         .insert(&pool)
         .await;
     let retriever = retriever(&pool, HybridConfig::default());
-    assert_eq!(retriever.retrieve("ROLE_USERS").await.unwrap().len(), 1);
+    assert_eq!(
+        retriever
+            .retrieve("ROLE_USERS", &everything())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 
     SeedChunk::new(&doc, "comment", 2, "ROLE_USERS re-embedded with Titan.")
         .model(titan.clone())
         .insert(&pool)
         .await;
-    let error = retriever.retrieve("ROLE_USERS").await.unwrap_err();
+    let error = retriever
+        .retrieve("ROLE_USERS", &everything())
+        .await
+        .unwrap_err();
     let mismatch = error
         .downcast_inner_ref::<EmbeddingModelMismatch>()
         .expect("a model mismatch");
@@ -481,12 +520,24 @@ async fn mismatched_embedding_model_is_refused(pool: PgPool) {
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn empty_corpus_and_blank_query_return_nothing(pool: PgPool) {
     let retriever = retriever(&pool, HybridConfig::default());
-    assert!(retriever.retrieve("ROLE_USERS").await.unwrap().is_empty());
+    assert!(
+        retriever
+            .retrieve("ROLE_USERS", &everything())
+            .await
+            .unwrap()
+            .is_empty()
+    );
     let doc = document(&pool, &markdown::NAME, "note-13.md", "Roles").await;
     SeedChunk::new(&doc, "body", 0, "ROLE_USERS")
         .insert(&pool)
         .await;
-    assert!(retriever.retrieve("  ").await.unwrap().is_empty());
+    assert!(
+        retriever
+            .retrieve("  ", &everything())
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
@@ -520,7 +571,7 @@ async fn vector_side_uses_hnsw_beyond_its_default_ef_search(pool: PgPool) {
         ..HybridConfig::default()
     };
     let results = retriever(&index_only, config)
-        .retrieve("payroll")
+        .retrieve("payroll", &everything())
         .await
         .unwrap();
     assert_eq!(results.len(), 50);
@@ -582,14 +633,17 @@ async fn recall_at_k_on_fixture_set(pool: PgPool) {
 
     let mut recall = Vec::new();
     for (question, relevant) in golden {
-        let results = retriever.retrieve(question).await.unwrap();
+        let results = retriever.retrieve(question, &everything()).await.unwrap();
         let relevant: Vec<ChunkId> = relevant.iter().map(|id| (*id).clone()).collect();
         recall.push(recall_at_k(&results, &relevant, 5));
     }
     let mean = recall.iter().sum::<f64>() / recall.len() as f64;
     assert_eq!(mean, 1.0, "{recall:?}");
 
-    let results = retriever.retrieve("Does OP24 feed ROLEADM?").await.unwrap();
+    let results = retriever
+        .retrieve("Does OP24 feed ROLEADM?", &everything())
+        .await
+        .unwrap();
     assert_eq!(
         recall_at_k(&results, std::slice::from_ref(&proposals), 1),
         1.0
@@ -621,7 +675,7 @@ async fn a_glossary_synonym_retrieves_its_target(pool: PgPool) {
     let question = "Is a fix on the NEW screen enough?";
 
     let plain = retriever(&pool, full_text_only())
-        .retrieve(question)
+        .retrieve(question, &everything())
         .await
         .unwrap();
     assert_eq!(position(&plain, &target), None);
@@ -634,7 +688,7 @@ async fn a_glossary_synonym_retrieves_its_target(pool: PgPool) {
         ..full_text_only()
     };
     let expanded = retriever(&pool, config)
-        .retrieve_expanded(question)
+        .retrieve_expanded(question, &everything())
         .await
         .unwrap();
     assert!(position(&expanded.hits, &target).is_some());
@@ -645,5 +699,130 @@ async fn a_glossary_synonym_retrieves_its_target(pool: PgPool) {
     assert_eq!(
         matches[0].terms,
         ["legacy", "generation", "current", "screens", "earlier"]
+    );
+}
+
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
+async fn a_glossary_the_asker_may_not_read_expands_nothing(pool: PgPool) {
+    let lexicon = document(&pool, &markdown::NAME, "LEXICON.md", "Lexicon").await;
+    SeedChunk::new(
+        &lexicon,
+        "generations",
+        0,
+        "| Internal | Say instead |\n|---|---|\n| Legacy / NEW generation | the earlier screens |",
+    )
+    .sensitivity(Sensitivity::Confidential)
+    .insert(&pool)
+    .await;
+    let config = HybridConfig {
+        expansion: ExpansionConfig {
+            documents: vec![lexicon],
+            max_terms: 16,
+        },
+        ..full_text_only()
+    };
+    let retriever = retriever(&pool, config);
+    let question = "Only the NEW screen?";
+
+    let denied = retriever
+        .retrieve_expanded(question, &scope(Sensitivity::Internal))
+        .await
+        .unwrap();
+    assert!(denied.expansion.is_empty());
+    assert!(denied.hits.is_empty());
+
+    let allowed = retriever
+        .retrieve_expanded(question, &everything())
+        .await
+        .unwrap();
+    assert_eq!(allowed.expansion.matches().len(), 1);
+}
+
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
+async fn a_neighbour_the_asker_may_not_read_is_not_added_as_context(pool: PgPool) {
+    let doc = document(&pool, &markdown::NAME, "roles.md", "Roles").await;
+    let open = SeedChunk::new(&doc, "open", 0, "ROLE_USERS maps users to roles.")
+        .insert(&pool)
+        .await;
+    let secret = SeedChunk::new(&doc, "secret", 1, "Salary bands per grade.")
+        .sensitivity(Sensitivity::Confidential)
+        .insert(&pool)
+        .await;
+    let retriever = retriever(&pool, full_text_only());
+
+    let internal = retriever
+        .retrieve("ROLE_USERS", &scope(Sensitivity::Internal))
+        .await
+        .unwrap();
+    assert_eq!(ids(&internal), [open.0.as_str()]);
+
+    let all = retriever
+        .retrieve("ROLE_USERS", &everything())
+        .await
+        .unwrap();
+    assert_eq!(ids(&all), [open.0.as_str(), secret.0.as_str()]);
+    assert_eq!(all[1].context_for.as_ref(), Some(&open));
+}
+
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
+async fn the_vector_side_fills_its_candidates_past_chunks_the_asker_may_not_read(pool: PgPool) {
+    let query = "Which table maps users to roles?";
+    let target = embed(query).await;
+    for i in 0..60 {
+        let doc = document(&pool, &markdown::NAME, &format!("secret-{i}.md"), "Secret").await;
+        SeedChunk::new(&doc, "body", 0, "zzz")
+            .embedding(similar_to(&target, 0.99))
+            .sensitivity(Sensitivity::Confidential)
+            .insert(&pool)
+            .await;
+    }
+    let mut readable = Vec::new();
+    for i in 0..5 {
+        let doc = document(&pool, &markdown::NAME, &format!("open-{i}.md"), "Open").await;
+        readable.push(
+            SeedChunk::new(&doc, "body", 0, "zzz")
+                .embedding(similar_to(&target, 0.5))
+                .insert(&pool)
+                .await,
+        );
+    }
+    let config = HybridConfig {
+        full_text_candidates: 0,
+        vector_candidates: 5,
+        ..HybridConfig::default()
+    };
+
+    let hits = retriever(&pool, config)
+        .retrieve(query, &scope(Sensitivity::Internal))
+        .await
+        .unwrap();
+
+    let mut found: Vec<_> = hits.iter().map(|hit| hit.chunk.id.clone()).collect();
+    found.sort();
+    readable.sort();
+    assert_eq!(found, readable);
+}
+
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
+async fn an_embedder_that_cannot_answer_fails_retrieval(pool: PgPool) {
+    let doc = document(&pool, &markdown::NAME, "roles.md", "Roles").await;
+    SeedChunk::new(&doc, "body", 0, "ROLE_USERS maps users to roles.")
+        .model(recall::llm::fakes::FailingModel.model())
+        .insert(&pool)
+        .await;
+    let retriever = HybridRetriever::new(
+        pool.clone(),
+        Arc::new(recall::llm::fakes::FailingModel),
+        HybridConfig::default(),
+    );
+
+    let error = retriever
+        .retrieve("ROLE_USERS", &everything())
+        .await
+        .unwrap_err();
+
+    assert!(
+        format!("{error:#?}").contains("connection refused"),
+        "{error:#?}"
     );
 }

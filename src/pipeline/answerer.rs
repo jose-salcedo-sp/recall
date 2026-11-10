@@ -8,14 +8,19 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 use crate::{
+    access::{
+        Authorizer, PolicyRef, Principal,
+        rules::{AccessArgs, RulePolicy},
+    },
+    clock::{SystemClock, UuidV7},
     config::{ConfigArgs, PipelineConfig},
     domain::{CategoryKind, Chunk, Provenance, Question, RunId},
     llm::{
-        self, ChatModel, ModelRef,
+        self, ModelRef,
         backend::{ChatArgs, EmbedArgs, SystemOneArgs},
         judge::Judge,
     },
-    retrieval::{Retrieved, Retriever, hybrid::HybridRetriever},
+    retrieval::{Retrieved, hybrid::HybridRetriever},
 };
 
 use super::{
@@ -56,6 +61,9 @@ pub struct PipelineArgs {
     /// config names a judge.
     #[command(flatten)]
     pub system_one: SystemOneArgs,
+    /// The access policy every run is authorized by.
+    #[command(flatten)]
+    pub access: AccessArgs,
 }
 
 /// The models a pipeline calls, recorded with every `recall eval` run.
@@ -80,6 +88,9 @@ pub struct Models {
     /// The `Verify` support judge. `None`: claims are checked by membership, or quoted spans, only.
     #[serde(default)]
     pub verify: Option<ModelRef>,
+    /// The access policy. `None` in files written before access was enforced.
+    #[serde(default)]
+    pub policy: Option<PolicyRef>,
 }
 
 /// The production [`Answerer`]: assembles every step and pipeline once, then answers questions concurrently.
@@ -105,15 +116,14 @@ impl PipelineAnswerer {
         })
     }
 
-    /// The default config, which needs no judge, with no judge: every question is `open`.
-    pub fn new(retriever: Arc<dyn Retriever>, explain: Arc<dyn ChatModel>) -> Self {
+    /// The default config, which names no judged check, over `ports`; `ports.judge` is replaced by none, so every
+    /// question is `open` until [`PipelineAnswerer::with_judge`].
+    pub fn new(ports: Ports) -> Self {
         Self::assemble(
             PipelineConfig::default(),
             Ports {
-                retriever,
-                embedding: None,
-                explain,
                 judge: None,
+                ..ports
             },
         )
         .expect("the default config names no judged check and no rerank threshold")
@@ -148,6 +158,11 @@ impl PipelineAnswerer {
         self.steps.plan
     }
 
+    /// The policy every run is authorized by; the server reads persisted runs through it too.
+    pub fn authorizer(&self) -> Arc<dyn Authorizer> {
+        Arc::clone(&self.ports.authorizer)
+    }
+
     /// The models the steps call.
     pub fn models(&self) -> Models {
         Models {
@@ -157,6 +172,7 @@ impl PipelineAnswerer {
             rerank: self.steps.open.rerank.judged_by(),
             admit: self.steps.open.admit.as_ref().map(Admit::judged_by),
             verify: self.steps.open.pipeline.1.judged_by(),
+            policy: Some(self.ports.authorizer.policy()),
         }
     }
 
@@ -166,10 +182,11 @@ impl PipelineAnswerer {
     ///
     /// # Errors
     ///
-    /// When the config does not load, a model client cannot be built, or the config does not assemble with the
-    /// backends selected.
+    /// When the config or the access policy does not load, a model client cannot be built, or the config does not
+    /// assemble with the backends selected.
     pub async fn from_args(pool: PgPool, args: &PipelineArgs) -> eros::Result<Self> {
         let config = args.config.load()?;
+        let authorizer = Arc::new(RulePolicy::new(args.access.load()?));
         let embedder = llm::embedder(&args.embed).await?;
         let embedding = Some(embedder.model());
         let retriever = HybridRetriever::new(pool, embedder, config.retrieval.clone());
@@ -178,17 +195,31 @@ impl PipelineAnswerer {
             embedding,
             explain: llm::explain_model(&args.chat).await?,
             judge: llm::judge(&args.system_one)?,
+            authorizer,
+            clock: Arc::new(SystemClock),
+            ids: Arc::new(UuidV7),
         };
         Ok(Self::assemble(config, ports)?)
     }
 
     /// `choice` and `ranking` take the open path until their `Answer` steps exist; the returned category is still
     /// the one `Classify` chose.
-    async fn classify(&self, question: Question) -> Result<(CategoryKind, Classified<'_>), Halted> {
+    async fn classify(
+        &self,
+        principal: &Principal,
+        question: Question,
+    ) -> Result<(CategoryKind, Classified<'_>), Halted> {
         let steps = &self.steps;
-        let run = Run::new(question)
-            .both("classify_retrieve", &steps.classify, &steps.retrieve)
-            .await?;
+        let run = Run::authorize(
+            self.ports.ids.next(),
+            question,
+            principal.clone(),
+            self.ports.authorizer.as_ref(),
+            Arc::clone(&self.ports.clock),
+        )
+        .await?
+        .both("classify_retrieve", &steps.classify, &steps.retrieve)
+        .await?;
         let category = run.state().0;
         let run: Run<Unclassified, Candidates> = run.map(|(_, candidates)| candidates);
         let classified = match (category, &steps.boolean) {
@@ -207,8 +238,8 @@ impl PipelineAnswerer {
 
 #[async_trait]
 impl Answerer for PipelineAnswerer {
-    async fn answer(&self, question: Question) -> RunReport {
-        let (category, classified) = match self.classify(question).await {
+    async fn answer(&self, principal: &Principal, question: Question) -> RunReport {
+        let (category, classified) = match self.classify(principal, question).await {
             Ok(classified) => classified,
             Err(halted) => return halted_report(halted, &[]),
         };

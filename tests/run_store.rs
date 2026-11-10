@@ -13,6 +13,7 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use recall::{
+    clock::SystemClock,
     domain::UserId,
     pipeline::report::CannedAnswerer,
     server::{AppState, router},
@@ -29,7 +30,7 @@ use runs::reports;
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
 async fn the_status_column_follows_the_outcome(pool: PgPool) -> eros::Result<()> {
-    let store = PgRunStore::new(pool.clone());
+    let store = PgRunStore::new(pool.clone(), Arc::new(SystemClock));
     for (report, status) in reports() {
         store.save(&UserId("ana".into()), &report).await?;
 
@@ -50,9 +51,12 @@ async fn served_runs_are_persisted_in_postgres(pool: PgPool) -> eros::Result<()>
             category: report.category,
             outcome: report.outcome,
         }),
-        runs: Arc::new(PgRunStore::new(pool)),
+        runs: Arc::new(PgRunStore::new(pool, Arc::new(SystemClock))),
         keys: Arc::new("sk-ana:ana".parse().unwrap()),
-        admins: Arc::new(recall::server::auth::AdminUsers::default()),
+        clock: Arc::new(SystemClock),
+        authorizer: Arc::new(recall::access::rules::RulePolicy::new(
+            recall::access::rules::AccessConfig::parse(include_str!("../config/access.json"))?,
+        )),
     };
     let app = router(state);
     let send = |request: Request<Body>| {

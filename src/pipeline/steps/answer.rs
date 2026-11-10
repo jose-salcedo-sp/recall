@@ -5,10 +5,10 @@ use serde_json::json;
 use crate::{
     domain::{Probability, Question},
     llm::judge::{Judge, JudgeQuestion, JudgeRequest},
-    pipeline::{Boolean, DeclineReason, Scored, Step, StepError, trace::AnswerRecord},
+    pipeline::{Ask, Boolean, DeclineReason, Scored, Step, StepError, trace::AnswerRecord},
 };
 
-use super::{MAX_STATE_CHARS, Reranked};
+use super::{MAX_STATE_CHARS, Reranked, with_access};
 
 /// Recorded as the trace entry's prompt version; bump on any change to the question the judge is asked.
 pub const ANSWER_PROMPT_VERSION: &str = "answer-boolean-v1";
@@ -91,6 +91,17 @@ impl Step for Answer<Boolean> {
 
     async fn run(
         &self,
+        ask: &Ask,
+        sources: Reranked,
+    ) -> Result<Scored<Decided, AnswerRecord>, StepError> {
+        let (sources, access) = sources.enforce(ask.access());
+        with_access(self.decide(ask.question(), sources).await, access)
+    }
+}
+
+impl Answer<Boolean> {
+    async fn decide(
+        &self,
         question: &Question,
         sources: Reranked,
     ) -> Result<Scored<Decided, AnswerRecord>, StepError> {
@@ -167,14 +178,20 @@ mod tests {
 
     async fn run(p: f32) -> Result<Scored<Decided, AnswerRecord>, StepError> {
         Answer::<Boolean>::new(yes(p), None)
-            .run(&Question::new("Can a control map to a role?"), sources())
+            .run(
+                &Ask::unrestricted("Can a control map to a role?"),
+                sources(),
+            )
             .await
     }
 
     async fn answer(p: f32) -> (Scored<Decided, AnswerRecord>, Arc<FnJudge>) {
         let judge = yes(p);
         let scored = Answer::<Boolean>::new(Arc::<FnJudge>::clone(&judge), None)
-            .run(&Question::new("Can a control map to a role?"), sources())
+            .run(
+                &Ask::unrestricted("Can a control map to a role?"),
+                sources(),
+            )
             .await
             .unwrap();
         (scored, judge)

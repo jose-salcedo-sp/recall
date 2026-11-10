@@ -7,11 +7,11 @@ use crate::{
     config::{Instructions, MaxTokens},
     domain::{ChunkId, Probability, Question},
     llm::{ChatModel, ChatRequest},
-    pipeline::{Boolean, DeclineReason, Open, Scored, Step, StepError, trace::ExplainRecord},
+    pipeline::{Ask, Boolean, DeclineReason, Open, Scored, Step, StepError, trace::ExplainRecord},
     retrieval::Retrieved,
 };
 
-use super::{Decided, Reranked};
+use super::{Decided, Reranked, with_access};
 
 /// Bump on any change to `SYSTEM`, `prompt`, or `schema`, so traces and eval can tell prompts apart. Operator
 /// instructions are not versioned here: they are part of the config, which eval records with every run.
@@ -259,10 +259,11 @@ impl Step for Explain<Open> {
 
     async fn run(
         &self,
-        question: &Question,
+        ask: &Ask,
         input: Reranked,
     ) -> Result<Scored<Explained, ExplainRecord>, StepError> {
-        self.explain(question, input, None).await
+        let (sources, access) = input.enforce(ask.access());
+        with_access(self.explain(ask.question(), sources, None).await, access)
     }
 }
 
@@ -275,7 +276,7 @@ impl Step for Explain<Boolean> {
 
     async fn run(
         &self,
-        question: &Question,
+        ask: &Ask,
         input: Decided,
     ) -> Result<Scored<ExplainedVerdict, ExplainRecord>, StepError> {
         let Decided {
@@ -283,13 +284,18 @@ impl Step for Explain<Boolean> {
             confidence,
             sources,
         } = input;
+        let (sources, access) = sources.enforce(ask.access());
         let Scored {
             output,
             record,
             score,
             model,
             prompt_version,
-        } = self.explain(question, sources, Some(yes)).await?;
+            access,
+        } = with_access(
+            self.explain(ask.question(), sources, Some(yes)).await,
+            access,
+        )?;
         Ok(Scored {
             output: ExplainedVerdict {
                 explained: output,
@@ -300,6 +306,7 @@ impl Step for Explain<Boolean> {
             score,
             model,
             prompt_version,
+            access,
         })
     }
 }
