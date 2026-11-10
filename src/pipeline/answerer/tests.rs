@@ -3,7 +3,10 @@ use serde_json::json;
 use super::*;
 use crate::{
     domain::ChunkId,
-    llm::fakes::ScriptedChat,
+    llm::{
+        fakes::ScriptedChat,
+        judge::{FnJudge, JudgeQuestion, RawJudgement},
+    },
     pipeline::{
         DeclineReason,
         assembly::{AdmitMode, JudgedCheck},
@@ -356,40 +359,34 @@ fn excerpt_cuts_long_text_on_a_char_boundary() {
     assert_eq!(super::excerpt("short"), "short");
 }
 
-/// Answers Classify with `category` at `certainty`, Rerank with 0.7 for every match, and Answer with `yes`.
+/// Answers Classify with `category` at `certainty`, Answer with `yes`, and any other yes/no question (Rerank's)
+/// with 0.7.
 struct FakeKev {
     category: &'static str,
     certainty: f32,
     yes: f32,
 }
 
-#[async_trait]
-impl crate::llm::system_one::SystemOne for FakeKev {
-    fn model(&self) -> crate::llm::ModelRef {
-        crate::llm::ModelRef::new("fake-kev", "1")
-    }
-
-    async fn decide(
-        &self,
-        request: crate::llm::system_one::DecisionRequest,
-    ) -> eros::Result<crate::llm::system_one::DecisionResponse> {
-        use std::collections::BTreeMap;
-
-        use crate::llm::system_one::{DecisionAnswer, DecisionResponse};
-
-        let id = request.questions.into_keys().next().unwrap();
-        let answer = match id.as_str() {
-            "category" => DecisionAnswer::Choice {
-                choice: self.category.into(),
-                confidence: self.certainty,
-                probabilities: BTreeMap::from([(self.category.into(), self.certainty)]),
-            },
-            "answer" => DecisionAnswer::Noul { noul: self.yes },
-            _ => DecisionAnswer::Noul { noul: 0.7 },
-        };
-        Ok(DecisionResponse {
-            answers: BTreeMap::from([(id, answer)]),
-        })
+impl FakeKev {
+    fn judge(self) -> Arc<FnJudge> {
+        Arc::new(FnJudge::new(move |_, question| match question {
+            JudgeQuestion::OneOf { options, .. } => RawJudgement::OneOf(
+                options
+                    .iter()
+                    .map(|option| {
+                        if option.name == self.category {
+                            self.certainty
+                        } else {
+                            (1.0 - self.certainty) / 3.0
+                        }
+                    })
+                    .collect(),
+            ),
+            JudgeQuestion::YesNo { instructions } if instructions.contains("is the answer") => {
+                RawJudgement::YesNo(self.yes)
+            }
+            JudgeQuestion::YesNo { .. } => RawJudgement::YesNo(0.7),
+        }))
     }
 }
 
@@ -405,7 +402,7 @@ fn verdict_reply(contradicts: bool) -> String {
 
 async fn ask_kev(kev: FakeKev, chat: &Arc<ScriptedChat>, config: &str) -> RunReport {
     answerer(corpus(), chat)
-        .with_system_one(Arc::new(kev))
+        .with_judge(kev.judge())
         .with_config(PipelineConfig::parse(config).unwrap())
         .unwrap()
         .answer(Question::new(YES_NO))
@@ -413,7 +410,7 @@ async fn ask_kev(kev: FakeKev, chat: &Arc<ScriptedChat>, config: &str) -> RunRep
 }
 
 #[tokio::test]
-async fn a_boolean_question_gets_system_one_s_verdict_and_the_llm_s_reasons() {
+async fn a_boolean_question_gets_the_judge_s_verdict_and_the_llm_s_reasons() {
     let chat = Arc::new(ScriptedChat::replying([verdict_reply(false)]));
     let kev = FakeKev {
         category: "boolean",
@@ -545,57 +542,23 @@ async fn an_unsure_classification_falls_back_to_the_open_path() {
 }
 
 #[tokio::test]
-async fn the_reranker_asks_system_one_about_each_match() {
-    use std::{
-        collections::BTreeMap,
-        sync::atomic::{AtomicUsize, Ordering},
-    };
-
-    use crate::llm::{
-        ModelRef,
-        system_one::{DecisionAnswer, DecisionRequest, DecisionResponse, SystemOne},
-    };
-
-    #[derive(Default)]
-    struct Counting(AtomicUsize);
-
-    #[async_trait]
-    impl SystemOne for Counting {
-        fn model(&self) -> ModelRef {
-            ModelRef::new("counting", "1")
-        }
-
-        async fn decide(&self, request: DecisionRequest) -> eros::Result<DecisionResponse> {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            let answer = match request.questions.keys().next().map(String::as_str) {
-                Some("category") => DecisionAnswer::Choice {
-                    choice: "open".into(),
-                    confidence: 0.9,
-                    probabilities: BTreeMap::from([("open".into(), 0.95)]),
-                },
-                _ => DecisionAnswer::Noul { noul: 0.7 },
-            };
-            let id = request.questions.into_keys().next().unwrap();
-            Ok(DecisionResponse {
-                answers: BTreeMap::from([(id, answer)]),
-            })
-        }
-    }
-
+async fn the_reranker_asks_the_judge_about_each_match() {
     for (config, judged) in [
-        (
-            r#"{"rerank": {"judge": {"system_one": {"candidates": 25}}}}"#,
-            true,
-        ),
+        (r#"{"rerank": {"judge": {"candidates": 25}}}"#, true),
         (r#"{"rerank": {"judge": "none"}}"#, false),
     ] {
         let agr = role_users();
         let chat = Arc::new(ScriptedChat::replying([reply(&json!([
             { "text": "ROLE_USERS maps users to roles.", "chunk_ids": [agr.id] },
         ]))]));
-        let system_one = Arc::new(Counting::default());
+        let judge = FakeKev {
+            category: "open",
+            certainty: 0.95,
+            yes: 0.7,
+        }
+        .judge();
         let answerer = answerer(corpus(), &chat)
-            .with_system_one(Arc::<Counting>::clone(&system_one))
+            .with_judge(Arc::<FnJudge>::clone(&judge))
             .with_config(PipelineConfig::parse(config).unwrap())
             .unwrap();
         let models = answerer.models();
@@ -607,83 +570,52 @@ async fn the_reranker_asks_system_one_about_each_match() {
             .iter()
             .find(|e| e.step == "rerank")
             .unwrap();
-        assert!(models.system_one.is_some(), "{config}");
+        assert!(models.judge.is_some(), "{config}");
         assert_eq!(rerank.model.is_some(), judged, "{config}: {rerank:?}");
         assert_eq!(models.rerank.is_some(), judged, "{config}");
-        let calls = system_one.0.load(Ordering::SeqCst);
+        let calls = judge.requests().len();
         if judged {
             assert!(calls > 1, "{config}: {calls}");
         } else {
-            assert_eq!(calls, 1, "{config}: only Classify calls System One");
+            assert_eq!(calls, 1, "{config}: only Classify asks the judge");
         }
     }
 }
 
-/// Answers every question of every request: `open` for the category, a low probability for the injection and
-/// contradiction screens and a high one for the others, and `supports` for a relation.
-struct ProvenanceKev;
-
-#[async_trait]
-impl SystemOne for ProvenanceKev {
-    fn model(&self) -> ModelRef {
-        ModelRef::new("provenance-kev", "1")
-    }
-
-    async fn decide(
-        &self,
-        request: crate::llm::system_one::DecisionRequest,
-    ) -> eros::Result<crate::llm::system_one::DecisionResponse> {
-        use std::collections::BTreeMap;
-
-        use crate::llm::system_one::{Decision, DecisionAnswer, DecisionResponse};
-
-        let answers = request
-            .questions
-            .into_iter()
-            .map(|(id, decision)| {
-                let answer = match decision {
-                    Decision::Choice { criteria, .. } => {
-                        let chosen = if id == "category" { "open" } else { "supports" };
-                        DecisionAnswer::Choice {
-                            choice: chosen.into(),
-                            confidence: 0.9,
-                            probabilities: criteria
-                                .0
-                                .into_iter()
-                                .map(|(option, _)| {
-                                    let p = if option == chosen { 0.9 } else { 0.05 };
-                                    (option, p)
-                                })
-                                .collect(),
-                        }
-                    }
-                    Decision::Noul { instructions } => {
-                        let low = instructions.contains("instructions")
-                            || instructions.contains("conflict");
-                        DecisionAnswer::Noul {
-                            noul: if low { 0.05 } else { 0.9 },
-                        }
-                    }
-                    Decision::Score { .. } => DecisionAnswer::Noul { noul: 0.0 },
-                };
-                (id, answer)
-            })
-            .collect::<BTreeMap<_, _>>();
-        Ok(DecisionResponse { answers })
-    }
+/// Answers every question: `open` for the category, a low probability for the injection and contradiction screens
+/// and a high one for the others, and `supports` for a relation.
+fn provenance_judge() -> Arc<FnJudge> {
+    Arc::new(FnJudge::new(|_, question| match question {
+        JudgeQuestion::OneOf { options, .. } => {
+            let chosen = if options.iter().any(|option| option.name == "open") {
+                "open"
+            } else {
+                "supports"
+            };
+            RawJudgement::OneOf(
+                options
+                    .iter()
+                    .map(|option| if option.name == chosen { 0.9 } else { 0.05 })
+                    .collect(),
+            )
+        }
+        JudgeQuestion::YesNo { instructions } => {
+            let low = instructions.contains("instructions") || instructions.contains("conflict");
+            RawJudgement::YesNo(if low { 0.05 } else { 0.9 })
+        }
+    }))
 }
 
-const PROVENANCE: &str =
-    r#"{"admit": {"judge": {"system_one": {}}}, "verify": {"support": {"system_one": {}}}}"#;
+const PROVENANCE: &str = r#"{"admit": {"judge": {}}, "verify": {"support": {"judged": {}}}}"#;
 
 #[tokio::test]
-async fn admission_and_the_support_check_run_on_system_one_when_configured() {
+async fn admission_and_the_support_check_run_on_the_judge_when_configured() {
     let agr = role_users();
     let chat = Arc::new(ScriptedChat::replying([reply(&json!([
         { "text": "ROLE_USERS maps users to roles.", "chunk_ids": [agr.id] },
     ]))]));
     let answerer = answerer(corpus(), &chat)
-        .with_system_one(Arc::new(ProvenanceKev))
+        .with_judge(provenance_judge())
         .with_config(PipelineConfig::parse(PROVENANCE).unwrap())
         .unwrap();
     let models = answerer.models();
@@ -718,7 +650,7 @@ async fn admission_and_the_support_check_run_on_system_one_when_configured() {
             ..
         }]
     ));
-    let judge = Some(ModelRef::new("provenance-kev", "1"));
+    let judge = Some(ModelRef::new("fake-fn-judge", "1"));
     assert_eq!(models.admit, judge);
     assert_eq!(models.verify, judge);
 }
@@ -771,7 +703,7 @@ async fn the_plan_and_each_step_s_record_say_what_ran() {
     ));
 
     let judged = answerer
-        .with_system_one(Arc::new(ProvenanceKev))
+        .with_judge(provenance_judge())
         .with_config(PipelineConfig::parse(PROVENANCE).unwrap())
         .unwrap();
     assert_eq!(

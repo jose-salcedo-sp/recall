@@ -11,7 +11,7 @@ use crate::{
     domain::{ChunkId, Probability, Question},
     llm::{
         ModelRef,
-        system_one::{Decision, DecisionRequest, SystemOne},
+        judge::{Judge, JudgeQuestion, JudgeRequest},
     },
     pipeline::{
         Category, DeclineReason, Scored, Step, StepError,
@@ -25,13 +25,12 @@ use super::{CONCURRENT_REQUESTS, Candidates, Reranked, judged_text, ranked};
 /// Recorded as the trace entry's prompt version; bump on any change to the relevance question.
 pub const RERANK_PROMPT_VERSION: &str = "rerank-v2";
 
-const QUESTION_ID: &str = "relevant";
 /// Reciprocal rank fusion constant, as in hybrid retrieval.
 const RRF_K: f32 = 60.0;
 
 /// Picks the `top_k` matches that best answer the question, each followed by the context retrieval attached to it.
 ///
-/// With System One as the judge, the best `candidates` matches by fused score are each judged by one yes/no
+/// With a judge, the best `candidates` matches by fused score are each judged by one yes/no
 /// question. Matches are then ordered by reciprocal rank fusion of their retrieval rank and their probability-of-yes
 /// rank, so the judgement refines retrieval instead of replacing it; the trace records each probability of yes, and
 /// the best kept one scores the step. Without a judge, matches are ordered by retrieval rank alone and the step is
@@ -48,10 +47,10 @@ pub struct Rerank<TCategory> {
 pub enum RerankBy {
     /// Retrieval rank alone. The step is unscored, so it has no threshold.
     Retrieval,
-    /// System One judges the best `candidates` matches by fused score.
+    /// The judge asks about the best `candidates` matches by fused score.
     Judge {
         /// The judge.
-        system_one: Arc<dyn SystemOne>,
+        judge: Arc<dyn Judge>,
         /// Matches judged, at least `top_k` when it comes from a [`RerankConfig`].
         candidates: usize,
         /// Applies to the best kept match's probability.
@@ -82,24 +81,20 @@ impl<TCategory> Rerank<TCategory> {
     pub fn judged_by(&self) -> Option<ModelRef> {
         match &self.by {
             RerankBy::Retrieval => None,
-            RerankBy::Judge { system_one, .. } => Some(system_one.model()),
+            RerankBy::Judge { judge, .. } => Some(judge.model()),
         }
     }
 }
 
-fn request(question: &Question, hit: &Retrieved) -> DecisionRequest {
-    DecisionRequest {
-        state: judged_text(&hit.chunk),
-        model: String::new(),
-        questions: BTreeMap::from([(
-            QUESTION_ID.to_owned(),
-            Decision::Noul {
-                instructions: format!(
-                    "Does this text contain information that helps answer the question: {}",
-                    question.as_str()
-                ),
-            },
-        )]),
+fn request(question: &Question, hit: &Retrieved) -> JudgeRequest {
+    JudgeRequest {
+        text: judged_text(&hit.chunk),
+        questions: vec![JudgeQuestion::YesNo {
+            instructions: format!(
+                "Does this text contain information that helps answer the question: {}",
+                question.as_str()
+            ),
+        }],
     }
 }
 
@@ -113,13 +108,13 @@ fn rrf(hit: &Retrieved, rank: usize, evidence_rank_penalty: usize) -> f32 {
     1.0 / (RRF_K + (rank + penalty) as f32)
 }
 
-async fn judge(
-    system_one: &dyn SystemOne,
-    request: DecisionRequest,
+async fn relevance(
+    judge: &dyn Judge,
+    request: JudgeRequest,
     chunk: &ChunkId,
 ) -> Result<Probability, StepError> {
-    let response = system_one.decide(request).await?;
-    response.yes_no(QUESTION_ID).map_err(|error| {
+    let judgements = judge.judge(request).await?;
+    judgements.yes(0).map_err(|error| {
         StepError::decline(DeclineReason::InvalidModelOutput(format!(
             "{}: {error}",
             chunk.0
@@ -158,19 +153,17 @@ impl<TCategory: Category> Step for Rerank<TCategory> {
         let mut model = None;
         let mut judged: HashMap<ChunkId, Probability> = HashMap::new();
         if let RerankBy::Judge {
-            system_one,
-            candidates,
-            ..
+            judge, candidates, ..
         } = &self.by
         {
             matches.truncate(*candidates);
-            let judged_by = model.insert(system_one.model()).clone();
+            let judged_by = model.insert(judge.model()).clone();
             let requests: Vec<_> = matches
                 .iter()
                 .map(|hit| {
-                    let (system_one, request) = (Arc::clone(system_one), request(question, hit));
+                    let (judge, request) = (Arc::clone(judge), request(question, hit));
                     let id = hit.chunk.id.clone();
-                    async move { judge(system_one.as_ref(), request, &id).await }
+                    async move { relevance(judge.as_ref(), request, &id).await }
                 })
                 .collect();
             let probabilities: Vec<Probability> = stream::iter(requests)
@@ -256,15 +249,12 @@ impl<TCategory: Category> Step for Rerank<TCategory> {
 
 #[cfg(test)]
 mod tests {
-    use async_trait::async_trait;
-
     use super::*;
     use crate::{
         domain::Chunk,
         llm::{
             ModelRef,
-            fakes::ScriptedSystemOne,
-            system_one::{DecisionAnswer, DecisionResponse, SystemOne},
+            judge::{FnJudge, RawJudgement},
         },
         pipeline::steps::MAX_STATE_CHARS,
         pipeline::{Open, StepErrorKind, steps::fixtures::chunk},
@@ -284,11 +274,11 @@ mod tests {
         Rerank::new(&keeping(top_k), RerankBy::Retrieval)
     }
 
-    fn judged(top_k: usize, candidates: usize, system_one: Arc<dyn SystemOne>) -> Rerank<Open> {
+    fn judged(top_k: usize, candidates: usize, judge: Arc<dyn Judge>) -> Rerank<Open> {
         Rerank::new(
             &keeping(top_k),
             RerankBy::Judge {
-                system_one,
+                judge,
                 candidates,
                 threshold: None,
             },
@@ -319,27 +309,17 @@ mod tests {
             .collect()
     }
 
-    /// Says yes with the probability written in the state's text, e.g. `p=0.9`.
-    struct ByText;
-
-    #[async_trait]
-    impl SystemOne for ByText {
-        fn model(&self) -> ModelRef {
-            ModelRef::new("fake-system-one", "1")
-        }
-
-        async fn decide(&self, request: DecisionRequest) -> eros::Result<DecisionResponse> {
-            let p = request
-                .state
-                .split("p=")
-                .nth(1)
-                .and_then(|rest| rest.split_whitespace().next())
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(0.0);
-            Ok(DecisionResponse {
-                answers: BTreeMap::from([(QUESTION_ID.into(), DecisionAnswer::Noul { noul: p })]),
-            })
-        }
+    /// Says yes with the probability written in the text, e.g. `p=0.9`.
+    fn by_text() -> Arc<FnJudge> {
+        Arc::new(FnJudge::new(|text, _| {
+            RawJudgement::YesNo(
+                text.split("p=")
+                    .nth(1)
+                    .and_then(|rest| rest.split_whitespace().next())
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(0.0),
+            )
+        }))
     }
 
     async fn rerank(rerank: Rerank<Open>, hits: Vec<Retrieved>) -> Scored<Reranked, RerankRecord> {
@@ -393,7 +373,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn system_one_refines_retrieval_order_and_scores_the_step() {
+    async fn a_judge_refines_retrieval_order_and_scores_the_step() {
         let hits = vec![
             hit("fused-best", "p=0.2", 0.9),
             hit("fused-second", "p=0.95", 0.8),
@@ -401,7 +381,7 @@ mod tests {
             hit("beyond-candidates", "p=1.0", 0.1),
         ];
 
-        let scored = rerank(judged(2, 3, Arc::new(ByText)), hits).await;
+        let scored = rerank(judged(2, 3, by_text()), hits).await;
 
         // Judged ranks second, third, best; fused with retrieval ranks best, second, third.
         assert_eq!(ids(&scored.output), ["fused-second", "fused-best"]);
@@ -426,7 +406,7 @@ mod tests {
     #[tokio::test]
     async fn a_probability_outside_zero_to_one_declines_as_invalid_output() {
         for bad in ["p=1.7", "p=-0.3", "p=NaN"] {
-            let error = judged(1, 25, Arc::new(ByText))
+            let error = judged(1, 25, by_text())
                 .run(&Question::new("q"), candidates(vec![hit("a", bad, 0.9)]))
                 .await
                 .err()
@@ -447,7 +427,7 @@ mod tests {
             hit("evidence", "p=0.6", 0.9),
             authoritative(hit("settled", "p=0.5", 0.8)),
         ];
-        let scored = rerank(judged(1, 25, Arc::new(ByText)), close.clone()).await;
+        let scored = rerank(judged(1, 25, by_text()), close.clone()).await;
         assert_eq!(ids(&scored.output), ["settled"]);
         let scored = rerank(by_retrieval(1), close).await;
         assert_eq!(ids(&scored.output), ["settled"]);
@@ -455,16 +435,8 @@ mod tests {
         let mut far = vec![hit("evidence", "p=0.99", 0.9)];
         far.extend((0..40).map(|i| hit(&format!("filler-{i}"), "p=0.0", 0.5)));
         far.push(authoritative(hit("settled", "p=0.01", 0.1)));
-        let scored = rerank(judged(1, 50, Arc::new(ByText)), far).await;
+        let scored = rerank(judged(1, 50, by_text()), far).await;
         assert_eq!(ids(&scored.output), ["evidence"]);
-    }
-
-    fn scripted(probabilities: &[f32]) -> Arc<ScriptedSystemOne> {
-        Arc::new(ScriptedSystemOne::new(probabilities.iter().map(|&noul| {
-            Ok(DecisionResponse {
-                answers: BTreeMap::from([(QUESTION_ID.into(), DecisionAnswer::Noul { noul })]),
-            })
-        })))
     }
 
     fn many() -> Vec<Retrieved> {
@@ -496,29 +468,22 @@ mod tests {
 
     #[tokio::test]
     async fn a_judge_scores_the_step_against_its_threshold_and_records_its_mode() {
-        let system_one = scripted(&[0.2, 0.95, 0.6]);
+        let judge = by_text();
         let threshold = Some(Probability::new(0.5).unwrap());
         let step = Rerank::<Open>::new(
             &keeping(2),
             RerankBy::Judge {
-                system_one: Arc::<ScriptedSystemOne>::clone(&system_one),
+                judge: Arc::<FnJudge>::clone(&judge),
                 candidates: 3,
                 threshold,
             },
         );
         assert_eq!(step.threshold(), threshold);
         assert_eq!(step.mode(), RerankMode::Judged);
-        assert_eq!(
-            step.judged_by(),
-            Some(ModelRef::new("fake-system-one", "1"))
-        );
+        assert_eq!(step.judged_by(), Some(ModelRef::new("fake-fn-judge", "1")));
 
-        let scored = rerank(step, many()).await;
-
-        assert_eq!(system_one.requests().len(), 3);
-        assert_eq!(scored.record.mode, RerankMode::Judged);
-        let same = rerank(
-            judged(2, 3, Arc::new(ByText)),
+        let scored = rerank(
+            step,
             vec![
                 hit("fused-best", "p=0.2", 0.9),
                 hit("fused-second", "p=0.95", 0.8),
@@ -527,9 +492,11 @@ mod tests {
             ],
         )
         .await;
-        assert_eq!(ids(&scored.output), ids(&same.output));
+
+        assert_eq!(judge.requests().len(), 3);
+        assert_eq!(scored.record.mode, RerankMode::Judged);
+        assert_eq!(ids(&scored.output), ["fused-third", "fused-second"]);
         assert_eq!(scored.score, Some(Probability::new(0.95).unwrap()));
-        assert_eq!(scored.score, same.score);
         assert_eq!(scored.prompt_version, Some(RERANK_PROMPT_VERSION));
     }
 

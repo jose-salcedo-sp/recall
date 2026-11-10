@@ -50,7 +50,7 @@ async fn servers(system_one: ResponseTemplate) -> MockServer {
 
 fn kev_answer() -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_json(json!({
-        "answers": { "check": { "type": "noul", "noul": 0.97 } }
+        "answers": { "q0": { "type": "noul", "noul": 0.97 } }
     }))
 }
 

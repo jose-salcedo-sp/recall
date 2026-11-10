@@ -5,7 +5,7 @@
 //! flat command-line fields are parsed into one enum per port whose variants hold exactly the settings that backend
 //! uses; a missing, unparsable or unused setting is an error naming its variable. Each arm destructures every field,
 //! so a new field does not compile until every backend accepts or rejects it. [`embedder`], [`explain_model`] and
-//! [`system_one_client`] map those enums to the port traits, which is all the rest of the crate sees.
+//! [`judge`] map those enums to the port traits, which is all the rest of the crate sees.
 //!
 //! Every port has a `workers-ai` backend, which takes the Cloudflare account id, the API token and the model id, and
 //! builds the Cloudflare URL itself, so no URL setting reaches it. Its embedder packs requests under the model's
@@ -19,6 +19,7 @@ use super::{
     ApiKey, ChatModel, Embedder,
     bedrock_chat::{BedrockChat, aws_environment, bedrock_endpoint},
     bedrock_embed::BedrockEmbedder,
+    judge::{Judge, SystemOneJudge},
     openai::{
         CHAT_PATH, ChatOptions, EMBEDDINGS_PATH, OpenAiChat, OpenAiEmbedder, ReasoningEffort,
         SchemaFormat,
@@ -656,6 +657,17 @@ pub async fn explain_model(args: &ChatArgs) -> eros::Result<Arc<dyn ChatModel>> 
 /// When a backend setting is missing, unparsable or unused, or the HTTP client cannot be built.
 pub fn system_one_client(args: &SystemOneArgs) -> eros::Result<Option<Arc<dyn SystemOne>>> {
     SystemOneBackend::try_from(args)?.build()
+}
+
+/// The judge every judged step asks: the System One `RECALL_SYSTEM_ONE_BACKEND` selects, behind [`SystemOneJudge`];
+/// `None` for `none`.
+///
+/// # Errors
+///
+/// As [`system_one_client`].
+pub fn judge(args: &SystemOneArgs) -> eros::Result<Option<Arc<dyn Judge>>> {
+    Ok(system_one_client(args)?
+        .map(|system_one| Arc::new(SystemOneJudge::new(system_one)) as Arc<dyn Judge>))
 }
 
 #[cfg(test)]

@@ -72,14 +72,14 @@ fn config(support: SupportCheck, publish: PublishPolicy) -> VerifyConfig {
 }
 
 fn judged() -> SupportCheck {
-    SupportCheck::SystemOne(SupportCutoff::default())
+    SupportCheck::Judged(SupportCutoff::default())
 }
 
 fn verify(config: VerifyConfig, judge: &Arc<FnJudge>) -> Verify<Open> {
     let support = match config.support {
         SupportCheck::Membership => Support::Membership,
         SupportCheck::Quotes => Support::Quotes,
-        SupportCheck::SystemOne(SupportCutoff { min_support }) => Support::Judged {
+        SupportCheck::Judged(SupportCutoff { min_support }) => Support::Judged {
             judge: Arc::clone(judge) as Arc<dyn Judge>,
             min_support,
         },

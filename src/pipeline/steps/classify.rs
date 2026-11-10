@@ -1,8 +1,8 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use crate::{
     domain::{CategoryKind, Probability, Question},
-    llm::system_one::{Decision, DecisionRequest, DecisionResponse, Options, SystemOne},
+    llm::judge::{Judge, JudgeOption, JudgeQuestion, JudgeRequest},
     pipeline::{
         Asked, DeclineReason, Scored, Step, StepError, Unclassified,
         trace::{ClassifyMode, ClassifyRecord},
@@ -12,29 +12,43 @@ use crate::{
 /// Recorded as the trace entry's prompt version; bump on any change to the question or its options.
 pub const CLASSIFY_PROMPT_VERSION: &str = "classify-v1";
 
-const QUESTION_ID: &str = "category";
-
-const OPTIONS: [(CategoryKind, &str); 4] = [
-    (CategoryKind::Boolean, "A yes or no answer"),
+/// In the order offered; each name is its category's [`CategoryKind::as_str`].
+const OPTIONS: [(CategoryKind, JudgeOption); 4] = [
+    (
+        CategoryKind::Boolean,
+        JudgeOption {
+            name: "boolean",
+            description: "A yes or no answer",
+        },
+    ),
     (
         CategoryKind::Choice,
-        "Picking one of two or more options named in the question",
+        JudgeOption {
+            name: "choice",
+            description: "Picking one of two or more options named in the question",
+        },
     ),
     (
         CategoryKind::Ranking,
-        "Ordering several items named in the question by a stated criterion",
+        JudgeOption {
+            name: "ranking",
+            description: "Ordering several items named in the question by a stated criterion",
+        },
     ),
     (
         CategoryKind::Open,
-        "An explanation, a how-to, or any other free-form answer",
+        JudgeOption {
+            name: "open",
+            description: "An explanation, a how-to, or any other free-form answer",
+        },
     ),
 ];
 
-/// Asks System One which category the question is, or, when the pipeline has no judge, records every question as
+/// Asks the judge which category the question is, or, when the pipeline has no judge, records every question as
 /// `open`.
 ///
 /// A decisive category chosen with a probability below `min_confidence` falls back to `open`: an explanation
-/// cannot be wrong the way a forced yes or no can. The step's score stays System One's probability.
+/// cannot be wrong the way a forced yes or no can. The step's score stays the judge's probability.
 pub struct Classify {
     mode: Classifier,
 }
@@ -42,7 +56,7 @@ pub struct Classify {
 enum Classifier {
     AllOpen,
     Judged {
-        system_one: Arc<dyn SystemOne>,
+        judge: Arc<dyn Judge>,
         min_confidence: Option<Probability>,
     },
 }
@@ -55,12 +69,12 @@ impl Classify {
         }
     }
 
-    /// `system_one` chooses the category. Below `min_confidence` a decisive category falls back to `open`; `None`
-    /// never falls back.
-    pub fn judged(system_one: Arc<dyn SystemOne>, min_confidence: Option<Probability>) -> Self {
+    /// `judge` chooses the category. Below `min_confidence` a decisive category falls back to `open`; `None` never
+    /// falls back.
+    pub fn judged(judge: Arc<dyn Judge>, min_confidence: Option<Probability>) -> Self {
         Self {
             mode: Classifier::Judged {
-                system_one,
+                judge,
                 min_confidence,
             },
         }
@@ -73,39 +87,16 @@ impl Classify {
             Classifier::Judged { .. } => ClassifyMode::Judged,
         }
     }
-
-    fn request(question: &Question) -> DecisionRequest {
-        let options = OPTIONS
-            .iter()
-            .map(|(category, description)| {
-                (
-                    category.as_str().to_owned(),
-                    Some((*description).to_owned()),
-                )
-            })
-            .collect();
-        DecisionRequest {
-            state: question.as_str().to_owned(),
-            model: String::new(),
-            questions: BTreeMap::from([(
-                QUESTION_ID.to_owned(),
-                Decision::Choice {
-                    instructions: "What kind of answer does this question ask for?".to_owned(),
-                    criteria: Options(options),
-                },
-            )]),
-        }
-    }
 }
 
-/// The chosen category and the calibrated probability System One gave it.
-fn parse(response: &DecisionResponse) -> Result<(CategoryKind, Probability), DeclineReason> {
-    let invalid = |detail: String| DeclineReason::InvalidModelOutput(detail);
-    let (choice, probability) = response
-        .choice(QUESTION_ID)
-        .map_err(|error| invalid(error.to_string()))?;
-    let category = CategoryKind::try_from(choice).map_err(|error| invalid(error.to_string()))?;
-    Ok((category, probability))
+fn request(question: &Question) -> JudgeRequest {
+    JudgeRequest {
+        text: question.as_str().to_owned(),
+        questions: vec![JudgeQuestion::OneOf {
+            instructions: "What kind of answer does this question ask for?".to_owned(),
+            options: OPTIONS.iter().map(|(_, option)| *option).collect(),
+        }],
+    }
 }
 
 impl Step for Classify {
@@ -120,7 +111,7 @@ impl Step for Classify {
         question: &Question,
         _input: Asked,
     ) -> Result<Scored<CategoryKind, ClassifyRecord>, StepError> {
-        let (system_one, min_confidence) = match &self.mode {
+        let (judge, min_confidence) = match &self.mode {
             Classifier::AllOpen => {
                 let category = CategoryKind::Open;
                 let record = ClassifyRecord {
@@ -132,22 +123,18 @@ impl Step for Classify {
                 return Ok(Scored::new(category, record));
             }
             Classifier::Judged {
-                system_one,
+                judge,
                 min_confidence,
-            } => (system_one, *min_confidence),
+            } => (judge, *min_confidence),
         };
 
-        let model = system_one.model();
-        let response = system_one
-            .decide(Self::request(question))
-            .await
-            .map_err(|error| {
-                StepError::from(error).with_model(model.clone(), CLASSIFY_PROMPT_VERSION)
-            })?;
-        let answer = response.answers.get(QUESTION_ID);
-        let raw = answer.and_then(|answer| serde_json::to_string(answer).ok());
-        let (chosen, score) = parse(&response).map_err(|reason| {
-            StepError::decline(reason)
+        let model = judge.model();
+        let judgements = judge.judge(request(question)).await.map_err(|error| {
+            StepError::from(error).with_model(model.clone(), CLASSIFY_PROMPT_VERSION)
+        })?;
+        let raw = serde_json::to_string(judgements.raw(0)).ok();
+        let (chosen, score) = judgements.one_of(0).map_err(|error| {
+            StepError::decline(DeclineReason::InvalidModelOutput(error.to_string()))
                 .with_record(ClassifyRecord {
                     mode: ClassifyMode::Judged,
                     raw: raw.clone(),
@@ -156,6 +143,7 @@ impl Step for Classify {
                 })
                 .with_model(model.clone(), CLASSIFY_PROMPT_VERSION)
         })?;
+        let chosen = OPTIONS[chosen].0;
         let unsure = min_confidence.is_some_and(|min| score < min);
         let (category, fallback_from) = if unsure && chosen != CategoryKind::Open {
             (CategoryKind::Open, Some(chosen))
@@ -176,7 +164,7 @@ impl Step for Classify {
 
 #[cfg(test)]
 mod tests {
-    use crate::llm::system_one::{DecisionAnswer, ScriptedSystemOne};
+    use crate::llm::judge::{FnJudge, RawJudgement};
 
     use super::*;
 
@@ -184,23 +172,33 @@ mod tests {
         Probability::new(value).unwrap()
     }
 
-    fn choice(choice: &str, probability: f32) -> DecisionResponse {
-        DecisionResponse {
-            answers: BTreeMap::from([(
-                QUESTION_ID.to_owned(),
-                DecisionAnswer::Choice {
-                    choice: choice.into(),
-                    confidence: 0.5,
-                    probabilities: BTreeMap::from([(choice.into(), probability)]),
-                },
-            )]),
-        }
+    /// Gives `category` probability `probability` and splits the rest evenly over the other options.
+    fn choosing(category: &'static str, probability: f32) -> Arc<FnJudge> {
+        Arc::new(FnJudge::new(move |_, question| {
+            let JudgeQuestion::OneOf { options, .. } = question else {
+                return RawJudgement::Missing;
+            };
+            let rest = (1.0 - probability) / (options.len() - 1) as f32;
+            RawJudgement::OneOf(
+                options
+                    .iter()
+                    .map(|option| {
+                        if option.name == category {
+                            probability
+                        } else {
+                            rest
+                        }
+                    })
+                    .collect(),
+            )
+        }))
     }
 
     async fn classify(
-        system_one: &Arc<ScriptedSystemOne>,
+        judge: &Arc<FnJudge>,
+        min_confidence: Option<Probability>,
     ) -> Result<Scored<CategoryKind, ClassifyRecord>, StepError> {
-        Classify::judged(Arc::<ScriptedSystemOne>::clone(system_one), None)
+        Classify::judged(Arc::<FnJudge>::clone(judge), min_confidence)
             .run(
                 &Question::new("Does ROLE_USERS hold role assignments?"),
                 Asked,
@@ -208,35 +206,39 @@ mod tests {
             .await
     }
 
-    #[tokio::test]
-    async fn the_choice_and_its_probability_become_the_category_and_score() {
-        let system_one = Arc::new(ScriptedSystemOne::new([Ok(choice("boolean", 0.87))]));
+    #[test]
+    fn option_names_are_the_category_names() {
+        for (category, option) in OPTIONS {
+            assert_eq!(option.name, category.as_str());
+        }
+    }
 
-        let scored = classify(&system_one).await.unwrap();
+    #[tokio::test]
+    async fn the_most_probable_option_and_its_probability_become_the_category_and_score() {
+        let judge = choosing("boolean", 0.87);
+
+        let scored = classify(&judge, None).await.unwrap();
 
         assert_eq!(scored.output, CategoryKind::Boolean);
         assert_eq!(scored.score, Some(p(0.87)));
         assert_eq!(scored.record.mode, ClassifyMode::Judged);
+        assert!(scored.record.raw.unwrap().starts_with(r#"{"one_of":"#));
         assert_eq!(scored.prompt_version, Some(CLASSIFY_PROMPT_VERSION));
-        let request = &system_one.requests()[0];
-        assert_eq!(request.state, "Does ROLE_USERS hold role assignments?");
-        let Decision::Choice { criteria, .. } = &request.questions[QUESTION_ID] else {
-            panic!("expected a choice question");
+        let request = &judge.requests()[0];
+        assert_eq!(request.text, "Does ROLE_USERS hold role assignments?");
+        let JudgeQuestion::OneOf { options, .. } = &request.questions[0] else {
+            panic!("expected a one-of question");
         };
-        let names: Vec<_> = criteria.0.iter().map(|(name, _)| name.as_str()).collect();
+        let names: Vec<_> = options.iter().map(|option| option.name).collect();
         assert_eq!(names, ["boolean", "choice", "ranking", "open"]);
     }
 
     #[tokio::test]
     async fn an_unsure_decisive_category_falls_back_to_open() {
-        let unsure = |category: &str, probability: f32| {
-            let system_one = Arc::new(ScriptedSystemOne::new([Ok(choice(category, probability))]));
-            async move {
-                Classify::judged(system_one, Some(p(0.6)))
-                    .run(&Question::new("q"), Asked)
-                    .await
-                    .unwrap()
-            }
+        let unsure = |category, probability| async move {
+            classify(&choosing(category, probability), Some(p(0.6)))
+                .await
+                .unwrap()
         };
 
         let scored = unsure("boolean", 0.55).await;
@@ -254,10 +256,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unknown_category_declines_with_the_raw_answer() {
-        let system_one = Arc::new(ScriptedSystemOne::new([Ok(choice("haiku", 0.9))]));
+    async fn a_missing_answer_declines_with_the_raw_answer() {
+        let judge = Arc::new(FnJudge::new(|_, _| RawJudgement::Missing));
 
-        let error = classify(&system_one).await.err().unwrap();
+        let error = classify(&judge, None).await.err().unwrap();
 
         assert!(matches!(
             error.kind,
@@ -270,9 +272,10 @@ mod tests {
     #[tokio::test]
     async fn a_probability_outside_zero_to_one_declines_with_the_raw_answer() {
         for bad in [1.3, -0.2, f32::NAN] {
-            let system_one = Arc::new(ScriptedSystemOne::new([Ok(choice("boolean", bad))]));
-
-            let error = classify(&system_one).await.err().unwrap();
+            let error = classify(&choosing("boolean", bad), None)
+                .await
+                .err()
+                .unwrap();
 
             assert!(
                 matches!(

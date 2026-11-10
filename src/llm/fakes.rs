@@ -1,5 +1,8 @@
 //! Deterministic stand-ins for tests and for running without AWS or a System One server.
 
+// `ScriptedSystemOne` stands in for a System One backend, so it speaks the wire format the fence keeps in `src/llm/`.
+#![allow(clippy::disallowed_types)]
+
 use std::{collections::VecDeque, sync::Mutex};
 
 use async_trait::async_trait;

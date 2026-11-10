@@ -130,7 +130,7 @@ pub struct VerifiedVerdict {
 }
 
 impl VerifiedVerdict {
-    /// System One's verdict.
+    /// The judge's verdict.
     pub fn yes(&self) -> bool {
         self.yes
     }

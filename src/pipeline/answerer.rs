@@ -13,7 +13,7 @@ use crate::{
     llm::{
         self, ChatModel, ModelRef,
         backend::{ChatArgs, EmbedArgs, SystemOneArgs},
-        system_one::SystemOne,
+        judge::Judge,
     },
     retrieval::{Retrieved, Retriever, hybrid::HybridRetriever},
 };
@@ -52,7 +52,8 @@ pub struct PipelineArgs {
     /// The `Explain` LLM.
     #[command(flatten)]
     pub chat: ChatArgs,
-    /// System One, for `Classify`, `Answer`, and `Rerank`, `Admit` and `Verify` when their config names a judge.
+    /// The judge's backend (System One), for `Classify`, `Answer`, and `Rerank`, `Admit` and `Verify` when their
+    /// config names a judge.
     #[command(flatten)]
     pub system_one: SystemOneArgs,
 }
@@ -64,8 +65,10 @@ pub struct Models {
     pub embedding: Option<ModelRef>,
     /// The `Explain` LLM.
     pub explain: ModelRef,
-    /// Classify and Answer, and Rerank when `rerank` is set. `None`: every question is `open`.
-    pub system_one: Option<ModelRef>,
+    /// The judge: Classify and Answer, and every check whose config names a judge. `None`: every question is
+    /// `open`. Files written before it was renamed call it `system_one`.
+    #[serde(alias = "system_one")]
+    pub judge: Option<ModelRef>,
     /// The Rerank judge. `None`: reranking keeps retrieval order, because `rerank.judge` is `none`. Also `None` in
     /// files written before it was recorded, whose config says who judged.
     #[serde(default)]
@@ -110,17 +113,16 @@ impl PipelineAnswerer {
                 retriever,
                 embedding: None,
                 explain,
-                system_one: None,
+                judge: None,
             },
         )
         .expect("the default config names no judged check and no rerank threshold")
     }
 
-    /// Reassembles with `system_one` as the judge: Classify and Answer on it, and every check whose config names a
-    /// judge.
-    pub fn with_system_one(self, system_one: Arc<dyn SystemOne>) -> Self {
+    /// Reassembles with `judge`: Classify and Answer on it, and every check whose config names a judge.
+    pub fn with_judge(self, judge: Arc<dyn Judge>) -> Self {
         let ports = Ports {
-            system_one: Some(system_one),
+            judge: Some(judge),
             ..self.ports
         };
         Self::assemble(self.config, ports)
@@ -151,19 +153,15 @@ impl PipelineAnswerer {
         Models {
             embedding: self.ports.embedding.clone(),
             explain: self.ports.explain.model(),
-            system_one: self
-                .ports
-                .system_one
-                .as_ref()
-                .map(|system_one| system_one.model()),
+            judge: self.ports.judge.as_ref().map(|judge| judge.model()),
             rerank: self.steps.open.rerank.judged_by(),
             admit: self.steps.open.admit.as_ref().map(Admit::judged_by),
             verify: self.steps.open.pipeline.1.judged_by(),
         }
     }
 
-    /// Hybrid retrieval and `Explain` on Bedrock or OpenAI-compatible servers; `Classify` and `Answer` on System
-    /// One when configured, and `Rerank`, `Admit` and `Verify`'s support check too when their config names a judge.
+    /// Hybrid retrieval and `Explain` on Bedrock or OpenAI-compatible servers; `Classify` and `Answer` on the judge
+    /// when one is configured, and `Rerank`, `Admit` and `Verify`'s support check too when their config names it.
     /// Every tunable comes from the pipeline config file.
     ///
     /// # Errors
@@ -179,7 +177,7 @@ impl PipelineAnswerer {
             retriever: Arc::new(retriever),
             embedding,
             explain: llm::explain_model(&args.chat).await?,
-            system_one: llm::system_one_client(&args.system_one)?,
+            judge: llm::judge(&args.system_one)?,
         };
         Ok(Self::assemble(config, ports)?)
     }

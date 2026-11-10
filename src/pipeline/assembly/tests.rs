@@ -1,18 +1,21 @@
 use super::*;
-use crate::llm::fakes::{ScriptedChat, ScriptedSystemOne};
+use crate::llm::{
+    fakes::ScriptedChat,
+    judge::{FnJudge, RawJudgement},
+};
 use crate::retrieval::fakes::KeywordRetriever;
 
-fn ports(system_one: Option<Arc<dyn SystemOne>>) -> Ports {
+fn ports(judge: Option<Arc<dyn Judge>>) -> Ports {
     Ports {
         retriever: Arc::new(KeywordRetriever { chunks: Vec::new() }),
         embedding: None,
         explain: Arc::new(ScriptedChat::replying(Vec::<String>::new())),
-        system_one,
+        judge,
     }
 }
 
 fn with_judge() -> Ports {
-    ports(Some(Arc::new(ScriptedSystemOne::new([]))))
+    ports(Some(Arc::new(FnJudge::new(|_, _| RawJudgement::Missing))))
 }
 
 fn config(json: &str) -> PipelineConfig {
@@ -20,9 +23,9 @@ fn config(json: &str) -> PipelineConfig {
 }
 
 const EVERY_JUDGED_CHECK: &str = r#"{
-    "rerank": {"judge": {"system_one": {"candidates": 25}}},
-    "admit": {"judge": {"system_one": {}}},
-    "verify": {"support": {"system_one": {}}}
+    "rerank": {"judge": {"candidates": 25}},
+    "admit": {"judge": {}},
+    "verify": {"support": {"judged": {}}}
 }"#;
 
 #[test]
@@ -68,15 +71,12 @@ fn every_judged_check_without_a_judge_is_named_in_one_error() {
 fn one_judged_check_without_a_judge_fails_alone() {
     for (json, check) in [
         (
-            r#"{"rerank": {"judge": {"system_one": {"candidates": 25}}}}"#,
+            r#"{"rerank": {"judge": {"candidates": 25}}}"#,
             JudgedCheck::Rerank,
         ),
+        (r#"{"admit": {"judge": {}}}"#, JudgedCheck::Admit),
         (
-            r#"{"admit": {"judge": {"system_one": {}}}}"#,
-            JudgedCheck::Admit,
-        ),
-        (
-            r#"{"verify": {"support": {"system_one": {"min_support": 0.9}}}}"#,
+            r#"{"verify": {"support": {"judged": {"min_support": 0.9}}}}"#,
             JudgedCheck::Support,
         ),
     ] {
@@ -129,9 +129,8 @@ fn a_rerank_threshold_needs_a_judged_rerank() {
             );
         }
     }
-    let judged = config(
-        r#"{"rerank": {"judge": {"system_one": {"candidates": 25}}}, "thresholds": {"rerank": 0.5}}"#,
-    );
+    let judged =
+        config(r#"{"rerank": {"judge": {"candidates": 25}}, "thresholds": {"rerank": 0.5}}"#);
     let assembled = assemble(&judged, &with_judge()).unwrap();
     assert_eq!(
         crate::pipeline::Step::threshold(&assembled.open.rerank),

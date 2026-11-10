@@ -1308,3 +1308,50 @@ fn faithfulness_counts_only_claims_a_judge_checked() {
     assert_eq!(claims_supported(&quotes), None);
     assert_eq!(claims_supported(&VerifyRecord::default()), None);
 }
+
+#[test]
+fn a_results_file_written_before_modes_were_named_by_role_still_reads() {
+    use crate::config::{AdmitJudge, RerankCandidates, RerankJudge, SupportCheck, SupportCutoff};
+
+    let setup: super::metrics::RunSetup = serde_json::from_value(serde_json::json!({
+        "started_at": "2026-11-01T00:00:00Z",
+        "golden": "eval/golden/example.jsonl",
+        "git": null,
+        "config": {
+            "rerank": { "top_k": 5, "judge": { "system_one": { "candidates": 25 } } },
+            "admit": { "judge": { "system_one": {} } },
+            "verify": { "support": { "system_one": { "min_support": 0.75 } } },
+        },
+        "models": {
+            "embedding": null,
+            "explain": { "id": "qwen3:14b", "version": "1" },
+            "system_one": { "id": "kev-latest", "version": "system-one-v1" },
+        },
+    }))
+    .unwrap();
+
+    assert_eq!(
+        setup.config.rerank.judge(),
+        RerankJudge::Judged(RerankCandidates { candidates: 25 })
+    );
+    assert!(matches!(setup.config.admit.judge, AdmitJudge::Judged(_)));
+    assert_eq!(
+        setup.config.verify.support,
+        SupportCheck::Judged(SupportCutoff::default())
+    );
+    assert_eq!(setup.models.judge.unwrap().id, "kev-latest");
+    assert_eq!(setup.plan, None);
+
+    let flat: super::metrics::RunSetup = serde_json::from_value(serde_json::json!({
+        "started_at": "2026-11-01T00:00:00Z",
+        "golden": "g",
+        "git": null,
+        "config": { "rerank": { "top_k": 5, "candidates": 30 } },
+        "models": { "embedding": null, "explain": { "id": "x", "version": "1" }, "system_one": null },
+    }))
+    .unwrap();
+    assert_eq!(
+        flat.config.rerank.judge(),
+        RerankJudge::Judged(RerankCandidates { candidates: 30 })
+    );
+}

@@ -101,10 +101,10 @@ pub enum TraceRecord {
 pub struct RankedChunk {
     /// The exact version used.
     pub chunk: ChunkRef,
-    /// Retrieval's fused score. Rerank records written before `probability` existed hold System One's
+    /// Retrieval's fused score. Rerank records written before `probability` existed hold the judge's
     /// probability here instead.
     pub score: Relevance,
-    /// System One's probability that the chunk helps answer the question, when `Rerank` judged it.
+    /// The judge's probability that the chunk helps answer the question, when `Rerank` judged it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probability: Option<Probability>,
     /// Set when retrieval added the chunk as context next to a match rather than ranking it: the id of that match.
@@ -142,11 +142,11 @@ pub struct ClassifyRecord {
     /// every question was `open`.
     #[serde(default)]
     pub mode: ClassifyMode,
-    /// System One's answer as JSON; `None` under `all_open` or when it gave no answer.
+    /// The judge's answer as JSON; `None` under `all_open`.
     pub raw: Option<String>,
     /// The category the run continued with; `None` when the answer was invalid.
     pub category: Option<CategoryKind>,
-    /// What System One chose when its probability was below `classify.min_confidence` and the run fell back to `open`.
+    /// What the judge chose when its probability was below `classify.min_confidence` and the run fell back to `open`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_from: Option<CategoryKind>,
 }
@@ -169,7 +169,7 @@ pub struct RerankRecord {
     /// when a judge ordered them.
     #[serde(default)]
     pub mode: RerankMode,
-    /// System One's probability of yes per judged chunk id, as a JSON object; `None` under `retrieval_order`.
+    /// The judge's probability of yes per judged chunk id, as a JSON object; `None` under `retrieval_order`.
     pub raw: Option<String>,
     /// The kept matches best first, then the context chunks attached to them.
     pub chunks: Vec<RankedChunk>,
@@ -178,7 +178,7 @@ pub struct RerankRecord {
 /// What `Answer` asked for and got.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AnswerRecord {
-    /// System One's response as JSON.
+    /// The judge's answer as JSON.
     pub raw: Option<String>,
     /// The verdict the step parsed from `raw`; `None` when parsing failed.
     pub parsed: Option<serde_json::Value>,
@@ -189,7 +189,7 @@ pub struct AnswerRecord {
 pub struct ExplainRecord {
     /// The LLM's reply, verbatim.
     pub raw: Option<String>,
-    /// The LLM flagged that cited sources contradict the System One verdict.
+    /// The LLM flagged that cited sources contradict the judge's verdict.
     pub contradicts_verdict: bool,
 }
 

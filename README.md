@@ -11,7 +11,7 @@ The core is domain-free. Corpora, answering rules, golden sets and front ends be
 
 - **Ingest**: a `Source` port returns document snapshots; chunks are content-addressed (`ChunkRef {id, version}`), so a trace stays reproducible after the corpus changes. A markdown-directory connector ships; any other connector names itself and plugs in through `ingest::run_with` without a core or schema change.
 - **Retrieve**: hybrid full-text (BM25 over prose, exact identifier tokens) and vector search in Postgres with pgvector, fused by reciprocal rank, with neighbouring sections as context and optional glossary expansion.
-- **Decide and explain**: a decision model (System One) classifies the question and answers yes/no questions with calibrated probabilities; an LLM writes the answer as claims whose citations are constrained to this run's chunks.
+- **Decide and explain**: a judge (System One by default) classifies the question and answers yes/no questions with calibrated probabilities; an LLM writes the answer as claims whose citations are constrained to this run's chunks.
 - **Provenance checks**: a vendor-neutral `Judge` port screens sources before they reach the LLM (injection, relevance, contradiction, evidence) and checks each claim against the chunks it cites (quoted spans, then supports / contradicts / says nothing). Failed claims decline the run or are stripped.
 - **Audit**: every run, answered, declined or failed, is persisted with its trace: each step's model, prompt version, score and raw output, every admission screen and every claim verdict. `GET /v1/runs/{id}` returns it.
 - **Evaluate**: `recall eval` scores a golden set per step (classification, recall@50, hit@5, precision, decline and failure rates, citation validity, faithfulness), gates against a baseline, and re-tunes thresholds from recorded scores.
@@ -46,14 +46,14 @@ sequenceDiagram
         DB-->>P: 50 chunks, with neighbouring sections as context
     end
     Note over P: Below classify.min_confidence, or choice and ranking: the open path
-    opt rerank.judge is system_one (off by default)
+    opt rerank.judge names a judge (off by default)
         loop Rerank: each of the top 25 matches
             P->>K: does this text help answer the question?
             K-->>P: probability of yes
         end
     end
-    Note over P: Rerank keeps the best 5 by retrieval rank,<br/>fused with System One's when it judges
-    opt admit.judge is system_one (off by default)
+    Note over P: Rerank keeps the best 5 by retrieval rank,<br/>fused with the judge's when it judges
+    opt admit.judge names a judge (off by default)
         loop Admit: each kept source
             P->>K: injection? relevant? contradicts the premise? usable evidence?
             K-->>P: four probabilities; excluded sources never reach Explain
@@ -66,7 +66,7 @@ sequenceDiagram
     P->>L: Explain: question, 5 sources and any verdict, delimited as data
     L-->>P: claims as JSON citing chunk ids, a contradiction declines
     Note over P: Verify: an uncited claim, a citation outside this run's chunks,<br/>or a quoted span no cited chunk contains fails the claim
-    opt verify.support is system_one (off by default)
+    opt verify.support is judged (off by default)
         loop each claim, its cited chunks in order
             P->>K: does this text support, contradict, or say nothing about the claim?
             K-->>P: the chosen relation and its probability
@@ -167,25 +167,25 @@ Tunables (retrieval and its glossary expansion, the Classify fallback, Rerank, a
 
 `explain.max_tokens` is Explain's token budget, reasoning included, from 1 to 65,536 (default 2,048). [`config/recall-workers-ai.json`](config/recall-workers-ai.json) is `config/recall.json` with it at 8,192 for the hosted reasoning model; a test fails if the two files differ anywhere else, so change both.
 
-`rerank.judge` chooses who judges Rerank's matches, independent of Classify and Answer, which use System One whenever it is configured:
+`rerank.judge` chooses whether the judge orders Rerank's matches, independent of Classify and Answer, which use the judge whenever one is configured. Config modes name the role, not the backend: the judge is System One, selected by `RECALL_SYSTEM_ONE_BACKEND`. The `system_one` spellings of earlier versions are rejected with the spelling to write instead; `recall eval` still reads results files that use them.
 
 - `"none"` (the default and the shipped setting): matches keep retrieval order, with evidence ranked `evidence_rank_penalty` places lower; no model call, and no Rerank threshold applies.
-- `{"system_one": {"candidates": 25}}`: System One judges the best 25 matches by fused score, as before. `candidates` lives inside the variant because it means nothing without a judge, and must be at least `top_k`.
+- `{"candidates": 25}`: the judge reads the best 25 matches by fused score. `candidates` lives inside the variant because it means nothing without a judge, and must be at least `top_k`.
 
-Judging every match costs one System One call per candidate, so it is off unless an eval shows it pays for itself on your corpus.
+Judging every match costs one judge call per candidate, so it is off unless an eval shows it pays for itself on your corpus.
 
 `admit.judge` screens the reranked sources before Explain sees them:
 
 - `"none"` (the default and the shipped setting): no `admit` step; every reranked source reaches Explain.
-- `{"system_one": {}}`: one System One request per source. A match is asked four yes/no questions and routed by the first cutoff it crosses: `injection_max` (0.7) excludes it, `relevant_min` (0.45) excludes it, `contradicts_min` (0.7) keeps it as a conflict, and `evidence_min` (0.55) keeps it, else it is excluded. Context is only screened for injection and otherwise rides with its match. No kept match declines the run with `no_sources`. The cutoffs are uncalibrated; fit them with `recall eval` before relying on them. The shipped config leaves it off, since it adds a System One request per source; turn it on for a corpus you do not curate yourself.
+- `{}`, or the cutoffs to override, e.g. `{"evidence_min": 0.6}`: one judge request per source. A match is asked four yes/no questions and routed by the first cutoff it crosses: `injection_max` (0.7) excludes it, `relevant_min` (0.45) excludes it, `contradicts_min` (0.7) keeps it as a conflict, and `evidence_min` (0.55) keeps it, else it is excluded. Context is only screened for injection and otherwise rides with its match. No kept match declines the run with `no_sources`. The cutoffs are uncalibrated; fit them with `recall eval` before relying on them. The shipped config leaves it off, since it adds a judge request per source; turn it on for a corpus you do not curate yourself.
 
 `verify.support` is what a claim must pass besides citing this run's sources:
 
 - `"membership"` (the default): citations only.
 - `"quotes"` (shipped): also, every span in backticks or double quotes appears in a cited chunk; no model call.
-- `{"system_one": {"min_support": 0.75}}`: the quote check, then System One judges each cited chunk in order until one "supports" the claim with at least `min_support`.
+- `{"judged": {"min_support": 0.75}}`: the quote check, then the judge reads each cited chunk in order until one "supports" the claim with at least `min_support`.
 
-A check that names a judge never runs as a quieter one: with `RECALL_SYSTEM_ONE_BACKEND=none`, a config whose `rerank.judge`, `admit.judge` or `verify.support` names `system_one` is a startup error listing each such key, and so is a `rerank` threshold while `rerank.judge` is `"none"` (the step is unscored). Without System One every question is classified `open`. `recall serve` logs the assembled plan (`classify`, `rerank`, `admit`, `support` modes) at startup, `recall eval run` records it as `plan` in the results file, and each run's Classify, Rerank and Verify trace records carry the mode they ran in.
+A check that names a judge never runs as a quieter one: with `RECALL_SYSTEM_ONE_BACKEND=none`, a config whose `rerank.judge`, `admit.judge` or `verify.support` needs a judge is a startup error listing each such key, and so is a `rerank` threshold while `rerank.judge` is `"none"` (the step is unscored). Without a judge every question is classified `open`. `recall serve` logs the assembled plan (`classify`, `rerank`, `admit`, `support` modes) at startup, `recall eval run` records it as `plan` in the results file, and each run's Classify, Rerank and Verify trace records carry the mode they ran in.
 
 `verify.publish` is `"decline"` (the default and shipped: any failed claim declines the run) or `"strip"` (failed claims are left out and the rest published; the run declines only when none passes). Every verdict is in the Verify trace record, and `recall eval` reports the share of judged claims that are supported as `faithfulness`.
 

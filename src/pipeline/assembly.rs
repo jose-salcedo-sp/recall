@@ -12,15 +12,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::{
-        AdmitJudge, PipelineConfig, RerankJudge, StepName, SupportCheck, SupportCutoff,
-        SystemOneJudge,
+        AdmitJudge, PipelineConfig, RerankCandidates, RerankJudge, StepName, SupportCheck,
+        SupportCutoff,
     },
     domain::{AtLeastOne, CategoryKind},
-    llm::{
-        ChatModel, ModelRef,
-        judge::{self, Judge},
-        system_one::SystemOne,
-    },
+    llm::{ChatModel, ModelRef, judge::Judge},
     retrieval::Retriever,
 };
 
@@ -42,9 +38,9 @@ pub struct Ports {
     pub embedding: Option<ModelRef>,
     /// The `Explain` LLM.
     pub explain: Arc<dyn ChatModel>,
-    /// Classifies and answers yes or no, and judges for every check whose config names a judge. `None`: every
+    /// Classifies, answers yes or no, and judges for every check whose config names a judge. `None`: every
     /// question is `open`, and a config whose checks need a judge does not assemble.
-    pub system_one: Option<Arc<dyn SystemOne>>,
+    pub judge: Option<Arc<dyn Judge>>,
 }
 
 /// What each step does, as assembled: the config's checks exactly, since a check that cannot run as configured
@@ -164,33 +160,27 @@ pub(super) struct Assembled {
 
 /// Builds every step `config` names from `ports`.
 pub(super) fn assemble(config: &PipelineConfig, ports: &Ports) -> Result<Assembled, Unassembled> {
-    let system_one = ports.system_one.as_ref();
-    let judge = system_one.map(|system_one| {
-        Arc::new(judge::SystemOneJudge::new(Arc::clone(system_one))) as Arc<dyn Judge>
-    });
-
-    let rerank_judge = match (config.rerank.judge(), system_one) {
+    let judge = ports.judge.as_ref();
+    let rerank_judge = match (config.rerank.judge(), judge) {
         (RerankJudge::None, _) => Ok(None),
-        (RerankJudge::SystemOne(SystemOneJudge { candidates }), Some(system_one)) => {
-            Ok(Some((system_one, candidates)))
+        (RerankJudge::Judged(RerankCandidates { candidates }), Some(judge)) => {
+            Ok(Some((judge, candidates)))
         }
-        (RerankJudge::SystemOne(_), None) => Err(JudgedCheck::Rerank),
+        (RerankJudge::Judged(_), None) => Err(JudgedCheck::Rerank),
     };
-    let admit = match (config.admit.judge, &judge) {
+    let admit = match (config.admit.judge, judge) {
         (AdmitJudge::None, _) => Ok(None),
-        (AdmitJudge::SystemOne(cutoffs), Some(judge)) => Ok(Some((judge, cutoffs))),
-        (AdmitJudge::SystemOne(_), None) => Err(JudgedCheck::Admit),
+        (AdmitJudge::Judged(cutoffs), Some(judge)) => Ok(Some((judge, cutoffs))),
+        (AdmitJudge::Judged(_), None) => Err(JudgedCheck::Admit),
     };
-    let support = match (config.verify.support, &judge) {
+    let support = match (config.verify.support, judge) {
         (SupportCheck::Membership, _) => Ok(Support::Membership),
         (SupportCheck::Quotes, _) => Ok(Support::Quotes),
-        (SupportCheck::SystemOne(SupportCutoff { min_support }), Some(judge)) => {
-            Ok(Support::Judged {
-                judge: Arc::clone(judge),
-                min_support,
-            })
-        }
-        (SupportCheck::SystemOne(_), None) => Err(JudgedCheck::Support),
+        (SupportCheck::Judged(SupportCutoff { min_support }), Some(judge)) => Ok(Support::Judged {
+            judge: Arc::clone(judge),
+            min_support,
+        }),
+        (SupportCheck::Judged(_), None) => Err(JudgedCheck::Support),
     };
     let (rerank_judge, admit, support) = match (rerank_judge, admit, support) {
         (Ok(rerank_judge), Ok(admit), Ok(support)) => (rerank_judge, admit, support),
@@ -221,12 +211,12 @@ pub(super) fn assemble(config: &PipelineConfig, ports: &Ports) -> Result<Assembl
             Verify::new(support.clone(), config.verify.publish),
         ),
     };
-    let boolean = system_one.map(|system_one| Path {
+    let boolean = judge.map(|judge| Path {
         rerank: rerank(config, rerank_judge, CategoryKind::Boolean),
         admit: admit.map(|(judge, cutoffs)| Admit::new(Arc::clone(judge), cutoffs)),
         pipeline: Seq(
             Answer::new(
-                Arc::clone(system_one),
+                Arc::clone(judge),
                 config.threshold(CategoryKind::Boolean, StepName::Answer),
             ),
             Seq(
@@ -235,10 +225,8 @@ pub(super) fn assemble(config: &PipelineConfig, ports: &Ports) -> Result<Assembl
             ),
         ),
     });
-    let classify = match system_one {
-        Some(system_one) => {
-            Classify::judged(Arc::clone(system_one), config.classify.min_confidence)
-        }
+    let classify = match judge {
+        Some(judge) => Classify::judged(Arc::clone(judge), config.classify.min_confidence),
         None => Classify::all_open(),
     };
     let plan = Plan {
@@ -261,13 +249,13 @@ pub(super) fn assemble(config: &PipelineConfig, ports: &Ports) -> Result<Assembl
 
 fn rerank<TCategory>(
     config: &PipelineConfig,
-    judge: Option<(&Arc<dyn SystemOne>, usize)>,
+    judge: Option<(&Arc<dyn Judge>, usize)>,
     category: CategoryKind,
 ) -> Rerank<TCategory> {
     let by = match judge {
         None => RerankBy::Retrieval,
-        Some((system_one, candidates)) => RerankBy::Judge {
-            system_one: Arc::clone(system_one),
+        Some((judge, candidates)) => RerankBy::Judge {
+            judge: Arc::clone(judge),
             candidates,
             threshold: config.threshold(category, StepName::Rerank),
         },

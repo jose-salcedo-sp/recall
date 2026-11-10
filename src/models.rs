@@ -4,7 +4,7 @@
 //! Backends are parsed and built by [`crate::llm::backend`], which also says what to print about a backend's
 //! ambient settings; this module only calls the ports.
 
-use std::{fmt, time::Duration};
+use std::{fmt, sync::Arc, time::Duration};
 
 use eros::{Context, ensure};
 use serde_json::{Value, json};
@@ -14,14 +14,14 @@ use crate::{
     llm::{
         ChatModel, ChatRequest, EMBEDDING_DIM, EmbedPurpose, Embedder, ModelRef,
         backend::{ChatBackend, EmbedBackend, Endpoint, SystemOneBackend},
-        system_one::{Decision, DecisionRequest, SystemOne},
+        judge::{Judge, JudgeQuestion, JudgeRequest, SystemOneJudge},
+        system_one::SystemOne,
     },
     pipeline::answerer::PipelineArgs,
 };
 
 /// `Explain`'s own budget: a reasoning effort that spends it all before answering fails here too.
 const PROBE_MAX_TOKENS: u32 = 2048;
-const QUESTION_ID: &str = "check";
 
 /// `recall models` options.
 #[derive(Debug, clap::Args)]
@@ -301,7 +301,7 @@ async fn probe_system_one(args: &PipelineArgs) -> Probed {
                 Port::SystemOne,
                 system_one.model(),
                 endpoint,
-                decide_once(&*system_one),
+                decide_once(Arc::clone(&system_one)),
             )
             .await,
         ),
@@ -312,20 +312,15 @@ async fn probe_system_one(args: &PipelineArgs) -> Probed {
 }
 
 #[eros::context("asking one yes/no question")]
-async fn decide_once(system_one: &dyn SystemOne) -> eros::Result<()> {
-    let response = system_one
-        .decide(DecisionRequest {
-            state: "This message is a connectivity check from recall models check.".to_owned(),
-            model: String::new(),
-            questions: [(
-                QUESTION_ID.to_owned(),
-                Decision::Noul {
-                    instructions: "Is this message a connectivity check?".to_owned(),
-                },
-            )]
-            .into(),
+async fn decide_once(system_one: Arc<dyn SystemOne>) -> eros::Result<()> {
+    let judgements = SystemOneJudge::new(system_one)
+        .judge(JudgeRequest {
+            text: "This message is a connectivity check from recall models check.".to_owned(),
+            questions: vec![JudgeQuestion::YesNo {
+                instructions: "Is this message a connectivity check?".to_owned(),
+            }],
         })
         .await?;
-    response.yes_no(QUESTION_ID)?;
+    judgements.yes(0)?;
     Ok(())
 }

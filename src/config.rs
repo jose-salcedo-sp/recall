@@ -226,16 +226,98 @@ pub struct AdmitConfig {
     pub judge: AdmitJudge,
 }
 
-/// Who screens the reranked sources before `Explain` sees them.
+/// Who screens the reranked sources before `Explain` sees them: `"none"`, or the judge's cutoffs as an object.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(into = "serde_json::Value", try_from = "serde_json::Value")]
 pub enum AdmitJudge {
     /// No screening: every reranked source reaches `Explain`, and the run has no `admit` step.
     #[default]
     None,
-    /// System One answers four yes/no questions per match. Needs a judge: without one the pipeline does not
+    /// The judge answers four yes/no questions per match. Needs a judge: without one the pipeline does not
     /// assemble.
-    SystemOne(AdmissionCutoffs),
+    Judged(AdmissionCutoffs),
+}
+
+impl TryFrom<serde_json::Value> for AdmitJudge {
+    type Error = InvalidJudge;
+
+    fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
+        Ok(judge_settings("admit.judge", "{}", value)?.map_or(Self::None, Self::Judged))
+    }
+}
+
+impl From<AdmitJudge> for serde_json::Value {
+    fn from(judge: AdmitJudge) -> Self {
+        match judge {
+            AdmitJudge::None => Self::from("none"),
+            AdmitJudge::Judged(cutoffs) => serde_json::to_value(cutoffs)
+                .expect("cutoffs are plain data, which always serializes"),
+        }
+    }
+}
+
+/// A `rerank.judge` or `admit.judge` that is neither `"none"` nor an object of the judge's settings.
+#[derive(Debug, thiserror::Error)]
+pub enum InvalidJudge {
+    /// `"system_one"`, as written before modes were named by role. The backend is chosen by
+    /// `RECALL_SYSTEM_ONE_BACKEND`; the config only says whether a judge runs and with which settings.
+    #[error(r#"{key}: "system_one" names a backend, not a role; write "{key}": {settings}"#)]
+    BackendName {
+        /// The config key.
+        key: &'static str,
+        /// The settings to write instead.
+        settings: String,
+    },
+    /// Not `"none"` and not an object.
+    #[error(r#"{key}: expected "none" or an object of the judge's settings, got {got}"#)]
+    Unexpected {
+        /// The config key.
+        key: &'static str,
+        /// The value given.
+        got: String,
+    },
+    /// An object that is not the judge's settings.
+    #[error("{key}: {source}")]
+    Settings {
+        /// The config key.
+        key: &'static str,
+        /// What serde rejected.
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+/// `"none"` is `None`; an object is the judge's settings. `example` is the settings an old `"system_one"` is told
+/// to write when it gave none.
+fn judge_settings<T: serde::de::DeserializeOwned>(
+    key: &'static str,
+    example: &str,
+    value: serde_json::Value,
+) -> Result<Option<T>, InvalidJudge> {
+    use serde_json::Value;
+
+    match value {
+        Value::String(name) if name == "none" => Ok(None),
+        Value::String(name) if name == "system_one" => Err(InvalidJudge::BackendName {
+            key,
+            settings: example.to_owned(),
+        }),
+        Value::Object(mut object) if object.len() == 1 && object.contains_key("system_one") => {
+            Err(InvalidJudge::BackendName {
+                key,
+                settings: object
+                    .remove("system_one")
+                    .map_or_else(|| example.to_owned(), |settings| settings.to_string()),
+            })
+        }
+        value @ Value::Object(_) => serde_json::from_value(value)
+            .map(Some)
+            .map_err(|source| InvalidJudge::Settings { key, source }),
+        other => Err(InvalidJudge::Unexpected {
+            key,
+            got: other.to_string(),
+        }),
+    }
 }
 
 /// The cutoffs `Admit` routes a match by, applied in field order: an injection or an irrelevant match is excluded,
@@ -286,12 +368,12 @@ pub enum SupportCheck {
     Membership,
     /// Also: every span in backticks or double quotes appears in a cited chunk. No model call.
     Quotes,
-    /// Also the quote check, then System One judges whether a cited chunk supports the claim. Needs a judge: without
+    /// Also the quote check, then the judge reads whether a cited chunk supports the claim. Needs a judge: without
     /// one the pipeline does not assemble.
-    SystemOne(SupportCutoff),
+    Judged(SupportCutoff),
 }
 
-/// [`SupportCheck::SystemOne`].
+/// [`SupportCheck::Judged`].
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SupportCutoff {
@@ -371,7 +453,7 @@ impl TryFrom<u32> for MaxTokens {
 #[error("explain.max_tokens must be between 1 and {max}, got {0}", max = MaxTokens::MAX)]
 pub struct InvalidMaxTokens(u32);
 
-/// [`PipelineConfig::rerank`]: `0 < top_k`, and `top_k <= candidates` when System One judges.
+/// [`PipelineConfig::rerank`]: `0 < top_k`, and `top_k <= candidates` when a judge orders the matches.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "RawRerankConfig")]
 pub struct RerankConfig {
@@ -380,23 +462,46 @@ pub struct RerankConfig {
     evidence_rank_penalty: usize,
 }
 
-/// Who judges the matches `Rerank` orders. Classify and Answer use System One either way.
+/// Who judges the matches `Rerank` orders: `"none"`, or the judge's settings as an object. Classify and Answer use
+/// the judge whenever one is configured.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(into = "serde_json::Value", try_from = "serde_json::Value")]
 pub enum RerankJudge {
     /// No model: matches keep retrieval order, with the evidence penalty, and the step is unscored, so a `rerank`
     /// threshold does not assemble.
     #[default]
     None,
-    /// System One judges the best matches by fused score. Needs a judge: without one the pipeline does not assemble.
-    SystemOne(SystemOneJudge),
+    /// The judge reads the best matches by fused score. Needs a judge: without one the pipeline does not assemble.
+    Judged(RerankCandidates),
 }
 
-/// [`RerankJudge::SystemOne`].
+impl TryFrom<serde_json::Value> for RerankJudge {
+    type Error = InvalidJudge;
+
+    fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
+        Ok(
+            judge_settings("rerank.judge", r#"{"candidates": 25}"#, value)?
+                .map_or(Self::None, Self::Judged),
+        )
+    }
+}
+
+impl From<RerankJudge> for serde_json::Value {
+    fn from(judge: RerankJudge) -> Self {
+        match judge {
+            RerankJudge::None => Self::from("none"),
+            RerankJudge::Judged(RerankCandidates { candidates }) => {
+                serde_json::json!({ "candidates": candidates })
+            }
+        }
+    }
+}
+
+/// [`RerankJudge::Judged`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SystemOneJudge {
-    /// Best matches by fused retrieval score that System One judges.
+pub struct RerankCandidates {
+    /// Best matches by fused retrieval score that the judge reads.
     pub candidates: usize,
 }
 
@@ -406,8 +511,8 @@ pub enum InvalidRerankConfig {
     /// `top_k` is 0.
     #[error("rerank.top_k must be at least 1")]
     NothingKept,
-    /// System One judges fewer matches than are kept.
-    #[error("rerank.top_k ({top_k}) exceeds the {candidates} candidates System One judges")]
+    /// The judge reads fewer matches than are kept.
+    #[error("rerank.top_k ({top_k}) exceeds the {candidates} candidates the judge reads")]
     MoreKeptThanJudged {
         /// Matches kept.
         top_k: usize,
@@ -416,23 +521,18 @@ pub enum InvalidRerankConfig {
     },
     /// The flat `candidates` of configs written before `judge`.
     #[error(
-        r#"rerank.candidates applies only to the System One judge; write "judge": {{"system_one": {{"candidates": {0}}}}}, or "judge": "none""#
+        r#"rerank.candidates applies only to a judge; write "judge": {{"candidates": {0}}}, or "judge": "none""#
     )]
     CandidatesWithoutJudge(usize),
-    /// `"judge": "system_one"`, which leaves out how many matches it judges.
-    #[error(
-        r#"rerank.judge "system_one" needs its candidates; write "judge": {{"system_one": {{"candidates": 25}}}}"#
-    )]
-    SystemOneWithoutCandidates,
-    /// Neither `"none"` nor `{"system_one": {"candidates": N}}`.
-    #[error("rerank.judge: {0}")]
-    Judge(serde_json::Error),
+    /// Neither `"none"` nor `{"candidates": N}`.
+    #[error(transparent)]
+    Judge(InvalidJudge),
 }
 
 impl RerankConfig {
     /// # Errors
     ///
-    /// When `top_k` is 0, or exceeds the System One judge's `candidates`.
+    /// When `top_k` is 0, or exceeds the judge's `candidates`.
     pub fn new(
         top_k: usize,
         judge: RerankJudge,
@@ -442,10 +542,10 @@ impl RerankConfig {
             return Err(InvalidRerankConfig::NothingKept);
         }
         match judge {
-            RerankJudge::SystemOne(SystemOneJudge { candidates }) if candidates < top_k => {
+            RerankJudge::Judged(RerankCandidates { candidates }) if candidates < top_k => {
                 Err(InvalidRerankConfig::MoreKeptThanJudged { top_k, candidates })
             }
-            RerankJudge::None | RerankJudge::SystemOne(_) => Ok(Self {
+            RerankJudge::None | RerankJudge::Judged(_) => Ok(Self {
                 top_k,
                 judge,
                 evidence_rank_penalty,
@@ -493,8 +593,7 @@ impl Default for RawRerankConfig {
         let config = RerankConfig::default();
         Self {
             top_k: config.top_k,
-            judge: serde_json::to_value(config.judge)
-                .expect("a judge is plain data, which always serializes"),
+            judge: config.judge.into(),
             evidence_rank_penalty: config.evidence_rank_penalty,
             candidates: None,
         }
@@ -508,10 +607,7 @@ impl TryFrom<RawRerankConfig> for RerankConfig {
         if let Some(candidates) = raw.candidates {
             return Err(InvalidRerankConfig::CandidatesWithoutJudge(candidates));
         }
-        if raw.judge == "system_one" {
-            return Err(InvalidRerankConfig::SystemOneWithoutCandidates);
-        }
-        let judge = serde_json::from_value(raw.judge).map_err(InvalidRerankConfig::Judge)?;
+        let judge = RerankJudge::try_from(raw.judge).map_err(InvalidRerankConfig::Judge)?;
         Self::new(raw.top_k, judge, raw.evidence_rank_penalty)
     }
 }
@@ -657,17 +753,20 @@ mod tests {
     }
 
     #[test]
-    fn the_rerank_judge_is_none_or_system_one_with_its_candidates() {
+    fn the_rerank_judge_is_none_or_the_judge_s_candidates() {
         let config = PipelineConfig::parse(include_str!("../config/recall.json")).unwrap();
         assert_eq!(config.rerank.judge(), RerankJudge::None);
         assert_eq!(RerankConfig::default().judge(), RerankJudge::None);
-        let config = PipelineConfig::parse(
-            r#"{"rerank": {"top_k": 5, "judge": {"system_one": {"candidates": 25}}}}"#,
-        )
-        .unwrap();
+        let config =
+            PipelineConfig::parse(r#"{"rerank": {"top_k": 5, "judge": {"candidates": 25}}}"#)
+                .unwrap();
         assert_eq!(
             config.rerank.judge(),
-            RerankJudge::SystemOne(SystemOneJudge { candidates: 25 })
+            RerankJudge::Judged(RerankCandidates { candidates: 25 })
+        );
+        assert_eq!(
+            serde_json::to_value(config.rerank.judge()).unwrap(),
+            serde_json::json!({ "candidates": 25 })
         );
         assert_eq!(
             PipelineConfig::parse(r#"{"rerank": {"judge": "none", "top_k": 50}}"#)
@@ -683,31 +782,35 @@ mod tests {
         for (bad, says) in [
             (
                 r#"{"rerank": {"candidates": 25}}"#,
-                r#""judge": {"system_one": {"candidates": 25}}"#,
+                r#""judge": {"candidates": 25}"#,
             ),
             (
                 r#"{"rerank": {"judge": "none", "candidates": 25}}"#,
-                "applies only to the System One judge",
+                "applies only to a judge",
             ),
             (
-                r#"{"rerank": {"top_k": 10, "judge": {"system_one": {"candidates": 5}}}}"#,
+                r#"{"rerank": {"top_k": 10, "judge": {"candidates": 5}}}"#,
                 "rerank.top_k (10) exceeds the 5 candidates",
             ),
             (
                 r#"{"rerank": {"top_k": 0}}"#,
                 "rerank.top_k must be at least 1",
             ),
-            (r#"{"rerank": {"judge": "kev"}}"#, "unknown variant `kev`"),
+            (
+                r#"{"rerank": {"judge": "kev"}}"#,
+                r#"rerank.judge: expected "none" or an object of the judge's settings, got "kev""#,
+            ),
             (
                 r#"{"rerank": {"judge": "system_one"}}"#,
-                r#"needs its candidates; write "judge": {"system_one": {"candidates": 25}}"#,
+                r#"rerank.judge: "system_one" names a backend, not a role; write "rerank.judge": {"candidates": 25}"#,
             ),
             (
-                r#"{"rerank": {"judge": {"system_one": {}}}}"#,
-                "missing field `candidates`",
+                r#"{"rerank": {"judge": {"system_one": {"candidates": 10}}}}"#,
+                r#"write "rerank.judge": {"candidates":10}"#,
             ),
+            (r#"{"rerank": {"judge": {}}}"#, "missing field `candidates`"),
             (
-                r#"{"rerank": {"judge": {"system_one": {"candidates": 25, "top_k": 5}}}}"#,
+                r#"{"rerank": {"judge": {"candidates": 25, "top_k": 5}}}"#,
                 "unknown field `top_k`",
             ),
         ] {
@@ -828,11 +931,11 @@ mod tests {
         assert_eq!(shipped.verify.support, SupportCheck::Quotes);
 
         let config = PipelineConfig::parse(
-            r#"{"admit": {"judge": {"system_one": {"evidence_min": 0.3}}}, "verify": {"support": "quotes", "publish": "strip"}}"#,
+            r#"{"admit": {"judge": {"evidence_min": 0.3}}, "verify": {"support": "quotes", "publish": "strip"}}"#,
         )
         .unwrap();
-        let AdmitJudge::SystemOne(cutoffs) = config.admit.judge else {
-            panic!("expected the System One judge");
+        let AdmitJudge::Judged(cutoffs) = config.admit.judge else {
+            panic!("expected a judge");
         };
         assert_eq!(cutoffs.evidence_min.get(), 0.3);
         assert_eq!(
@@ -844,9 +947,9 @@ mod tests {
 
         for bad in [
             r#"{"admit": {"judge": "kev"}}"#,
-            r#"{"admit": {"judge": {"system_one": {"evidence": 0.5}}}}"#,
-            r#"{"admit": {"judge": {"system_one": {"injection_max": 1.5}}}}"#,
-            r#"{"verify": {"support": {"system_one": {"min_support": -0.1}}}}"#,
+            r#"{"admit": {"judge": {"evidence": 0.5}}}"#,
+            r#"{"admit": {"judge": {"injection_max": 1.5}}}"#,
+            r#"{"verify": {"support": {"judged": {"min_support": -0.1}}}}"#,
             r#"{"verify": {"publish": "regenerate"}}"#,
             r#"{"verify": {"supports": "quotes"}}"#,
         ] {
@@ -855,6 +958,45 @@ mod tests {
                 serde_json::from_str::<PipelineConfig>(bad).is_err(),
                 "{bad}"
             );
+        }
+    }
+
+    #[test]
+    fn modes_are_named_by_role_and_the_old_system_one_names_say_what_to_write() {
+        let config = PipelineConfig::parse(
+            r#"{"admit": {"judge": {}}, "verify": {"support": {"judged": {"min_support": 0.8}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.admit.judge,
+            AdmitJudge::Judged(AdmissionCutoffs::default())
+        );
+        assert_eq!(
+            config.verify.support,
+            SupportCheck::Judged(SupportCutoff {
+                min_support: Probability::new(0.8).unwrap()
+            })
+        );
+        let text = serde_json::to_string(&config).unwrap();
+        assert!(!text.contains("system_one"), "{text}");
+        assert_eq!(PipelineConfig::parse(&text).unwrap(), config);
+
+        for (bad, says) in [
+            (
+                r#"{"admit": {"judge": {"system_one": {}}}}"#,
+                r#"admit.judge: "system_one" names a backend, not a role; write "admit.judge": {}"#,
+            ),
+            (
+                r#"{"admit": {"judge": "system_one"}}"#,
+                r#"write "admit.judge": {}"#,
+            ),
+            (
+                r#"{"verify": {"support": {"system_one": {}}}}"#,
+                "unknown variant `system_one`, expected one of `membership`, `quotes`, `judged`",
+            ),
+        ] {
+            let error = format!("{:#}", PipelineConfig::parse(bad).unwrap_err());
+            assert!(error.contains(says), "{bad}: {error}");
         }
     }
 

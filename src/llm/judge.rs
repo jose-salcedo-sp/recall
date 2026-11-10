@@ -1,13 +1,17 @@
 //! The provenance judge: yes/no and one-of questions over a text, answered with probabilities.
 //!
-//! [`Judge`] is the port `Admit` and `Verify` ask through. It names no vendor and no wire format: question ids,
-//! decision shapes and the backend's dialect belong to the adapter. [`SystemOneJudge`] adapts any
-//! [`SystemOne`] backend (Kev, system-one.dev, Clef on Workers AI); another judge, such as an LLM asked over
+//! [`Judge`] is the port every judged step asks through: `Classify`, `Rerank`, `Answer`, `Admit` and `Verify`. It
+//! names no vendor and no wire format: question ids, decision shapes and the backend's dialect belong to the
+//! adapter. [`SystemOneJudge`] adapts any [`SystemOne`] backend (Kev, system-one.dev, Clef on Workers AI); another judge, such as an LLM asked over
 //! [`super::ChatModel`], is one more adapter.
+
+// The wire format is this adapter's own; the fence in `clippy.toml` keeps it out of the pipeline.
+#![allow(clippy::disallowed_types)]
 
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
+use serde::Serialize;
 
 use crate::domain::{NotAProbability, Probability};
 
@@ -51,8 +55,10 @@ pub struct JudgeOption {
     pub description: &'static str,
 }
 
-/// A judge's answer to one question, unchecked. Read through [`Judgements::yes`] and [`Judgements::one_of`].
-#[derive(Clone, Debug, PartialEq)]
+/// A judge's answer to one question, unchecked. Read through [`Judgements::yes`] and [`Judgements::one_of`];
+/// serialized as is into trace records.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RawJudgement {
     /// Probability of yes.
     YesNo(f32),
@@ -99,6 +105,11 @@ impl Judgements {
     /// Answers in question order; a question past the end reads as [`RawJudgement::Missing`].
     pub fn new(answers: Vec<RawJudgement>) -> Self {
         Self(answers)
+    }
+
+    /// The answer to the question at `index` as the judge gave it, for the trace.
+    pub fn raw(&self, index: usize) -> &RawJudgement {
+        self.0.get(index).unwrap_or(&RawJudgement::Missing)
     }
 
     /// The probability of yes for the yes/no question at `index`.

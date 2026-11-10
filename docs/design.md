@@ -1,6 +1,6 @@
 # recall — Design
 
-recall is a backend-agnostic provenance system: it answers questions from an ingested corpus so that every claim carries the exact chunk versions it came from, is checked against them before it is shown, and is stored with a full trace. A small, fast "System One" model answers the **what** (yes/no, a choice, or a ranking); an LLM answers the **why**; a judge admits sources and checks claims. It ships as a library crate and one binary with an OpenAI-compatible HTTP API.
+recall is a backend-agnostic provenance system: it answers questions from an ingested corpus so that every claim carries the exact chunk versions it came from, is checked against them before it is shown, and is stored with a full trace. A judge (a small, fast calibrated model; System One ships as its backend) answers the **what** (yes/no, a choice, or a ranking), and admits sources and checks claims; an LLM answers the **why**. It ships as a library crate and one binary with an OpenAI-compatible HTTP API.
 
 The core is domain-free. A domain application brings its corpus (a `Source` connector), its answering rules (`explain.instructions`), its glossary documents, golden set and thresholds (config), and any front end beyond the HTTP API. Confidence thresholds live in `config/recall.json`; the evaluation harness tunes them per corpus and model.
 
@@ -17,7 +17,7 @@ The core is domain-free. A domain application brings its corpus (a `Source` conn
 Guiding constraints:
 
 - **Provenance is mandatory.** No claim, option, or ranked item exists without a source.
-- **System One never invents.** Options and ranked items come only from the user prompt or retrieved chunks.
+- **The judge never invents.** Options and ranked items come only from the user prompt or retrieved chunks.
 - **Nothing is shown before verification.** Every claim passes `Verify` first.
 - **Everything is auditable.** Every run, including declines and failures, is persisted with a full trace.
 - **Invalid pipelines do not compile.** Each category's pipeline contains only the steps it needs.
@@ -249,16 +249,16 @@ Rules:
 - `Provenance` is `UserPrompt(Span)` or `Chunk(ChunkId)`. Every option, item, and claim is `Cited<T>`.
 - A `choice` with fewer than 2 candidates, or a `ranking` without a stated criterion, is reclassified as `open`.
 - Model output is deserialized into a raw DTO, then converted with `TryFrom` into domain types. Any conversion failure halts as a decline.
-- The `Explain` LLM must flag when cited sources contradict the System One verdict.
+- The `Explain` LLM must flag when cited sources contradict the judge's verdict.
 - `Explain` applies answering rules from its system prompt, never from retrieved text. The generic rules are fixed: authoritative sources outrank evidence; an unsettled dependency is answered per case or named; no identifier the sources lack; quoted text is verbatim; the model's own inferences are tagged `[INF]`; recorded unknowns are stated, not guessed. A domain adds its own rules in `explain.instructions` (trusted config), after the generic ones, which it cannot relax.
 - `VerifiedAnswer` is only constructible inside `Verify`, which rejects any claim without a citation and any citation not among this run's retrieved chunks (runtime membership check), then applies the configured support check (5.7).
 
 ### 5.7 Provenance checks
 
-`Admit` and `Verify` ask through `llm::judge::Judge`, a vendor-neutral port (yes/no and one-of questions over a text, answered with probabilities); `SystemOneJudge` adapts any System One backend, so neither step builds a wire request.
+Every judged step (`Classify`, `Rerank`, `Answer`, `Admit`, `Verify`) asks through `llm::judge::Judge`, a vendor-neutral port (yes/no and one-of questions over a text, answered with probabilities); `SystemOneJudge` adapts any System One backend, so no step builds a wire request. `clippy.toml` disallows System One's `DecisionRequest` outside `src/llm/`. Config modes name the role (`judged`, or the judge's settings), never the backend.
 
 - **Admission** (`Admit`, `admit.judge`): each reranked match is asked whether it tries to change the assistant's instructions, addresses the question, contradicts its premise, and states usable evidence. It is routed by the first cutoff it crosses: injection and irrelevant matches are excluded, a contradicting match is kept as a conflict, and the rest are kept only with evidence. Context is screened for injection only and otherwise follows its match. No kept match declines with `NoSources`. The record lists every source's probabilities and route.
-- **Support** (`Verify`, `verify.support`): `membership` checks citations only; `quotes` also requires every span in backticks or double quotes to appear in a cited chunk (`Explain`'s prompt says such spans are verbatim); `system_one` adds a one-of question per cited chunk (supports, contradicts, says nothing), in citation order, until one supports the claim with at least `min_support`. The chosen option's own probability is compared, not an entropy confidence. Without a judge, `system_one` does not assemble (5.8); the record says which check ran.
+- **Support** (`Verify`, `verify.support`): `membership` checks citations only; `quotes` also requires every span in backticks or double quotes to appear in a cited chunk (`Explain`'s prompt says such spans are verbatim); `{"judged": {"min_support": 0.75}}` adds a one-of question per cited chunk (supports, contradicts, says nothing), in citation order, until one supports the claim with at least `min_support`. The chosen option's own probability is compared, not an entropy confidence. Without a judge, `judged` does not assemble (5.8); the record says which check ran.
 - **Publishing** (`verify.publish`): `decline` declines on any failed claim; `strip` leaves failed claims out and declines only when none is left, so what is shown is still verified.
 - **Audit**: the Admit and Verify records, with every probability and verdict, are part of the trace in `pipeline_runs`; `recall eval` reports `faithfulness`, the share of judged claims that are supported.
 
@@ -275,7 +275,7 @@ The trace is a flat list ordered by start time, serialized through the `TraceRec
 
 ### 5.8 Assembly
 
-`pipeline::assembly` resolves the config against the model backends available (`Ports`: retriever, Explain LLM, optional judge) once, before any question, and builds every step. It is the only place that decides what an absent judge means:
+`pipeline::assembly` resolves the config against the model backends available (`Ports`: retriever, Explain LLM, optional `Judge`) once, before any question, and builds every step. It is the only place that decides what an absent judge means:
 
 - A check the config names runs as named, or assembly fails with `Unassembled`: `rerank.judge`, `admit.judge` or `verify.support` naming a judge with none configured lists every such key in one error, and a `rerank` threshold while `rerank.judge` is `none` (the step is unscored) is an error too. No step falls back to a quieter check.
 - Without a judge, `Classify` records every question as `open` and there is no boolean path: no config key asks for classification, so this follows from the backends rather than downgrading a check.
@@ -294,10 +294,10 @@ What was assembled is a `Plan` (the classify, rerank, admit and support modes), 
 
 ## 7. Steps and their defaults
 
-- `Rerank`: keeps the best `top_k` matches; `rerank.judge` chooses who judges them, independently of `Classify` and `Answer`, which use System One either way.
+- `Rerank`: keeps the best `top_k` matches; `rerank.judge` chooses whether the judge orders them, independently of `Classify` and `Answer`, which use the judge whenever one is configured.
   - `"none"` (the default): no model call. Matches are ordered by reciprocal rank fusion of their retrieval rank alone, with evidence (non-authoritative) matches ranked 10 places lower; the step is unscored, so no `rerank` threshold applies.
-  - `{"system_one": {"candidates": 25}}`: one System One yes/no question per match ("does this text help answer the question?") over the top 25 matches by fused score. Matches are ordered by reciprocal rank fusion of their retrieval rank and their probability-of-yes rank, with the same evidence penalty in both; the best kept probability scores the step. `candidates` belongs to this variant, so a config cannot give candidates without a judge; it must be at least `top_k`. Neighbouring sections added by retrieval are context for their match, not candidates of their own.
-- `Answer<Boolean>`: one System One yes/no question over the reranked sources; the probability of yes is the verdict, `max(p, 1 - p)` scores the step against `answer`'s threshold, and `Explain<Boolean>` declines the run (`ContradictsVerdict`) when the sources contradict the verdict. A `boolean`, `choice` or `ranking` classification below `classify.min_confidence` falls back to `open`. `choice` and `ranking` take the `open` path until their `Answer` steps exist.
+  - `{"candidates": 25}`: one yes/no question to the judge per match ("does this text help answer the question?") over the top 25 matches by fused score. Matches are ordered by reciprocal rank fusion of their retrieval rank and their probability-of-yes rank, with the same evidence penalty in both; the best kept probability scores the step. `candidates` belongs to this variant, so a config cannot give candidates without a judge; it must be at least `top_k`. Neighbouring sections added by retrieval are context for their match, not candidates of their own.
+- `Answer<Boolean>`: one yes/no question to the judge over the reranked sources; the probability of yes is the verdict, `max(p, 1 - p)` scores the step against `answer`'s threshold, and `Explain<Boolean>` declines the run (`ContradictsVerdict`) when the sources contradict the verdict. A `boolean`, `choice` or `ranking` classification below `classify.min_confidence` falls back to `open`. `choice` and `ranking` take the `open` path until their `Answer` steps exist.
 
 ## 8. Deferred: permissions
 
@@ -311,4 +311,3 @@ Designed, not built:
 
 - Confidence thresholds and admission and support cutoffs per corpus and model (set by `recall eval`).
 - `choice` and `ranking` `Answer` steps.
-- Moving `Classify`, `Rerank` and `Answer` from the System One wire types onto the `Judge` port.

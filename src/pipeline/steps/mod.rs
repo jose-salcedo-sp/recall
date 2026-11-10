@@ -51,7 +51,7 @@ fn judged_text(chunk: &Chunk) -> String {
 /// The LLM explains from the reranked sources, Verify checks the claims. The `open` pipeline after `Rerank`, or after
 /// `Admit` when `admit.judge` names a judge.
 pub type OpenEnded = Seq<Explain<Open>, Verify<Open>>;
-/// System One decides, the LLM explains, Verify checks the claims. Only `Decisive<Boolean>` is a `Pipeline` so far.
+/// The judge decides, the LLM explains, Verify checks the claims. Only `Decisive<Boolean>` is a `Pipeline` so far.
 pub type Decisive<TCategory> = Seq<Answer<TCategory>, Seq<Explain<TCategory>, Verify<TCategory>>>;
 
 /// Output of `Retrieve`: hybrid matches, best first.

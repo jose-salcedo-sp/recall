@@ -1,6 +1,9 @@
 //! System One answers are model output, so the contract is the transport: what reaches the model, and that every
 //! answer comes back under its question id.
 
+// The System One adapters' own contract: the wire format is what is under test.
+#![allow(clippy::disallowed_types)]
+
 use std::{collections::BTreeMap, sync::Arc};
 
 use futures::future::BoxFuture;
