@@ -10,3 +10,7 @@ disallowed-methods = [
   { path = "aws_config::load_defaults", reason = "no operation timeout; use `aws_config::defaults(..).timeout_config(..)`" },
   { path = "tokio::spawn", reason = "a detached task's panic and errors go unreported, it is dropped at shutdown, and nothing bounds how many run; use a `JoinSet` with a concurrency limit and drain it" },
 ]
+
+disallowed-types = [
+  { path = "recall::llm::system_one::DecisionRequest", reason = "System One's wire format stays in `src/llm/`; steps ask through `llm::judge::Judge`" },
+]

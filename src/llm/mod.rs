@@ -1,6 +1,7 @@
-//! Model clients behind ports: [`Embedder`] for embeddings and [`ChatModel`] for the "why" LLM (Bedrock, or any
-//! OpenAI-compatible server such as Ollama or Workers AI), [`system_one::SystemOne`] for the "what" (Kev,
-//! system-one.dev, or Clef on Workers AI), and [`judge::Judge`] for the provenance checks of `Admit` and `Verify`.
+//! Model clients behind ports: [`Embedder`] for embeddings, [`ChatModel`] for the "why" LLM (Bedrock, or any
+//! OpenAI-compatible server such as Ollama or Workers AI), and [`judge::Judge`] for every judged step: the "what"
+//! (`Classify`, `Answer`), `Rerank`, and the provenance checks of `Admit` and `Verify`. [`system_one::SystemOne`]
+//! (Kev, system-one.dev, or Clef on Workers AI) is one backend behind the judge; its wire types stay in this module.
 //! This module owns wire formats, timeouts and backend selection; prompts belong to the pipeline steps that send
 //! them.
 
@@ -19,7 +20,7 @@ use std::{fmt, str::FromStr};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-pub use self::backend::{embedder, explain_model, system_one_client};
+pub use self::backend::{embedder, explain_model, judge, system_one_client};
 
 /// A non-empty bearer token. `Debug` and `Display` hide it, so formatting a config, a client or an error cannot
 /// print it.

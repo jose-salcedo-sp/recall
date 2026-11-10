@@ -1,8 +1,8 @@
 //! recall: a backend-agnostic provenance system. It answers questions from an ingested corpus so that every claim
 //! cites the exact chunk versions it came from, is checked against them before it is shown, and is recorded with the
-//! full trace of how it was produced. A decision model ("System One") answers the "what" (yes or no, a choice, a
-//! ranking) with calibrated probabilities; an LLM answers the "why"; a [`llm::judge::Judge`] admits sources and
-//! checks each claim's support. Every model, store and source sits behind a port, so a domain application supplies
+//! full trace of how it was produced. A [`llm::judge::Judge`] answers the "what" (the question's category, yes or
+//! no) with calibrated probabilities, orders matches, admits sources and checks each claim's support; an LLM answers
+//! the "why". System One is the shipped judge backend. Every model, store and source sits behind a port, so a domain application supplies
 //! its corpus, its answering rules (`explain.instructions`) and its front end as adapters and config. The design is
 //! in [`docs/design.md`]; read the section for a module before changing it.
 //!
@@ -38,7 +38,7 @@
 //! | [`llm::Embedder`] | Bedrock or an OpenAI-compatible server (Ollama, Workers AI), chosen by [`llm::embedder`] |
 //! | [`llm::ChatModel`] | Bedrock or an OpenAI-compatible server (Ollama, Workers AI), chosen by [`llm::explain_model`] |
 //! | [`llm::system_one::SystemOne`] | [`llm::system_one::HttpSystemOne`] (Kev, system-one.dev) or [`llm::workers_ai::WorkersAiSystemOne`], chosen by [`llm::system_one_client`] |
-//! | [`llm::judge::Judge`] | [`llm::judge::SystemOneJudge`], over whichever System One is configured |
+//! | [`llm::judge::Judge`] | [`llm::judge::SystemOneJudge`], over whichever System One is configured, chosen by [`llm::judge()`]; every judged step asks through it |
 //! | [`retrieval::Retriever`] | [`retrieval::hybrid::HybridRetriever`], full-text and vector search in Postgres |
 //! | [`store::RunStore`] | [`store::runs::PgRunStore`] |
 //! | [`pipeline::report::Answerer`] | [`pipeline::answerer::PipelineAnswerer`] |

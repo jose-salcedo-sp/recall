@@ -4,6 +4,9 @@
 //! by system-one.dev. Workers AI serves the same request and answers for its Clef models behind its own route and
 //! envelope; see [`super::workers_ai`].
 
+// The wire format is this adapter's own; the fence in `clippy.toml` keeps it out of the pipeline.
+#![allow(clippy::disallowed_types)]
+
 use std::{collections::BTreeMap, time::Duration};
 
 use async_trait::async_trait;

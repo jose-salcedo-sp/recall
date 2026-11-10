@@ -142,6 +142,7 @@ pub async fn run(args: Args) -> eros::Result<()> {
                 git: git_describe(),
                 config: answerer.config().clone(),
                 models: answerer.models(),
+                plan: Some(answerer.plan()),
             };
             run_golden(Arc::new(answerer), args.files, Some(setup)).await
         }
@@ -189,6 +190,7 @@ pub async fn run_golden(
             "golden": setup.golden,
             "git": setup.git,
             "models": setup.models,
+            "plan": setup.plan,
             "config": setup.config,
         }));
     }

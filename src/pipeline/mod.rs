@@ -88,6 +88,7 @@
 //! ```
 
 pub mod answerer;
+pub mod assembly;
 pub mod report;
 pub mod steps;
 pub mod trace;
@@ -246,7 +247,7 @@ pub enum DeclineReason {
     NoSources,
     /// The answer could not be verified against this run's sources, or the model found no answer in them.
     Unverified(String),
-    /// `Explain` found that the sources it would cite contradict System One's verdict.
+    /// `Explain` found that the sources it would cite contradict the judge's verdict.
     ContradictsVerdict,
 }
 

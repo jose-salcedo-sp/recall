@@ -29,11 +29,7 @@
     "max_tokens": 8192
   },
   "verify": {
-    "support": {
-      "system_one": {
-        "min_support": 0.75
-      }
-    },
+    "support": "quotes",
     "publish": "decline"
   },
   "thresholds": {},

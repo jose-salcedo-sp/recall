@@ -15,6 +15,7 @@ use crate::{
     domain::{CategoryKind, ChunkId, ChunkRef, Provenance},
     pipeline::{
         answerer::Models,
+        assembly::Plan,
         report::{Answer, Answerer, Outcome, RunReport, Verdict},
         trace::{
             ClassifyRecord, RerankRecord, RetrieveRecord, SupportMode, TraceRecord, VerifyRecord,
@@ -66,23 +67,46 @@ pub struct RunSetup {
     pub config: PipelineConfig,
     /// The models it called.
     pub models: Models,
+    /// What each step did, as assembled; `None` in files written before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<Plan>,
 }
 
-/// Files written before `rerank.judge` existed record a flat `rerank.candidates`, which System One judged.
+/// Reads configs as recorded by any earlier version: a flat `rerank.candidates` from before `rerank.judge` existed,
+/// which System One judged, and the `system_one` mode names from before modes were named by role.
 fn recorded_config<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<PipelineConfig, D::Error> {
-    let mut config = serde_json::Value::deserialize(deserializer)?;
-    if let Some(rerank) = config
-        .get_mut("rerank")
-        .and_then(serde_json::Value::as_object_mut)
+    use serde_json::{Value, json};
+
+    let mut config = Value::deserialize(deserializer)?;
+    if let Some(rerank) = config.get_mut("rerank").and_then(Value::as_object_mut)
         && !rerank.contains_key("judge")
         && let Some(candidates) = rerank.remove("candidates")
     {
-        rerank.insert(
-            "judge".into(),
-            serde_json::json!({ "system_one": { "candidates": candidates } }),
-        );
+        rerank.insert("judge".into(), json!({ "candidates": candidates }));
+    }
+    for (section, key) in [
+        ("rerank", "judge"),
+        ("admit", "judge"),
+        ("verify", "support"),
+    ] {
+        let Some(mode) = config
+            .get_mut(section)
+            .and_then(|section| section.get_mut(key))
+        else {
+            continue;
+        };
+        if let Some(settings) = mode
+            .as_object_mut()
+            .filter(|mode| mode.len() == 1)
+            .and_then(|mode| mode.remove("system_one"))
+        {
+            *mode = match key {
+                "support" => json!({ "judged": settings }),
+                _ => settings,
+            };
+        }
     }
     serde_json::from_value(config).map_err(serde::de::Error::custom)
 }

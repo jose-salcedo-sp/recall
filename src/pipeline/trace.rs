@@ -101,10 +101,10 @@ pub enum TraceRecord {
 pub struct RankedChunk {
     /// The exact version used.
     pub chunk: ChunkRef,
-    /// Retrieval's fused score. Rerank records written before `probability` existed hold System One's
+    /// Retrieval's fused score. Rerank records written before `probability` existed hold the judge's
     /// probability here instead.
     pub score: Relevance,
-    /// System One's probability that the chunk helps answer the question, when `Rerank` judged it.
+    /// The judge's probability that the chunk helps answer the question, when `Rerank` judged it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probability: Option<Probability>,
     /// Set when retrieval added the chunk as context next to a match rather than ranking it: the id of that match.
@@ -113,14 +113,40 @@ pub struct RankedChunk {
     pub context_for: Option<ChunkId>,
 }
 
+/// How `Classify` chose the category, as the pipeline was assembled.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClassifyMode {
+    /// A judge chose the category.
+    #[default]
+    Judged,
+    /// No judge is configured, so every question is `open`, unscored.
+    AllOpen,
+}
+
+/// How `Rerank` ordered the matches, as the pipeline was assembled.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RerankMode {
+    /// Retrieval rank and the evidence penalty only; unscored.
+    #[default]
+    RetrievalOrder,
+    /// A judge's probability per match, fused with retrieval rank; scored.
+    Judged,
+}
+
 /// What `Classify` asked for and got.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ClassifyRecord {
-    /// System One's answer as JSON; `None` when no System One is configured or it gave no answer.
+    /// How the category was chosen. Records written before it existed read as `judged`; their `raw` is `None` when
+    /// every question was `open`.
+    #[serde(default)]
+    pub mode: ClassifyMode,
+    /// The judge's answer as JSON; `None` under `all_open`.
     pub raw: Option<String>,
     /// The category the run continued with; `None` when the answer was invalid.
     pub category: Option<CategoryKind>,
-    /// What System One chose when its probability was below `classify.min_confidence` and the run fell back to `open`.
+    /// What the judge chose when its probability was below `classify.min_confidence` and the run fell back to `open`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_from: Option<CategoryKind>,
 }
@@ -139,7 +165,11 @@ pub struct RetrieveRecord {
 /// Hit@5 is computed from `chunks`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RerankRecord {
-    /// System One's probability of yes per judged chunk id, as a JSON object; `None` without System One.
+    /// How the matches were ordered. Records written before it existed read as `retrieval_order`; their `raw` is set
+    /// when a judge ordered them.
+    #[serde(default)]
+    pub mode: RerankMode,
+    /// The judge's probability of yes per judged chunk id, as a JSON object; `None` under `retrieval_order`.
     pub raw: Option<String>,
     /// The kept matches best first, then the context chunks attached to them.
     pub chunks: Vec<RankedChunk>,
@@ -148,7 +178,7 @@ pub struct RerankRecord {
 /// What `Answer` asked for and got.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AnswerRecord {
-    /// System One's response as JSON.
+    /// The judge's answer as JSON.
     pub raw: Option<String>,
     /// The verdict the step parsed from `raw`; `None` when parsing failed.
     pub parsed: Option<serde_json::Value>,
@@ -159,7 +189,7 @@ pub struct AnswerRecord {
 pub struct ExplainRecord {
     /// The LLM's reply, verbatim.
     pub raw: Option<String>,
-    /// The LLM flagged that cited sources contradict the System One verdict.
+    /// The LLM flagged that cited sources contradict the judge's verdict.
     pub contradicts_verdict: bool,
 }
 
@@ -252,7 +282,8 @@ fn is_zero(n: &usize) -> bool {
     *n == 0
 }
 
-/// The check `Verify` ran on each cited claim, after resolving the config against the models available.
+/// The check `Verify` ran on each cited claim: `verify.support` as configured, since a pipeline whose check needs a
+/// judge does not assemble without one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SupportMode {

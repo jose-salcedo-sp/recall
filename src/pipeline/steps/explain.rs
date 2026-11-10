@@ -41,7 +41,7 @@ Rules:
 
 Respond only with JSON matching the provided schema."#;
 
-/// Added to `SYSTEM` when System One has already decided a yes/no question.
+/// Added to `SYSTEM` when the judge has already decided a yes/no question.
 const VERDICT_RULES: &str = r#"A decision model has already answered this yes/no question; its verdict is inside <verdict>. Explain why the verdict holds, in claims that cite the sources. If the sources you would cite contradict the verdict, set contradicts_verdict to true and list the claims that show the contradiction. Never change the verdict yourself."#;
 
 /// Writes the "why" from the reranked sources: the whole answer for `open`, the reason for a decided verdict.
@@ -86,7 +86,7 @@ impl<TCategory> Explain<TCategory> {
         system
     }
 
-    /// `verdict` is System One's yes or no, when it decided one.
+    /// `verdict` is the judge's yes or no, when it decided one.
     async fn explain(
         &self,
         question: &Question,

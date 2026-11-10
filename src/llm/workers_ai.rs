@@ -15,6 +15,9 @@
 //! answered with that envelope, on any route, is reported by its `errors`; any other body is quoted, with the host
 //! that sent it.
 
+// The wire format is this adapter's own; the fence in `clippy.toml` keeps it out of the pipeline.
+#![allow(clippy::disallowed_types)]
+
 use std::{fmt, num::NonZeroUsize, str::FromStr, time::Duration};
 
 use async_trait::async_trait;

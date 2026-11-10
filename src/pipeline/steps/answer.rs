@@ -1,47 +1,45 @@
-use std::{collections::BTreeMap, fmt::Write as _, marker::PhantomData, sync::Arc};
+use std::{fmt::Write as _, marker::PhantomData, sync::Arc};
 
 use serde_json::json;
 
 use crate::{
     domain::{Probability, Question},
-    llm::system_one::{Decision, DecisionRequest, SystemOne},
+    llm::judge::{Judge, JudgeQuestion, JudgeRequest},
     pipeline::{Boolean, DeclineReason, Scored, Step, StepError, trace::AnswerRecord},
 };
 
 use super::{MAX_STATE_CHARS, Reranked};
 
-/// Recorded as the trace entry's prompt version; bump on any change to the question System One is asked.
+/// Recorded as the trace entry's prompt version; bump on any change to the question the judge is asked.
 pub const ANSWER_PROMPT_VERSION: &str = "answer-boolean-v1";
 
-const QUESTION_ID: &str = "answer";
-
-/// System One answers the question over the reranked sources: the "what". `Explain` then writes the "why".
+/// The judge answers the question over the reranked sources: the "what". `Explain` then writes the "why".
 pub struct Answer<TCategory> {
-    system_one: Option<Arc<dyn SystemOne>>,
+    judge: Arc<dyn Judge>,
     threshold: Option<Probability>,
     category: PhantomData<TCategory>,
 }
 
 impl<TCategory> Answer<TCategory> {
-    /// Without a System One the step fails every run. `threshold` applies to the verdict's confidence.
-    pub fn new(system_one: Option<Arc<dyn SystemOne>>, threshold: Option<Probability>) -> Self {
+    /// `threshold` applies to the verdict's confidence.
+    pub fn new(judge: Arc<dyn Judge>, threshold: Option<Probability>) -> Self {
         Self {
-            system_one,
+            judge,
             threshold,
             category: PhantomData,
         }
     }
 }
 
-/// Output of `Answer<Boolean>`: the verdict, how sure System One is of it, and the sources it read.
+/// Output of `Answer<Boolean>`: the verdict, how sure the judge is of it, and the sources it read.
 pub struct Decided {
     pub(super) yes: bool,
-    /// `max(p, 1 - p)` for System One's probability of yes `p`.
+    /// `max(p, 1 - p)` for the judge's probability of yes `p`.
     pub(super) confidence: Probability,
     pub(super) sources: Reranked,
 }
 
-/// The sources in reranked order, each under its title and heading, cut to System One's budget.
+/// The sources in reranked order, each under its title and heading, cut to the judge's budget.
 fn state(sources: &Reranked) -> String {
     let mut state = String::new();
     for (n, hit) in sources.0.iter().enumerate() {
@@ -68,19 +66,15 @@ fn state(sources: &Reranked) -> String {
     }
 }
 
-fn request(question: &Question, sources: &Reranked) -> DecisionRequest {
-    DecisionRequest {
-        state: state(sources),
-        model: String::new(),
-        questions: BTreeMap::from([(
-            QUESTION_ID.to_owned(),
-            Decision::Noul {
-                instructions: format!(
-                    "Going only by these sources, is the answer to this question yes: {}",
-                    question.as_str()
-                ),
-            },
-        )]),
+fn request(question: &Question, sources: &Reranked) -> JudgeRequest {
+    JudgeRequest {
+        text: state(sources),
+        questions: vec![JudgeQuestion::YesNo {
+            instructions: format!(
+                "Going only by these sources, is the answer to this question yes: {}",
+                question.as_str()
+            ),
+        }],
     }
 }
 
@@ -100,24 +94,19 @@ impl Step for Answer<Boolean> {
         question: &Question,
         sources: Reranked,
     ) -> Result<Scored<Decided, AnswerRecord>, StepError> {
-        let Some(system_one) = &self.system_one else {
-            return Err(eros::error!("the answer step needs a System One server").into());
-        };
         if sources.0.is_empty() {
             return Err(StepError::decline(DeclineReason::NoSources));
         }
-        let model = system_one.model();
-        let response = system_one
-            .decide(request(question, &sources))
+        let model = self.judge.model();
+        let judgements = self
+            .judge
+            .judge(request(question, &sources))
             .await
             .map_err(|error| {
                 StepError::from(error).with_model(model.clone(), ANSWER_PROMPT_VERSION)
             })?;
-        let raw = response
-            .answers
-            .get(QUESTION_ID)
-            .and_then(|answer| serde_json::to_string(answer).ok());
-        let p = match response.yes_no(QUESTION_ID) {
+        let raw = serde_json::to_string(judgements.raw(0)).ok();
+        let p = match judgements.yes(0) {
             Ok(p) => p,
             Err(error) => {
                 return Err(StepError::decline(DeclineReason::InvalidModelOutput(
@@ -149,17 +138,15 @@ impl Step for Answer<Boolean> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        llm::system_one::{DecisionAnswer, DecisionResponse, ScriptedSystemOne},
+        llm::judge::{FnJudge, RawJudgement},
         pipeline::{StepErrorKind, steps::fixtures::chunk},
         retrieval::{Relevance, Retrieved},
     };
 
     use super::*;
 
-    fn noul(p: f32) -> DecisionResponse {
-        DecisionResponse {
-            answers: BTreeMap::from([(QUESTION_ID.into(), DecisionAnswer::Noul { noul: p })]),
-        }
+    fn yes(p: f32) -> Arc<FnJudge> {
+        Arc::new(FnJudge::new(move |_, _| RawJudgement::YesNo(p)))
     }
 
     fn sources() -> Reranked {
@@ -179,20 +166,18 @@ mod tests {
     }
 
     async fn run(p: f32) -> Result<Scored<Decided, AnswerRecord>, StepError> {
-        let system_one = Arc::new(ScriptedSystemOne::new([Ok(noul(p))]));
-        Answer::<Boolean>::new(Some(system_one), None)
+        Answer::<Boolean>::new(yes(p), None)
             .run(&Question::new("Can a control map to a role?"), sources())
             .await
     }
 
-    async fn answer(p: f32) -> (Scored<Decided, AnswerRecord>, Arc<ScriptedSystemOne>) {
-        let system_one = Arc::new(ScriptedSystemOne::new([Ok(noul(p))]));
-        let scored =
-            Answer::<Boolean>::new(Some(Arc::<ScriptedSystemOne>::clone(&system_one)), None)
-                .run(&Question::new("Can a control map to a role?"), sources())
-                .await
-                .unwrap();
-        (scored, system_one)
+    async fn answer(p: f32) -> (Scored<Decided, AnswerRecord>, Arc<FnJudge>) {
+        let judge = yes(p);
+        let scored = Answer::<Boolean>::new(Arc::<FnJudge>::clone(&judge), None)
+            .run(&Question::new("Can a control map to a role?"), sources())
+            .await
+            .unwrap();
+        (scored, judge)
     }
 
     #[tokio::test]
@@ -212,19 +197,20 @@ mod tests {
 
     #[tokio::test]
     async fn the_probability_of_yes_becomes_the_verdict_and_its_confidence() {
-        let (scored, system_one) = answer(0.1).await;
+        let (scored, judge) = answer(0.1).await;
         assert!(!scored.output.yes);
         assert_eq!(scored.score, Some(p(0.9)));
         assert_eq!(scored.output.confidence, p(0.9));
         assert_eq!(scored.prompt_version, Some(ANSWER_PROMPT_VERSION));
 
-        let request = &system_one.requests()[0];
+        assert_eq!(scored.record.raw.as_deref(), Some(r#"{"yes_no":0.1}"#));
+        let request = &judge.requests()[0];
         assert!(
             request
-                .state
+                .text
                 .starts_with("Source 1: Mitigating controls > users-only")
         );
-        let Decision::Noul { instructions } = &request.questions[QUESTION_ID] else {
+        let [JudgeQuestion::YesNo { instructions }] = &request.questions[..] else {
             panic!("expected a yes/no question");
         };
         assert!(instructions.ends_with("Can a control map to a role?"));

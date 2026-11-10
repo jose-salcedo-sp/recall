@@ -63,7 +63,7 @@ pub struct Answer {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "category", rename_all = "snake_case")]
-/// System One's "what", per decisive category.
+/// The judge's "what", per decisive category.
 pub enum Verdict {
     /// Yes or no.
     Boolean {
