@@ -1,0 +1,45 @@
+files=174 chunks=1386 K=3
+
+daas-q06: Must a user hold both sides of an SoD risk?
+  selected: {'sides': 14, 'hold': 179, 'risk': 564}
+  grep list size: 651
+  target markdown:canon/HIT-LOGIC.md#when-a-risk-becomes-a-hit: rank 213
+
+daas-q09: Who owns the Qlik report-embed layer?
+  selected: {'owns': 20, 'embed': 43, 'layer': 54}
+  grep list size: 104
+  target markdown:canon/REPORTS.md#known-defects: rank 3
+
+daas-q24: Can I tell the customer this is a known issue we're tracking?
+  selected: {'tracking': 12, 'issue': 24, 'known': 108}
+  grep list size: 132
+  target markdown:customer/DISCLOSURE-TIERS.md#decisions-on-record: rank 22
+
+daas-q30: The sandbox shows N rows per user — project that to a large production tenant.
+  selected: {'large': 46, 'project': 76, 'sandbox': 108}
+  grep list size: 209
+  target markdown:canon/GLOSSARY.md#demo-file-scale: rank None
+
+daas-q44: We're only fixing this on the NEW screen. Is that enough?
+  selected: {'fixing': 4, 'screen': 229}
+  grep list size: 231
+  target markdown:playbooks/change-impact.md#3-which-generations-does-it-affect: rank None
+  target markdown:canon/GENERATIONS.md#which-customers-see-which-generation: rank None
+
+daas-q45: The security extract is too big and cloud compilation runs out of memory. What can we do?
+  selected: {'compilation': 8, 'memory': 21, 'runs': 95}
+  grep list size: 121
+  target markdown:canon/CUSTOMER-ADMINISTRATION.md#job-hooks: rank 32
+
+daas-q50: A customer says they used to run Financial Impact Analysis in ARM and can't find it. Is it broken?
+  selected: {'financial': 2, 'impact': 20, 'broken': 27, 'Financial Impact Analysis': 1}
+  grep list size: 46
+  target markdown:canon/RETIRED.md#tenant-setup-modules-and-systems: rank 1
+
+daas-q51: Before I start changing the Access Reviewer, is anyone else working there?
+  selected: {'changing': 14, 'reviewer': 114, 'access': 368, 'Access Reviewer': 50}
+  grep list size: 403
+  target markdown:knowledge/10-business/WORKSTREAMS.md#product-workstreams: rank 23
+
+TOTAL targets=9 found_any=6 top50=5 top10=2 top5=2 top1=1
+questions with all targets in top50: 5/8

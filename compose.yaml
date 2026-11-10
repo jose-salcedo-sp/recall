@@ -1,99 +1,40 @@
-# Local development stack for Recall (Podman + libkrun on Apple Silicon).
-# Run: CONTAINERS_MACHINE_PROVIDER=libkrun podman compose up
+name: drew-ai
 
 services:
-  postgres:
+  db:
     image: pgvector/pgvector:pg17
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-recall}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-recall}
-      POSTGRES_DB: ${POSTGRES_DB:-recall}
+      POSTGRES_USER: drew
+      POSTGRES_PASSWORD: drew
+      POSTGRES_DB: drew
     ports:
-      # 5433 on the host: a pre-existing local Postgres commonly owns 5432 and would
-      # silently shadow this one. In-network clients still use postgres:5432.
       - "5433:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - db:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-recall} -d ${POSTGRES_DB:-recall}"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
+      test: ["CMD", "pg_isready", "-U", "drew"]
+      interval: 2s
+      retries: 15
 
-  generator:
-    image: quay.io/slopezpa/fedora-vgpu-llama
-    entrypoint: ["llama-server"]
-    command:
-      - -m
-      - /models/${GENERATOR_MODEL:-qwen2.5-1.5b-q4km.gguf}
-      - -ngl
-      - "99"
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8080"
-      - -c
-      - "8192"
-      - --parallel
-      - "2"
-    devices:
-      - /dev/dri:/dev/dri
-    volumes:
-      - ${MODELS_HOST_PATH:-${HOME}/models}:/models:ro
-    ports:
-      - "8080:8080"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 60s
-
-  systemone:
-    build: ./services/systemone
+  # The corpus embedded by the hosted models. Chunks record their embedding model and are never mixed, so the
+  # hosted setup gets its own database instead of reembedding `db`. Start it with
+  # `docker compose up -d --wait db-hosted`.
+  db-hosted:
+    profiles: [hosted]
+    image: pgvector/pgvector:pg17
     environment:
-      SYSTEMONE_BACKEND: laya
-      ADMIT_BATCH_SIZE: ${ADMIT_BATCH_SIZE:-32}
+      POSTGRES_USER: drew
+      POSTGRES_PASSWORD: drew
+      POSTGRES_DB: drew
+    ports:
+      - "5434:5432"
     volumes:
-      - ${HF_CACHE_HOST_PATH:-${HOME}/.cache/huggingface}:/root/.cache/huggingface
-    ports:
-      - "8082:8082"
+      - db-hosted:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8082/healthz || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 120s
-
-  recall:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-    environment:
-      DATABASE_URL: ${DATABASE_URL:-postgres://recall:recall@postgres:5432/recall}
-      # Embeddings must come from the model Nexus indexed with; there is no
-      # local substitute, so this points at the real provider in every environment.
-      EMBEDDER_URL: ${EMBEDDER_URL:-https://ai-gateway.vercel.sh}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      NEXUS_EMBEDDING_MODEL: ${NEXUS_EMBEDDING_MODEL:-openai/text-embedding-3-small}
-      EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
-      SYSTEM_ONE_URL: ${SYSTEM_ONE_URL:-http://systemone:8082}
-      GENERATOR_URL: ${GENERATOR_URL:-http://generator:8080}
-      RETRIEVE_K: ${RETRIEVE_K:-64}
-      ALLOW_INSECURE_DB: "true"
-      INDEX_WRITES_ENABLED: "true"
-      PERSIST_ASKS: "true"
-      RECALL_SERVICE_TOKEN: ${RECALL_SERVICE_TOKEN:-local-dev-token}
-    ports:
-      - "${RECALL_PORT:-8000}:8000"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      generator:
-        condition: service_healthy
-      systemone:
-        condition: service_healthy
+      test: ["CMD", "pg_isready", "-U", "drew"]
+      interval: 2s
+      retries: 15
 
 volumes:
-  postgres_data:
+  db:
+  db-hosted:

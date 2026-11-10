@@ -1,0 +1,13 @@
+allow-unwrap-in-tests = true
+allow-dbg-in-tests = true
+# The library's only consumers are this crate's binary, tests and doctests.
+avoid-breaking-exported-api = false
+
+disallowed-methods = [
+  { path = "reqwest::Client::new", reason = "no request timeout; use `Client::builder().timeout(..).connect_timeout(..)`" },
+  { path = "reqwest::get", reason = "no request timeout; use a `Client` built with timeouts" },
+  { path = "aws_config::load_from_env", reason = "no operation timeout; use `aws_config::defaults(..).timeout_config(..)`" },
+  { path = "aws_config::load_defaults", reason = "no operation timeout; use `aws_config::defaults(..).timeout_config(..)`" },
+  { path = "tokio_tungstenite::connect_async", reason = "no connect timeout; wrap it in `tokio::time::timeout`" },
+  { path = "tokio::spawn", reason = "a detached task's panic and errors go unreported, it is dropped at shutdown, and nothing bounds how many run; use a `JoinSet` with a concurrency limit and drain it" },
+]

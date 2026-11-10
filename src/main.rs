@@ -1,75 +1,65 @@
-mod clients;
-mod config;
-mod ctx;
-mod error;
-mod http;
-mod pipeline;
-mod store;
-mod types;
+//! The `drew` binary: parses the command line and runs `serve`, `ingest`, `eval` or `models` from the library.
 
-use anyhow::Context;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use std::process::ExitCode;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let json = std::env::var("LOG_FORMAT").as_deref() == Ok("json");
-    let reg = tracing_subscriber::registry().with(filter);
-    // JSON is what `recall-dash` reads; human format stays the default.
-    if json {
-        reg.with(tracing_subscriber::fmt::layer().json().flatten_event(true))
-            .init();
-    } else {
-        reg.with(tracing_subscriber::fmt::layer()).init();
-    }
+use clap::{Parser, Subcommand};
+use drew::{eval, ingest, models, server};
+use tracing_subscriber::EnvFilter;
 
-    let cfg = config::Config::from_env();
-    cfg.validate()?;
-    cfg.warn_if_uncalibrated();
-
-    tracing::info!(
-        bind = %cfg.bind_addr,
-        retrieve_k = cfg.retrieve_k,
-        admit_batch_size = cfg.admit_batch_size,
-        max_citations = cfg.max_citations,
-        max_inflight = cfg.max_inflight,
-        "recall starting"
-    );
-
-    let bind_addr = cfg.bind_addr.clone();
-    let ctx = ctx::Ctx::build(cfg)
-        .await
-        .context("failed to build service context")?;
-
-    // Migrations only where Recall owns the database. Against Nexus this would try
-    // to create the corpus tables in someone else's project, which is exactly the
-    // thing that must not happen — and `recall_search` could not do it anyway.
-    if ctx.cfg.index_writes_enabled {
-        sqlx::migrate!("./migrations")
-            .run(&ctx.pg)
-            .await
-            .context("migrations failed")?;
-        tracing::info!("migrations applied");
-    } else {
-        tracing::info!(
-            "read-only corpus: skipping migrations, index writes and ask persistence"
-        );
-    }
-
-    let listener = tokio::net::TcpListener::bind(&bind_addr)
-        .await
-        .with_context(|| format!("failed to bind {bind_addr}"))?;
-    tracing::info!(addr = %bind_addr, "listening");
-
-    axum::serve(listener, http::router(ctx))
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("server error")?;
-
-    Ok(())
+#[derive(Parser)]
+#[command(
+    name = "drew",
+    about = "Drew AI: answers about SAP and ARM internals, with provenance"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
 }
 
-async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
-    tracing::info!("shutdown signal received");
+#[derive(Subcommand)]
+enum Command {
+    /// Serve the OpenAI-compatible API.
+    Serve(server::Args),
+    /// Ingest the markdown corpus snapshot from DREW_DOCS_DIR.
+    Ingest(ingest::Args),
+    /// Run the golden set and report per-step metrics.
+    Eval(eval::Args),
+    /// Check each model backend with one call.
+    Models(models::Args),
+}
+
+/// Reports a failure once, with its causes and context; set `RUST_BACKTRACE=1` for the backtrace too.
+#[tokio::main]
+async fn main() -> ExitCode {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .init();
+
+    let result = match Cli::parse().command {
+        Command::Serve(args) => server::run(args).await,
+        Command::Ingest(args) => ingest::run(args).await,
+        Command::Eval(args) => eval::run(args).await,
+        Command::Models(args) => models::run(args).await,
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) if std::env::var_os("RUST_BACKTRACE").is_some() => {
+            eprintln!("error: {error:?}");
+            ExitCode::FAILURE
+        }
+        Err(error) => {
+            eprintln!("error: {error:#?}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_is_well_formed() {
+        super::Cli::command().debug_assert();
+    }
 }

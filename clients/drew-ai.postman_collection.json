@@ -1,0 +1,80 @@
+{
+  "info": {
+    "name": "Drew AI",
+    "description": "Drew AI's OpenAI-compatible API. Set `question`, send \"Ask\", then copy `drew.run_id` from the response into `run_id` to fetch the stored run with its trace.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{api_key}}", "type": "string" }]
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://127.0.0.1:8080" },
+    { "key": "api_key", "value": "sk-local-drew" },
+    { "key": "question", "value": "What is Cross System Analysis in ARM and how is it enabled?" },
+    { "key": "run_id", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Ask",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": {
+          "raw": "{{base_url}}/v1/chat/completions",
+          "host": ["{{base_url}}"],
+          "path": ["v1", "chat", "completions"]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"model\": \"drew-ai\",\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"{{question}}\" }\n  ]\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "description": "The answer is in `choices[0].message.content`; `drew` has the outcome, citations, per-step scores, and the full trace."
+      }
+    },
+    {
+      "name": "Ask (streaming)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": {
+          "raw": "{{base_url}}/v1/chat/completions",
+          "host": ["{{base_url}}"],
+          "path": ["v1", "chat", "completions"]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"model\": \"drew-ai\",\n  \"stream\": true,\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"{{question}}\" }\n  ]\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "description": "Server-sent events: the whole verified answer arrives as one chunk, then a final chunk with the `drew` object, then `[DONE]`."
+      }
+    },
+    {
+      "name": "Get run",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/v1/runs/{{run_id}}",
+          "host": ["{{base_url}}"],
+          "path": ["v1", "runs", "{{run_id}}"]
+        },
+        "description": "A stored run with its trace. Only the user who asked can read it."
+      }
+    },
+    {
+      "name": "Models",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/v1/models",
+          "host": ["{{base_url}}"],
+          "path": ["v1", "models"]
+        }
+      }
+    }
+  ]
+}
