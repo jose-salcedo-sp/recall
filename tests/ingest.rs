@@ -10,7 +10,7 @@ use recall::{
     access::{Acl, ConnectorLabels, fakes::FailingLabeler, rules::AccessConfig},
     domain::{ChunkDraft, Document, Labels, Sensitivity, SourceName},
     ingest::{
-        EmbeddingModelMismatch, Source, Sources,
+        EmbeddingModelMismatch, OtherModels, Source, Sources,
         fakes::{FailingSource, StaticSource},
         ingest, markdown,
     },
@@ -258,7 +258,7 @@ async fn embedding_model_mismatch_is_refused(pool: PgPool) {
         &HashEmbedder,
         &ConnectorLabels,
         &sources,
-        false,
+        OtherModels::Refuse,
     )
     .await
     .unwrap();
@@ -269,7 +269,7 @@ async fn embedding_model_mismatch_is_refused(pool: PgPool) {
         &other,
         &ConnectorLabels,
         &sources,
-        false,
+        OtherModels::Refuse,
     )
     .await
     .unwrap_err();
@@ -294,7 +294,7 @@ async fn reembed_replaces_every_chunk_with_the_configured_model(pool: PgPool) {
         &HashEmbedder,
         &ConnectorLabels,
         &sources(vec![first]),
-        false,
+        OtherModels::Refuse,
     )
     .await
     .unwrap();
@@ -306,7 +306,7 @@ async fn reembed_replaces_every_chunk_with_the_configured_model(pool: PgPool) {
         &titan,
         &ConnectorLabels,
         &sources(vec![subset]),
-        true,
+        OtherModels::Replace,
     )
     .await
     .unwrap();
@@ -341,7 +341,7 @@ async fn snapshot_supersedes_documents_missing_from_fetch(pool: PgPool) {
         &HashEmbedder,
         &ConnectorLabels,
         &sources,
-        false,
+        OtherModels::Refuse,
     )
     .await
     .unwrap();
@@ -353,7 +353,7 @@ async fn snapshot_supersedes_documents_missing_from_fetch(pool: PgPool) {
         &HashEmbedder,
         &ConnectorLabels,
         &sources,
-        false,
+        OtherModels::Refuse,
     )
     .await
     .unwrap();
@@ -400,7 +400,7 @@ async fn ingest_refreshes_term_stats_from_current_chunks(pool: PgPool) {
         &HashEmbedder,
         &ConnectorLabels,
         &sources,
-        false,
+        OtherModels::Refuse,
     )
     .await
     .unwrap();
@@ -419,7 +419,7 @@ async fn ingest_refreshes_term_stats_from_current_chunks(pool: PgPool) {
         &HashEmbedder,
         &ConnectorLabels,
         &sources,
-        false,
+        OtherModels::Refuse,
     )
     .await
     .unwrap();
@@ -444,7 +444,7 @@ async fn one_failing_source_does_not_stop_the_others(pool: PgPool) {
         &HashEmbedder,
         &ConnectorLabels,
         &sources,
-        false,
+        OtherModels::Refuse,
     )
     .await
     .unwrap();
@@ -474,7 +474,7 @@ async fn a_source_named_outside_the_crate_supersedes_only_its_own_documents(pool
         &HashEmbedder,
         &ConnectorLabels,
         &sources(vec![markdown(), wiki_pages(&["home", "roles"])]),
-        false,
+        OtherModels::Refuse,
     )
     .await
     .unwrap();
@@ -484,7 +484,7 @@ async fn a_source_named_outside_the_crate_supersedes_only_its_own_documents(pool
         &HashEmbedder,
         &ConnectorLabels,
         &sources(vec![wiki_pages(&["home"])]),
-        false,
+        OtherModels::Refuse,
     )
     .await
     .unwrap();
@@ -518,7 +518,7 @@ async fn a_document_under_another_source_name_fails_its_source(pool: PgPool) {
         &HashEmbedder,
         &ConnectorLabels,
         &sources(vec![mislabelled]),
-        false,
+        OtherModels::Refuse,
     )
     .await
     .unwrap();
@@ -562,7 +562,7 @@ async fn label_rules_set_the_stored_labels_and_relabelling_makes_a_new_version(p
         &HashEmbedder,
         &ConnectorLabels,
         &sources(vec![documents()]),
-        false,
+        OtherModels::Refuse,
     )
     .await
     .unwrap();
@@ -572,7 +572,7 @@ async fn label_rules_set_the_stored_labels_and_relabelling_makes_a_new_version(p
         &HashEmbedder,
         &rules,
         &sources(vec![documents()]),
-        false,
+        OtherModels::Refuse,
     )
     .await
     .unwrap();
@@ -604,7 +604,7 @@ async fn a_document_that_cannot_be_labelled_is_not_stored(pool: PgPool) {
         &HashEmbedder,
         &FailingLabeler,
         &sources,
-        false,
+        OtherModels::Refuse,
     )
     .await
     .unwrap();
@@ -622,9 +622,15 @@ async fn a_failing_embedder_fails_only_its_source() {
     let store = MemoryChunkStore::default();
     let sources = sources(vec![static_source(vec![page(&[("a", "alpha")])])]);
 
-    let reports = ingest(&store, &FailingModel, &ConnectorLabels, &sources, false)
-        .await
-        .unwrap();
+    let reports = ingest(
+        &store,
+        &FailingModel,
+        &ConnectorLabels,
+        &sources,
+        OtherModels::Refuse,
+    )
+    .await
+    .unwrap();
 
     let error = reports[0].error.as_ref().expect("the source failed");
     assert!(
@@ -643,7 +649,7 @@ async fn a_store_that_cannot_answer_fails_ingestion_before_any_source() {
         &HashEmbedder,
         &ConnectorLabels,
         &sources,
-        false,
+        OtherModels::Refuse,
     )
     .await
     .unwrap_err();
@@ -667,9 +673,15 @@ async fn ingestion_into_memory_is_readable_by_a_retriever() {
     ]);
     roles.labels.acl = Acl::anyone();
     let sources = sources(vec![static_source(vec![roles])]);
-    ingest(&store, &HashEmbedder, &ConnectorLabels, &sources, false)
-        .await
-        .unwrap();
+    ingest(
+        &store,
+        &HashEmbedder,
+        &ConnectorLabels,
+        &sources,
+        OtherModels::Refuse,
+    )
+    .await
+    .unwrap();
 
     let retriever = KeywordRetriever {
         chunks: store.current(),

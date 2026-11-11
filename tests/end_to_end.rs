@@ -20,7 +20,7 @@ use recall::{
     },
     clock::{SystemClock, UuidV7},
     domain::{ChunkDraft, Document, Labels, Sensitivity},
-    ingest::{Sources, fakes::StaticSource, ingest, markdown},
+    ingest::{OtherModels, Sources, fakes::StaticSource, ingest, markdown},
     llm::{
         ChatModel,
         fakes::{HashEmbedder, ScriptedChat},
@@ -105,7 +105,7 @@ async fn an_ingested_page_answers_a_question_over_http(pool: PgPool) -> eros::Re
         &HashEmbedder,
         &ConnectorLabels,
         &sources,
-        false,
+        OtherModels::Refuse,
     )
     .await?;
 
@@ -234,7 +234,7 @@ async fn a_relabelled_confidential_page_never_reaches_a_reader(pool: PgPool) -> 
         &HashEmbedder,
         rules.labels(),
         &sources,
-        false,
+        OtherModels::Refuse,
     )
     .await?;
 
