@@ -58,8 +58,16 @@ impl FromStr for ApiKeys {
 }
 
 /// The caller, authenticated by `Authorization: Bearer <key>`. Bearer keys assert no roles; the access policy assigns
-/// them.
-pub struct Caller(pub Principal);
+/// them. Built only by authenticating a request.
+#[derive(Debug)]
+pub struct Caller(Principal);
+
+impl Caller {
+    /// Who the bearer key maps to.
+    pub fn into_principal(self) -> Principal {
+        self.0
+    }
+}
 
 impl FromRequestParts<AppState> for Caller {
     type Rejection = ApiError;

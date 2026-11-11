@@ -123,8 +123,10 @@ pub struct EvalRun {
     pub report: RunReport,
 }
 
-/// One run's contribution to each metric. `None` means the run does not count toward that metric.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// One run's contribution to each metric. `None` means the run does not count toward that metric. Results written
+/// before `ended` existed say `declined` and `failed` instead, and read the same.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "RawRunScores", into = "RawRunScores")]
 pub struct RunScores {
     /// The run's category equals the golden one; `None` when the run halted before `Classify` recorded one.
     pub classified_correctly: Option<bool>,
@@ -136,16 +138,87 @@ pub struct RunScores {
     pub hit_at_5: Option<bool>,
     /// The verdict matches the expected answer; `None` unless answered with something to grade.
     pub answer_correct: Option<bool>,
-    /// The run declined.
-    pub declined: bool,
-    /// The run failed.
-    pub failed: bool,
+    /// How the run ended.
+    pub ended: Ended,
     /// Every citation is a chunk this run retrieved or reranked; `None` unless answered.
     pub citations_valid: Option<bool>,
     /// Share of the claims `Verify` judged that a cited chunk supports, in `0..=1`, whether or not the run
-    /// answered; `None` unless a judge checked at least one claim. Results written before it existed have none.
-    #[serde(default)]
+    /// answered; `None` unless a judge checked at least one claim.
     pub claims_supported: Option<f64>,
+}
+
+/// How an eval run ended, for the decline and failure rates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ended {
+    /// With a verified answer.
+    Answered,
+    /// With a decline.
+    Declined,
+    /// With a failure.
+    Failed,
+}
+
+impl From<&Outcome> for Ended {
+    fn from(outcome: &Outcome) -> Self {
+        match outcome {
+            Outcome::Answered(_) => Self::Answered,
+            Outcome::Declined { .. } => Self::Declined,
+            Outcome::Failed { .. } => Self::Failed,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct RawRunScores {
+    classified_correctly: Option<bool>,
+    recall_at_50: Option<f64>,
+    hit_at_5: Option<bool>,
+    answer_correct: Option<bool>,
+    #[serde(default)]
+    ended: Option<Ended>,
+    #[serde(default, skip_serializing)]
+    declined: bool,
+    #[serde(default, skip_serializing)]
+    failed: bool,
+    citations_valid: Option<bool>,
+    #[serde(default)]
+    claims_supported: Option<f64>,
+}
+
+impl From<RawRunScores> for RunScores {
+    fn from(raw: RawRunScores) -> Self {
+        let ended = raw.ended.unwrap_or(match (raw.declined, raw.failed) {
+            (_, true) => Ended::Failed,
+            (true, false) => Ended::Declined,
+            (false, false) => Ended::Answered,
+        });
+        Self {
+            classified_correctly: raw.classified_correctly,
+            recall_at_50: raw.recall_at_50,
+            hit_at_5: raw.hit_at_5,
+            answer_correct: raw.answer_correct,
+            ended,
+            citations_valid: raw.citations_valid,
+            claims_supported: raw.claims_supported,
+        }
+    }
+}
+
+impl From<RunScores> for RawRunScores {
+    fn from(scores: RunScores) -> Self {
+        Self {
+            classified_correctly: scores.classified_correctly,
+            recall_at_50: scores.recall_at_50,
+            hit_at_5: scores.hit_at_5,
+            answer_correct: scores.answer_correct,
+            ended: Some(scores.ended),
+            declined: false,
+            failed: false,
+            citations_valid: scores.citations_valid,
+            claims_supported: scores.claims_supported,
+        }
+    }
 }
 
 /// Told about each golden question as its run starts and finishes, in completion order.
@@ -240,8 +313,7 @@ impl RunScores {
                 Outcome::Answered(answer) => golden.expected.matches(answer.verdict.as_ref()),
                 _ => None,
             },
-            declined: matches!(report.outcome, Outcome::Declined { .. }),
-            failed: matches!(report.outcome, Outcome::Failed { .. }),
+            ended: Ended::from(&report.outcome),
             citations_valid: match &report.outcome {
                 Outcome::Answered(answer) => Some(citations_valid(answer, retrieve, rerank)),
                 _ => None,
@@ -275,7 +347,7 @@ fn classified_correctly(
     }
     let predicted = report
         .category
-        .or_else(|| classify.and_then(|record| record.category));
+        .or_else(|| classify.and_then(ClassifyRecord::category));
     Some(predicted == Some(expected))
 }
 
@@ -482,8 +554,8 @@ impl Metrics {
             retrieval_recall_at_50: Metric::mean(scores.clone().filter_map(|s| s.recall_at_50)),
             rerank_hit_at_5: Metric::rate(scores.clone().filter_map(|s| s.hit_at_5)),
             answer_precision: Metric::rate(scores.clone().filter_map(|s| s.answer_correct)),
-            decline_rate: Metric::rate(scores.clone().map(|s| s.declined)),
-            failure_rate: Metric::rate(scores.clone().map(|s| s.failed)),
+            decline_rate: Metric::rate(scores.clone().map(|s| s.ended == Ended::Declined)),
+            failure_rate: Metric::rate(scores.clone().map(|s| s.ended == Ended::Failed)),
             citation_validity: Metric::rate(scores.clone().filter_map(|s| s.citations_valid)),
             faithfulness: Metric::mean(scores.filter_map(|s| s.claims_supported)),
         }

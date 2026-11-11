@@ -116,7 +116,7 @@ async fn screen(
     let invalid = |error| {
         StepError::decline(DeclineReason::InvalidModelOutput(format!(
             "{}: {error}",
-            hit.chunk.id.0
+            hit.chunk.id.as_str()
         )))
     };
     let yes = |index| judgements.yes(index).map_err(invalid);
@@ -285,7 +285,7 @@ mod tests {
     fn hit(locator: &str, text: &str) -> Retrieved {
         Retrieved {
             chunk: chunk(locator, "Roles", text),
-            score: Relevance(0.5),
+            score: Relevance::new(0.5).unwrap(),
             context_for: None,
         }
     }

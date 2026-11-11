@@ -35,7 +35,7 @@ fn request() -> JudgeRequest {
             JudgeQuestion::OneOf {
                 instructions: "How does this text relate to the claim: ROLE_USERS stores roles"
                     .into(),
-                options: OPTIONS.to_vec(),
+                options: OPTIONS.to_vec().try_into().unwrap(),
             },
         ],
     }

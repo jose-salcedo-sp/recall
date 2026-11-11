@@ -151,7 +151,7 @@ async fn answers_with_citations_numbered_by_first_use() {
     assert_eq!(explain.model, Some(chat.model()));
     assert!(matches!(
         record(&report, "classify"),
-        TraceRecord::Classify(r) if r.category == Some(CategoryKind::Open)
+        TraceRecord::Classify(r) if r.category() == Some(CategoryKind::Open)
     ));
     let TraceRecord::Rerank(rerank) = record(&report, "rerank") else {
         panic!("rerank record");
@@ -190,7 +190,7 @@ async fn uncited_claim_declines_with_the_reranked_sources() {
 
 #[tokio::test]
 async fn citation_outside_the_reranked_sources_declines() {
-    let forged = ChunkId("markdown:secrets.md#passwords".into());
+    let forged = ChunkId::try_from(String::from("markdown:secrets.md#passwords")).unwrap();
     let chat = Arc::new(ScriptedChat::replying([reply(&json!([
         { "text": "ROLE_USERS maps users to roles.", "chunk_ids": [role_users().id, forged] },
     ]))]));
@@ -252,7 +252,7 @@ async fn invalid_json_declines_with_the_raw_output_in_the_trace() {
     assert!(matches!(explain.outcome, StepOutcome::Declined { .. }));
     assert!(matches!(
         &explain.record,
-        Some(TraceRecord::Explain(r)) if r.raw.as_deref() == Some("Sure! ROLE_USERS, I think.")
+        Some(TraceRecord::Explain(r)) if r.raw() == "Sure! ROLE_USERS, I think."
     ));
     assert_eq!(
         explain.model.as_ref().map(|m| m.id.as_str()),
@@ -328,7 +328,7 @@ async fn prompt_delimits_sources_as_data() {
     );
     assert!(request.user.contains(&format!(
         "<source chunk_id=\"{}\" title=\"Schema tables\" heading=\"role-users\" authoritative=\"false\">\n{}\n</source>",
-        role_users().id.0,
+        role_users().id.as_str(),
         role_users().text,
     )));
     assert!(request.user.contains(
@@ -495,7 +495,11 @@ async fn explain_may_cite_only_this_run_s_sources() {
     let TraceRecord::Rerank(rerank) = record(&report, "rerank") else {
         panic!("expected the rerank record");
     };
-    let sources: Vec<_> = rerank.chunks.iter().map(|c| json!(c.chunk.id.0)).collect();
+    let sources: Vec<_> = rerank
+        .chunks
+        .iter()
+        .map(|c| json!(c.chunk.id.as_str()))
+        .collect();
     assert_eq!(allowed, &json!(sources));
 }
 
@@ -518,7 +522,13 @@ async fn sources_that_contradict_the_verdict_decline_the_run() {
     let TraceRecord::Explain(explain) = record(&report, "explain") else {
         panic!("expected the explain record");
     };
-    assert!(explain.contradicts_verdict);
+    assert!(matches!(
+        explain,
+        crate::pipeline::trace::ExplainRecord::Verdict {
+            contradicts_verdict: true,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -567,7 +577,13 @@ async fn an_unsure_classification_falls_back_to_the_open_path() {
     let TraceRecord::Classify(classify) = record(&report, "classify") else {
         panic!("expected the classify record");
     };
-    assert_eq!(classify.fallback_from, Some(CategoryKind::Boolean));
+    assert!(matches!(
+        classify,
+        crate::pipeline::trace::ClassifyRecord::Judged {
+            fallback_from: Some(CategoryKind::Boolean),
+            ..
+        }
+    ));
     assert!(!steps(&report).iter().any(|(step, _)| *step == "answer"));
 }
 
@@ -726,11 +742,11 @@ async fn the_plan_and_each_step_s_record_say_what_ran() {
     assert!(matches!(report.outcome, Outcome::Answered(_)));
     assert!(matches!(
         record(&report, "classify"),
-        TraceRecord::Classify(r) if r.mode == ClassifyMode::AllOpen
+        TraceRecord::Classify(r) if r.mode() == ClassifyMode::AllOpen
     ));
     assert!(matches!(
         record(&report, "rerank"),
-        TraceRecord::Rerank(r) if r.mode == RerankMode::RetrievalOrder
+        TraceRecord::Rerank(r) if r.order.mode() == RerankMode::RetrievalOrder
     ));
     assert!(!steps(&report).iter().any(|(step, _)| *step == "admit"));
     assert!(matches!(
@@ -821,7 +837,7 @@ fn principal(id: &str) -> Principal {
 fn cite_everything() -> String {
     let claims: Vec<_> = labelled_corpus()
         .iter()
-        .map(|chunk| json!({ "text": format!("{} says so.", chunk.id.0), "chunk_ids": [chunk.id] }))
+        .map(|chunk| json!({ "text": format!("{} says so.", chunk.id.as_str()), "chunk_ids": [chunk.id] }))
         .collect();
     reply(&json!(claims))
 }
@@ -840,7 +856,7 @@ fn exposed(report: &RunReport, chat: &ScriptedChat) -> Vec<ChunkId> {
                 || request
                     .json_schema
                     .as_ref()
-                    .is_some_and(|schema| schema.to_string().contains(&chunk.id.0))
+                    .is_some_and(|schema| schema.to_string().contains(chunk.id.as_str()))
         })
     });
     let citations = match &report.outcome {
@@ -883,7 +899,7 @@ async fn no_principal_sees_a_chunk_its_access_denies() {
                 assert!(
                     access.chunks().admits(&chunk.labels),
                     "{id} ({kind}) saw {}",
-                    exposed.0
+                    exposed.as_str()
                 );
             }
         }
@@ -1019,7 +1035,11 @@ async fn a_boolean_verdict_is_judged_only_on_readable_sources() {
 
     for request in judge.requests() {
         for denied in [secret(), ana_only(), hr_only()] {
-            assert!(!request.text.contains(&denied.text), "{}", denied.id.0);
+            assert!(
+                !request.text.contains(&denied.text),
+                "{}",
+                denied.id.as_str()
+            );
         }
     }
     assert!(judge.requests().len() > 1, "the judge answered the verdict");

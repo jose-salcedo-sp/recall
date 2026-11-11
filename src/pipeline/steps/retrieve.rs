@@ -186,12 +186,12 @@ mod tests {
         let hits = vec![
             Retrieved {
                 chunk: matched.clone(),
-                score: Relevance(0.5),
+                score: Relevance::new(0.5).unwrap(),
                 context_for: None,
             },
             Retrieved {
                 chunk: next,
-                score: Relevance(0.4),
+                score: Relevance::new(0.4).unwrap(),
                 context_for: Some(matched.id.clone()),
             },
         ];
@@ -224,7 +224,7 @@ mod tests {
             Ok(Retrieval {
                 hits: vec![Retrieved {
                     chunk: chunk("hit", "page", "the earlier screens"),
-                    score: Relevance(0.5),
+                    score: Relevance::new(0.5).unwrap(),
                     context_for: None,
                 }],
                 expansion: self.0.expand(query, 8),
@@ -235,8 +235,8 @@ mod tests {
     #[tokio::test]
     async fn the_record_lists_the_expansion() {
         let source = ChunkRef {
-            id: ChunkId("markdown:LEXICON.md#generations".into()),
-            version: ChunkVersion("v1".into()),
+            id: ChunkId::try_from(String::from("markdown:LEXICON.md#generations")).unwrap(),
+            version: ChunkVersion::try_from(String::from("v1")).unwrap(),
         };
         let glossary = Glossary::parse([(
             source.clone(),

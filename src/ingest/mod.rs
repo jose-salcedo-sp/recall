@@ -81,7 +81,16 @@ impl fmt::Debug for Sources {
     }
 }
 
-/// Current chunks use a different embedding model than the configured one, and `--reembed` is off.
+/// What [`ingest`] does when current chunks were embedded with another model than its embedder's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OtherModels {
+    /// Fail with [`EmbeddingModelMismatch`] before touching any source: models are never mixed.
+    Refuse,
+    /// Re-ingest every source with the embedder's model, then supersede what is still embedded with another.
+    Replace,
+}
+
+/// Current chunks use a different embedding model than the configured one, and [`OtherModels::Refuse`] is set.
 #[derive(Debug, thiserror::Error)]
 #[error(
     "current chunks were embedded with {current:?} but the configured embedding model is {configured:?}; \
@@ -111,26 +120,27 @@ pub struct SourceReport {
 /// Each source's snapshot supersedes only documents stored under its own name. Each document is stored with the
 /// labels `labeler` gives it; a document it cannot label is not stored, and its source fails.
 ///
-/// With `reembed`, and only when every source succeeded, chunks embedded with any other model are superseded too.
+/// Under [`OtherModels::Replace`], and only when every source succeeded, chunks embedded with any other model are
+/// superseded too.
 /// Last, the full-text statistics that BM25 ranking reads are recomputed from the current chunks, in their own
 /// transaction: each document commits separately, so there is no snapshot transaction to join, and until the refresh
 /// commits retrieval ranks with the previous statistics.
 ///
 /// # Errors
 ///
-/// [`EmbeddingModelMismatch`], before touching any source, when current chunks use another model and `reembed` is
-/// off; [`ChunkStoreFailed`] when the model check, the final supersede, or the statistics refresh fails.
+/// [`EmbeddingModelMismatch`], before touching any source, when current chunks use another model under
+/// [`OtherModels::Refuse`]; [`ChunkStoreFailed`] when the model check, the final supersede, or the statistics refresh fails.
 pub async fn ingest(
     store: &dyn ChunkStore,
     embedder: &dyn Embedder,
     labeler: &dyn Labeler,
     sources: &Sources,
-    reembed: bool,
+    other_models: OtherModels,
 ) -> eros::Result<Vec<SourceReport>, (EmbeddingModelMismatch, ChunkStoreFailed)> {
     let model = embedder.model();
 
     let current = store.current_embedding_models().await.widen()?;
-    if !reembed && current.iter().any(|m| *m != model) {
+    if other_models == OtherModels::Refuse && current.iter().any(|m| *m != model) {
         return Err(EmbeddingModelMismatch {
             current,
             configured: model,
@@ -171,7 +181,7 @@ pub async fn ingest(
         reports.push(report);
     }
 
-    if reembed && reports.iter().all(|r| r.error.is_none()) {
+    if other_models == OtherModels::Replace && reports.iter().all(|r| r.error.is_none()) {
         let superseded = store.supersede_other_models(&model).await.widen()?;
         if superseded > 0 {
             tracing::warn!(
@@ -200,12 +210,12 @@ async fn ingest_source(
         eros::ensure!(
             document.source == *name,
             "{name} source returned document {}",
-            document.id().0
+            document.id().as_str()
         );
         let labels = labeler
             .label(&document)
             .await
-            .with_context(|| format!("labelling document {}", document.id().0))?;
+            .with_context(|| format!("labelling document {}", document.id().as_str()))?;
         let document = Document { labels, ..document };
         report.stored += store.store(&document, embedder).await?;
         report.documents += 1;

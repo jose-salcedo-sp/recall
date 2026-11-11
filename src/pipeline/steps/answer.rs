@@ -167,7 +167,7 @@ mod tests {
                 "Mitigating controls",
                 "Controls map to users only.",
             ),
-            score: Relevance(0.9),
+            score: Relevance::new(0.9).unwrap(),
             context_for: None,
         }])
     }
@@ -243,7 +243,7 @@ mod tests {
             (0..3)
                 .map(|i| Retrieved {
                     chunk: chunk(&format!("s{i}"), "Big", &"x".repeat(MAX_STATE_CHARS)),
-                    score: Relevance(1.0),
+                    score: Relevance::new(1.0).unwrap(),
                     context_for: None,
                 })
                 .collect(),

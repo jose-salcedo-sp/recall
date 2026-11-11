@@ -43,9 +43,15 @@ fn probability(value: f32) -> Probability {
 
 fn chunk(id: &str) -> ChunkRef {
     ChunkRef {
-        id: ChunkId(id.into()),
-        version: ChunkVersion(format!("v-{id}")),
+        id: chunk_id(id),
+        version: ChunkVersion::try_from(format!("v-{id}")).unwrap(),
     }
+}
+
+/// `name` as a chunk id: as given when it is one, else `markdown:{name}.md#{name}`.
+fn chunk_id(name: &str) -> ChunkId {
+    ChunkId::try_from(name)
+        .unwrap_or_else(|_| ChunkId::try_from(format!("markdown:{name}.md#{name}")).unwrap())
 }
 
 fn ranked(ids: &[&str]) -> Vec<RankedChunk> {
@@ -53,7 +59,7 @@ fn ranked(ids: &[&str]) -> Vec<RankedChunk> {
         .enumerate()
         .map(|(rank, id)| RankedChunk {
             chunk: chunk(id),
-            score: Relevance(1.0 - rank as f32 / 100.0),
+            score: Relevance::new(1.0 - rank as f32 / 100.0).unwrap(),
             probability: None,
             context_for: None,
         })
@@ -107,9 +113,8 @@ fn classify(category: CategoryKind, score: f32) -> TraceEntry {
     entry(
         "classify",
         passed(Some(score)),
-        Some(TraceRecord::Classify(ClassifyRecord {
-            mode: crate::pipeline::trace::ClassifyMode::Judged,
-            raw: None,
+        Some(TraceRecord::Classify(ClassifyRecord::Judged {
+            raw: "{}".into(),
             category: Some(category),
             fallback_from: None,
         })),
@@ -132,8 +137,7 @@ fn rerank_with(outcome: StepOutcome, ids: &[&str]) -> TraceEntry {
         "rerank",
         outcome,
         Some(TraceRecord::Rerank(RerankRecord {
-            mode: crate::pipeline::trace::RerankMode::Judged,
-            raw: None,
+            order: crate::pipeline::trace::RerankOrder::Judged { raw: "{}".into() },
             chunks: ranked(ids),
         })),
     )
@@ -158,7 +162,7 @@ fn golden(id: &str, expected: Expected, relevant: &[&str]) -> GoldenQuestion {
         synthetic: true,
         question: Question::new(format!("question {id}")),
         expected,
-        relevant_chunks: relevant.iter().map(|id| ChunkId((*id).into())).collect(),
+        relevant_chunks: relevant.iter().map(|id| chunk_id(id)).collect(),
         source_thread: format!("https://example.invalid/{id}"),
     }
 }
@@ -166,7 +170,7 @@ fn golden(id: &str, expected: Expected, relevant: &[&str]) -> GoldenQuestion {
 fn cited(value: &str, source: &str) -> Cited<String> {
     Cited {
         value: value.into(),
-        sources: AtLeastOne::one(Provenance::Chunk(ChunkId(source.into()))),
+        sources: AtLeastOne::one(Provenance::Chunk(chunk_id(source))),
     }
 }
 
@@ -527,7 +531,7 @@ fn recall_counts_matches_only() {
             format!("m{i}")
         };
         let mut pair = ranked(&[&id, if i == 0 { "neighbour" } else { "ctx" }]);
-        pair[1].context_for = Some(ChunkId(id.clone()));
+        pair[1].context_for = Some(chunk_id(&id));
         chunks.extend(pair);
     }
     let record = RetrieveRecord {
@@ -574,7 +578,7 @@ fn citation_validity_checks_versions_and_claim_provenance() {
 
     let mut stale = answered(None, &["a"]);
     if let Outcome::Answered(answer) = &mut stale {
-        answer.citations[0].chunk.version = ChunkVersion("old".into());
+        answer.citations[0].chunk.version = ChunkVersion::try_from(String::from("old")).unwrap();
     }
     let mut uncited_claim = answered(None, &["expanded"]);
     if let Outcome::Answered(answer) = &mut uncited_claim {
@@ -1217,7 +1221,7 @@ async fn retrieval_command_scores_matches_and_diffs_each_question_against_a_base
             .map(|g| {
                 let ids: Vec<&str> = match g.id.as_str() {
                     "roles" => vec!["elsewhere"],
-                    _ => vec![g.relevant_chunks[0].0.as_str()],
+                    _ => vec![g.relevant_chunks[0].as_str()],
                 };
                 let report = report(g, None, answered(None, &[]), vec![retrieve(&ids)]);
                 EvalRun::new(g.clone(), report)
@@ -1359,7 +1363,7 @@ fn faithfulness_counts_only_claims_a_judge_checked() {
     };
 
     let relation = |kind| Relation {
-        chunk: ChunkId("c".into()),
+        chunk: chunk_id("c"),
         relation: kind,
         probability: Probability::new(0.9).unwrap(),
     };
@@ -1414,7 +1418,7 @@ fn a_results_file_written_before_modes_were_named_by_role_still_reads() {
 
     assert_eq!(
         setup.config.rerank.judge(),
-        RerankJudge::Judged(RerankCandidates { candidates: 25 })
+        RerankJudge::Judged(RerankCandidates::new(25))
     );
     assert!(matches!(setup.config.admit.judge, AdmitJudge::Judged(_)));
     assert_eq!(
@@ -1434,6 +1438,6 @@ fn a_results_file_written_before_modes_were_named_by_role_still_reads() {
     .unwrap();
     assert_eq!(
         flat.config.rerank.judge(),
-        RerankJudge::Judged(RerankCandidates { candidates: 30 })
+        RerankJudge::Judged(RerankCandidates::new(30))
     );
 }

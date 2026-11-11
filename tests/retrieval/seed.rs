@@ -21,11 +21,11 @@ pub async fn document(
         "INSERT INTO documents (id, source, external_id, title, url, source_updated_at)
          VALUES ($1, $2, $3, $4, $5, now())",
     )
-    .bind(&id.0)
+    .bind(id.as_str())
     .bind(source.as_str())
     .bind(external_id)
     .bind(title)
-    .bind(format!("https://example.test/{}", id.0))
+    .bind(format!("https://example.test/{}", id.as_str()))
     .execute(pool)
     .await
     .expect("insert document");
@@ -127,12 +127,12 @@ impl SeedChunk {
              VALUES ($1, $2, $3, $4, $5, $6, $7, false, ARRAY[$12], $13, $8, $9, $10,
                      CASE WHEN $11 THEN now() END)",
         )
-        .bind(&id.0)
+        .bind(id.as_str())
         .bind(&self.version)
-        .bind(&self.document.0)
+        .bind(self.document.as_str())
         .bind(self.ordinal)
         .bind(&self.heading)
-        .bind(format!("https://example.test/{}", id.0))
+        .bind(format!("https://example.test/{}", id.as_str()))
         .bind(&self.text)
         .bind(Vector::from(embedding))
         .bind(&self.model.id)

@@ -15,7 +15,7 @@ use recall::{
     ingest::markdown,
     llm::{Embedder, ModelRef, fakes::HashEmbedder},
     retrieval::{
-        Relevance, Retrieved, Retriever,
+        Retrieved, Retriever,
         hybrid::{EmbeddingModelMismatch, ExpansionConfig, HybridConfig, HybridRetriever},
     },
     store::chunks::{ChunkStore, PgChunkStore},
@@ -48,7 +48,7 @@ fn full_text_only() -> HybridConfig {
 }
 
 fn ids(results: &[Retrieved]) -> Vec<&str> {
-    results.iter().map(|r| r.chunk.id.0.as_str()).collect()
+    results.iter().map(|r| r.chunk.id.as_str()).collect()
 }
 
 fn position(results: &[Retrieved], id: &ChunkId) -> Option<usize> {
@@ -105,7 +105,7 @@ async fn identifier_queries_match_exactly_via_full_text(pool: PgPool) {
         .retrieve("what is op24", &everything())
         .await
         .unwrap();
-    assert_eq!(ids(&results), [op24.0.as_str()]);
+    assert_eq!(ids(&results), [op24.as_str()]);
     assert_eq!(position(&results, &op24n), None);
 
     let results = retriever
@@ -132,9 +132,9 @@ async fn identifiers_in_headings_and_markdown_are_indexed(pool: PgPool) {
         .retrieve("ROLE_1251", &everything())
         .await
         .unwrap();
-    assert_eq!(ids(&results), [heading.0.as_str()]);
+    assert_eq!(ids(&results), [heading.as_str()]);
     let results = retriever.retrieve("usobt_c", &everything()).await.unwrap();
-    assert_eq!(ids(&results), [italic.0.as_str()]);
+    assert_eq!(ids(&results), [italic.as_str()]);
 }
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
@@ -176,7 +176,7 @@ async fn tsquery_syntax_in_a_question_is_plain_text(pool: PgPool) {
         .retrieve(r"O'Brien & !(built-in):* | 'roles\", &everything())
         .await
         .unwrap();
-    assert_eq!(ids(&results), [id.0.as_str()]);
+    assert_eq!(ids(&results), [id.as_str()]);
 }
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
@@ -255,7 +255,10 @@ async fn fusion_orders_by_reciprocal_rank(pool: PgPool) {
     assert_eq!(results.len(), expected.len());
     for (result, (id, score)) in results.iter().zip(&expected) {
         assert_eq!(result.chunk.id, *id);
-        assert!((f64::from(result.score.0) - score).abs() < 1e-6, "{id:?}");
+        assert!(
+            (f64::from(result.score.get()) - score).abs() < 1e-6,
+            "{id:?}"
+        );
     }
 }
 
@@ -301,9 +304,9 @@ async fn superseded_versions_are_never_returned(pool: PgPool) {
         .unwrap();
 
     // The hit pulls in the nearest current section, skipping the removed one.
-    assert_eq!(ids(&results), [check.0.as_str(), intro.0.as_str()]);
-    assert_eq!(results[0].chunk.version.0, "new-check");
-    assert_eq!(results[1].chunk.version.0, "new-intro");
+    assert_eq!(ids(&results), [check.as_str(), intro.as_str()]);
+    assert_eq!(results[0].chunk.version.as_str(), "new-check");
+    assert_eq!(results[1].chunk.version.as_str(), "new-intro");
     assert_eq!(position(&results, &removed), None);
     assert_eq!(position(&results, &deleted), None);
 }
@@ -349,7 +352,7 @@ async fn hits_expand_to_neighbouring_sections(pool: PgPool) {
     for neighbour in [&sections[1], &sections[3]] {
         let at = position(&results, neighbour).unwrap();
         assert_eq!(at, hit + if neighbour == &sections[1] { 1 } else { 2 });
-        assert_eq!(results[at].score, Relevance(hit_score.0.next_down()));
+        assert_eq!(results[at].score, hit_score.next_down());
     }
     for far in [&sections[0], &sections[4]] {
         assert_eq!(position(&results, far), None);
@@ -388,7 +391,7 @@ async fn expansion_dedupes_and_caps_per_page(pool: PgPool) {
         .unwrap();
     assert_eq!(
         ids(&results),
-        [&sections[2], &sections[1], &sections[3]].map(|id| id.0.as_str())
+        [&sections[2], &sections[1], &sections[3]].map(|id| id.as_str())
     );
 
     let roomy = HybridConfig {
@@ -401,7 +404,7 @@ async fn expansion_dedupes_and_caps_per_page(pool: PgPool) {
         .unwrap();
     assert_eq!(
         ids(&results),
-        [&sections[2], &sections[1], &sections[3], &sections[4]].map(|id| id.0.as_str())
+        [&sections[2], &sections[1], &sections[3], &sections[4]].map(|id| id.as_str())
     );
     assert!(results.windows(2).all(|w| w[0].score >= w[1].score));
 }
@@ -426,21 +429,21 @@ async fn adjacent_hits_expand_and_single_section_files_stand_alone(pool: PgPool)
         .unwrap();
     let mut found = ids(&results);
     found.sort();
-    let mut expected = [symptom.0.as_str(), cause.0.as_str(), answer.0.as_str()];
+    let mut expected = [symptom.as_str(), cause.as_str(), answer.as_str()];
     expected.sort();
     assert_eq!(found, expected);
 
     let context_for = |id: &str| {
         results
             .iter()
-            .find(|hit| hit.chunk.id.0 == id)
+            .find(|hit| hit.chunk.id.as_str() == id)
             .unwrap()
             .context_for
             .clone()
     };
-    assert_eq!(context_for(&symptom.0), Some(cause.clone()));
-    assert_eq!(context_for(&cause.0), None);
-    assert_eq!(context_for(&answer.0), None);
+    assert_eq!(context_for(symptom.as_str()), Some(cause.clone()));
+    assert_eq!(context_for(cause.as_str()), None);
+    assert_eq!(context_for(answer.as_str()), None);
 }
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
@@ -463,14 +466,14 @@ async fn chunks_are_fully_populated(pool: PgPool) {
 
     let chunk = &results[0].chunk;
     assert_eq!(chunk.id, id);
-    assert_eq!(chunk.version.0, "v1");
+    assert_eq!(chunk.version.as_str(), "v1");
     assert_eq!(chunk.document_id, page);
     assert_eq!(chunk.source, markdown::NAME);
     assert_eq!(chunk.title, "Role design");
     assert_eq!(chunk.heading.as_deref(), Some("Naming"));
     assert_eq!(chunk.url, "https://example.test/markdown:50#naming");
     assert_eq!(chunk.labels.acl.to_strings(), [ACL_GROUP]);
-    assert!(!chunk.authoritative);
+    assert_eq!(chunk.standing, recall::domain::Standing::Evidence);
 }
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]
@@ -751,13 +754,13 @@ async fn a_neighbour_the_asker_may_not_read_is_not_added_as_context(pool: PgPool
         .retrieve("ROLE_USERS", &scope(Sensitivity::Internal))
         .await
         .unwrap();
-    assert_eq!(ids(&internal), [open.0.as_str()]);
+    assert_eq!(ids(&internal), [open.as_str()]);
 
     let all = retriever
         .retrieve("ROLE_USERS", &everything())
         .await
         .unwrap();
-    assert_eq!(ids(&all), [open.0.as_str(), secret.0.as_str()]);
+    assert_eq!(ids(&all), [open.as_str(), secret.as_str()]);
     assert_eq!(all[1].context_for.as_ref(), Some(&open));
 }
 

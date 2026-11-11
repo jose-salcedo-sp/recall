@@ -75,11 +75,12 @@ async fn models(_: Caller) -> Json<ModelList> {
 
 async fn chat_completions(
     State(state): State<AppState>,
-    Caller(principal): Caller,
+    caller: Caller,
     body: Result<Json<ChatRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(request) = body.map_err(|rejection| ApiError::bad_request(rejection.body_text()))?;
     let question = request.question()?;
+    let principal = caller.into_principal();
 
     let report = state.answerer.answer(&principal, question).await;
     let run_id = report.id;
@@ -137,7 +138,7 @@ struct RunView {
 impl From<StoredRun> for RunView {
     fn from(run: StoredRun) -> Self {
         Self {
-            status: crate::store::runs::status(&run.report.outcome),
+            status: run.report.outcome.status(),
             report: run.report,
             user: run.user,
             created_at: run.created_at,
@@ -149,9 +150,10 @@ impl From<StoredRun> for RunView {
 /// access check, since one names a chunk it may not know exists.
 async fn get_run(
     State(state): State<AppState>,
-    Caller(principal): Caller,
+    caller: Caller,
     Path(id): Path<String>,
 ) -> Result<Json<RunView>, ApiError> {
+    let principal = caller.into_principal();
     let not_found = || ApiError::not_found("Run not found.");
     let run_id = Uuid::parse_str(&id)
         .map(RunId::from)

@@ -31,10 +31,58 @@ pub struct Retrieved {
     pub context_for: Option<ChunkId>,
 }
 
-/// Fused retrieval score; higher is better. Comparable only within one retrieval, and not a probability.
+/// Fused retrieval score; higher is better. Comparable only within one retrieval, and not a probability. Finite, so
+/// scores sort without a `NaN` case.
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Relevance(pub f32);
+#[serde(try_from = "f32", into = "f32")]
+pub struct Relevance(f32);
+
+/// A score rejected by [`Relevance::new`]: `NaN` or infinite.
+#[derive(Debug, PartialEq, thiserror::Error)]
+#[error("expected a finite relevance score, got {0}")]
+pub struct NotFinite(pub f32);
+
+impl Relevance {
+    /// # Errors
+    ///
+    /// [`NotFinite`] when `score` is `NaN` or infinite.
+    pub fn new(score: f32) -> Result<Self, NotFinite> {
+        if score.is_finite() {
+            Ok(Self(score))
+        } else {
+            Err(NotFinite(score))
+        }
+    }
+
+    /// The score.
+    pub fn get(self) -> f32 {
+        self.0
+    }
+
+    /// The next score below, for a context chunk placed just under its match.
+    pub fn next_down(self) -> Self {
+        Self(self.0.next_down())
+    }
+
+    /// Higher first.
+    pub fn descending(a: &Self, b: &Self) -> std::cmp::Ordering {
+        b.0.total_cmp(&a.0)
+    }
+}
+
+impl TryFrom<f32> for Relevance {
+    type Error = NotFinite;
+
+    fn try_from(score: f32) -> Result<Self, NotFinite> {
+        Self::new(score)
+    }
+}
+
+impl From<Relevance> for f32 {
+    fn from(score: Relevance) -> f32 {
+        score.0
+    }
+}
 
 /// Finds the chunks a question is most likely about, among those the asker may read.
 #[async_trait]

@@ -122,14 +122,14 @@ pub(crate) mod fixtures {
         let document_id = DocumentId::new(&source, title);
         Chunk {
             id: ChunkId::new(&document_id, locator),
-            version: ChunkVersion(format!("v-{locator}")),
+            version: ChunkVersion::try_from(format!("v-{locator}")).unwrap(),
             document_id,
             source,
             title: title.into(),
             heading: Some(locator.into()),
             url: format!("https://example.test/docs/{title}#{locator}"),
             text: text.into(),
-            authoritative: false,
+            standing: crate::domain::Standing::Evidence,
             labels: Labels {
                 acl: crate::access::Acl::anyone(),
                 sensitivity: Sensitivity::Internal,

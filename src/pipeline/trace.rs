@@ -164,20 +164,87 @@ pub enum RerankMode {
     Judged,
 }
 
-/// What `Classify` asked for and got.
+/// What `Classify` asked for and got. Stored as `{mode, raw, category, fallback_from}`; a record written before
+/// `mode` existed is `all_open` when its `raw` is null, else judged.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ClassifyRecord {
-    /// How the category was chosen. Records written before it existed read as `judged`; their `raw` is `None` when
-    /// every question was `open`.
+#[serde(from = "RawClassifyRecord", into = "RawClassifyRecord")]
+pub enum ClassifyRecord {
+    /// No judge is configured: the run continued as `open`, unscored.
+    AllOpen,
+    /// A judge chose the category.
+    Judged {
+        /// The judge's answer as JSON.
+        raw: String,
+        /// The category the run continued with; `None` when the answer was invalid.
+        category: Option<CategoryKind>,
+        /// What the judge chose when its probability was below `classify.min_confidence` and the run fell back to
+        /// `open`.
+        fallback_from: Option<CategoryKind>,
+    },
+}
+
+impl ClassifyRecord {
+    /// How the category was chosen.
+    pub fn mode(&self) -> ClassifyMode {
+        match self {
+            Self::AllOpen => ClassifyMode::AllOpen,
+            Self::Judged { .. } => ClassifyMode::Judged,
+        }
+    }
+
+    /// The category the run continued with; `None` when the judge's answer was invalid.
+    pub fn category(&self) -> Option<CategoryKind> {
+        match self {
+            Self::AllOpen => Some(CategoryKind::Open),
+            Self::Judged { category, .. } => *category,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct RawClassifyRecord {
     #[serde(default)]
-    pub mode: ClassifyMode,
-    /// The judge's answer as JSON; `None` under `all_open`.
-    pub raw: Option<String>,
-    /// The category the run continued with; `None` when the answer was invalid.
-    pub category: Option<CategoryKind>,
-    /// What the judge chose when its probability was below `classify.min_confidence` and the run fell back to `open`.
+    mode: ClassifyMode,
+    raw: Option<String>,
+    category: Option<CategoryKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fallback_from: Option<CategoryKind>,
+    fallback_from: Option<CategoryKind>,
+}
+
+impl From<RawClassifyRecord> for ClassifyRecord {
+    fn from(record: RawClassifyRecord) -> Self {
+        match (record.mode, record.raw) {
+            (ClassifyMode::AllOpen, _) | (ClassifyMode::Judged, None) => Self::AllOpen,
+            (ClassifyMode::Judged, Some(raw)) => Self::Judged {
+                raw,
+                category: record.category,
+                fallback_from: record.fallback_from,
+            },
+        }
+    }
+}
+
+impl From<ClassifyRecord> for RawClassifyRecord {
+    fn from(record: ClassifyRecord) -> Self {
+        match record {
+            ClassifyRecord::AllOpen => Self {
+                mode: ClassifyMode::AllOpen,
+                raw: None,
+                category: Some(CategoryKind::Open),
+                fallback_from: None,
+            },
+            ClassifyRecord::Judged {
+                raw,
+                category,
+                fallback_from,
+            } => Self {
+                mode: ClassifyMode::Judged,
+                raw: Some(raw),
+                category,
+                fallback_from,
+            },
+        }
+    }
 }
 
 /// Recall@50 is computed from the matches in `chunks`; context chunks neither count nor take a place.
@@ -191,17 +258,72 @@ pub struct RetrieveRecord {
     pub expansion: Expansion,
 }
 
-/// Hit@5 is computed from `chunks`.
+/// Hit@5 is computed from `chunks`. Stored as `{mode, raw, chunks}`; a record written before `mode` existed was
+/// judged exactly when its `raw` is set.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "RawRerankRecord", into = "RawRerankRecord")]
 pub struct RerankRecord {
-    /// How the matches were ordered. Records written before it existed read as `retrieval_order`; their `raw` is set
-    /// when a judge ordered them.
-    #[serde(default)]
-    pub mode: RerankMode,
-    /// The judge's probability of yes per judged chunk id, as a JSON object; `None` under `retrieval_order`.
-    pub raw: Option<String>,
+    /// How the matches were ordered.
+    pub order: RerankOrder,
     /// The kept matches best first, then the context chunks attached to them.
     pub chunks: Vec<RankedChunk>,
+}
+
+/// How `Rerank` ordered one run's matches.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RerankOrder {
+    /// Retrieval rank and the evidence penalty only.
+    RetrievalOrder,
+    /// Fused with a judge's probabilities.
+    Judged {
+        /// The judge's probability of yes per judged chunk id, as a JSON object.
+        raw: String,
+    },
+}
+
+impl RerankOrder {
+    /// The mode, as the pipeline was assembled.
+    pub fn mode(&self) -> RerankMode {
+        match self {
+            Self::RetrievalOrder => RerankMode::RetrievalOrder,
+            Self::Judged { .. } => RerankMode::Judged,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct RawRerankRecord {
+    #[serde(default)]
+    mode: RerankMode,
+    raw: Option<String>,
+    chunks: Vec<RankedChunk>,
+}
+
+impl From<RawRerankRecord> for RerankRecord {
+    fn from(record: RawRerankRecord) -> Self {
+        Self {
+            order: match record.raw {
+                Some(raw) => RerankOrder::Judged { raw },
+                None => RerankOrder::RetrievalOrder,
+            },
+            chunks: record.chunks,
+        }
+    }
+}
+
+impl From<RerankRecord> for RawRerankRecord {
+    fn from(record: RerankRecord) -> Self {
+        let mode = record.order.mode();
+        let raw = match record.order {
+            RerankOrder::RetrievalOrder => None,
+            RerankOrder::Judged { raw } => Some(raw),
+        };
+        Self {
+            mode,
+            raw,
+            chunks: record.chunks,
+        }
+    }
 }
 
 /// What `Answer` asked for and got.
@@ -213,13 +335,69 @@ pub struct AnswerRecord {
     pub parsed: Option<serde_json::Value>,
 }
 
-/// What `Explain` got back.
+/// What `Explain` got back, by the path it ran. Stored as `{raw}` on the open path and
+/// `{raw, contradicts_verdict}` when it explained a verdict.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ExplainRecord {
+#[serde(from = "RawExplainRecord", into = "RawExplainRecord")]
+pub enum ExplainRecord {
+    /// The whole answer to an `open` question.
+    Open {
+        /// The LLM's reply, verbatim.
+        raw: String,
+    },
+    /// The reason for the judge's verdict.
+    Verdict {
+        /// The LLM's reply, verbatim.
+        raw: String,
+        /// The LLM flagged that cited sources contradict the verdict.
+        contradicts_verdict: bool,
+    },
+}
+
+impl ExplainRecord {
     /// The LLM's reply, verbatim.
-    pub raw: Option<String>,
-    /// The LLM flagged that cited sources contradict the judge's verdict.
-    pub contradicts_verdict: bool,
+    pub fn raw(&self) -> &str {
+        match self {
+            Self::Open { raw } | Self::Verdict { raw, .. } => raw,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct RawExplainRecord {
+    raw: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    contradicts_verdict: Option<bool>,
+}
+
+impl From<RawExplainRecord> for ExplainRecord {
+    fn from(record: RawExplainRecord) -> Self {
+        match record.contradicts_verdict {
+            None => Self::Open { raw: record.raw },
+            Some(contradicts_verdict) => Self::Verdict {
+                raw: record.raw,
+                contradicts_verdict,
+            },
+        }
+    }
+}
+
+impl From<ExplainRecord> for RawExplainRecord {
+    fn from(record: ExplainRecord) -> Self {
+        match record {
+            ExplainRecord::Open { raw } => Self {
+                raw,
+                contradicts_verdict: None,
+            },
+            ExplainRecord::Verdict {
+                raw,
+                contradicts_verdict,
+            } => Self {
+                raw,
+                contradicts_verdict: Some(contradicts_verdict),
+            },
+        }
+    }
 }
 
 /// How `Admit` screened each reranked source, in `Rerank`'s order.

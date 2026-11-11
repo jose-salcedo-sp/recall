@@ -20,7 +20,7 @@ use recall::{
     },
     clock::{SystemClock, UuidV7},
     domain::{ChunkDraft, Document, Labels, Sensitivity},
-    ingest::{Sources, fakes::StaticSource, ingest, markdown},
+    ingest::{OtherModels, Sources, fakes::StaticSource, ingest, markdown},
     llm::{
         ChatModel,
         fakes::{HashEmbedder, ScriptedChat},
@@ -51,14 +51,14 @@ fn roles_page() -> Document {
                 heading: Some("Role assignments".into()),
                 url: "https://wiki.example.test/roles.md#roles".into(),
                 text: "ROLE_USERS stores which users are assigned to which roles.".into(),
-                authoritative: true,
+                standing: recall::domain::Standing::Authoritative,
             },
             ChunkDraft {
                 locator: "transport".into(),
                 heading: Some("Transports".into()),
                 url: "https://wiki.example.test/roles.md#transport".into(),
                 text: "Roles move between systems in transports.".into(),
-                authoritative: true,
+                standing: recall::domain::Standing::Authoritative,
             },
         ],
     }
@@ -105,7 +105,7 @@ async fn an_ingested_page_answers_a_question_over_http(pool: PgPool) -> eros::Re
         &HashEmbedder,
         &ConnectorLabels,
         &sources,
-        false,
+        OtherModels::Refuse,
     )
     .await?;
 
@@ -213,7 +213,7 @@ fn pay_page() -> Document {
             heading: Some("Role pay bands".into()),
             url: "https://wiki.example.test/hr/pay.md#bands".into(),
             text: "ROLE_USERS role assignments set each user's pay band.".into(),
-            authoritative: true,
+            standing: recall::domain::Standing::Authoritative,
         }],
     }
 }
@@ -234,7 +234,7 @@ async fn a_relabelled_confidential_page_never_reaches_a_reader(pool: PgPool) -> 
         &HashEmbedder,
         rules.labels(),
         &sources,
-        false,
+        OtherModels::Refuse,
     )
     .await?;
 

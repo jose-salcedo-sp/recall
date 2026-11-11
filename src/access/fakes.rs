@@ -50,10 +50,7 @@ impl StaticAuthorizer {
 #[async_trait]
 impl Authorizer for StaticAuthorizer {
     fn policy(&self) -> PolicyRef {
-        PolicyRef {
-            id: "fake-static".into(),
-            version: "1".into(),
-        }
+        PolicyRef::new("fake-static", "1").expect("a non-empty literal ref")
     }
 
     async fn access(&self, principal: &Principal) -> eros::Result<Access> {
@@ -68,10 +65,7 @@ pub struct FailingAuthorizer;
 #[async_trait]
 impl Authorizer for FailingAuthorizer {
     fn policy(&self) -> PolicyRef {
-        PolicyRef {
-            id: "fake-failing".into(),
-            version: "1".into(),
-        }
+        PolicyRef::new("fake-failing", "1").expect("a non-empty literal ref")
     }
 
     async fn access(&self, _: &Principal) -> eros::Result<Access> {
@@ -86,6 +80,6 @@ pub struct FailingLabeler;
 #[async_trait]
 impl Labeler for FailingLabeler {
     async fn label(&self, document: &Document) -> eros::Result<Labels> {
-        eros::bail!("labels for {} are unavailable", document.id().0)
+        eros::bail!("labels for {} are unavailable", document.id().as_str())
     }
 }

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::{
     ingest::{
-        Sources, ingest,
+        OtherModels, Sources, ingest,
         markdown::{Connector, MarkdownConfig},
     },
     store::chunks::PgChunkStore,
@@ -105,7 +105,12 @@ pub async fn run_with(args: &IngestArgs, sources: &Sources) -> eros::Result<()> 
     let store = PgChunkStore::new(args.db.connect().await?);
     let embedder = backend::embedder(&args.embed).await?;
 
-    let reports = ingest(&store, embedder.as_ref(), &labeler, sources, args.reembed).await?;
+    let other_models = if args.reembed {
+        OtherModels::Replace
+    } else {
+        OtherModels::Refuse
+    };
+    let reports = ingest(&store, embedder.as_ref(), &labeler, sources, other_models).await?;
     let failed: Vec<&str> = reports
         .iter()
         .filter(|r| r.error.is_some())

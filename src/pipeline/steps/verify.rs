@@ -434,14 +434,20 @@ async fn support(
                 text: judged_text(&hit.chunk),
                 questions: vec![JudgeQuestion::OneOf {
                     instructions: format!("How does this text relate to the claim: {claim}"),
-                    options: RELATIONS.iter().map(|(_, option)| *option).collect(),
+                    options: AtLeastOne::try_from(
+                        RELATIONS
+                            .iter()
+                            .map(|(_, option)| *option)
+                            .collect::<Vec<_>>(),
+                    )
+                    .expect("RELATIONS lists every relation"),
                 }],
             })
             .await?;
         let (chosen, probability) = judgements.one_of(0).map_err(|error| {
             StepError::decline(DeclineReason::InvalidModelOutput(format!(
                 "{}: {error}",
-                hit.chunk.id.0
+                hit.chunk.id.as_str()
             )))
         })?;
         let relation = Relation {

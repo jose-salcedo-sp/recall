@@ -115,7 +115,7 @@ impl ChunkStore for PgChunkStore {
             ensure!(
                 locators.insert(draft.locator.as_str()),
                 "document {} has duplicate chunk locator {:?}",
-                document_id.0,
+                document_id.as_str(),
                 draft.locator
             );
         }
@@ -125,14 +125,14 @@ impl ChunkStore for PgChunkStore {
             .iter()
             .map(|draft| {
                 let version = ChunkVersion::compute(document, draft, &model);
-                (document.chunk_id(draft).0, version, draft)
+                (String::from(document.chunk_id(draft)), version, draft)
             })
             .collect();
 
         let current: HashMap<String, (String, i32)> = sqlx::query_as::<_, (String, String, i32)>(
             "SELECT id, version, ordinal FROM chunks WHERE document_id = $1 AND superseded_at IS NULL",
         )
-        .bind(&document_id.0)
+        .bind(document_id.as_str())
         .fetch_all(&self.pool)
         .await?
         .into_iter()
@@ -144,7 +144,7 @@ impl ChunkStore for PgChunkStore {
         for (ordinal, (id, version, draft)) in drafts.iter().enumerate() {
             let ordinal = i32::try_from(ordinal)?;
             match current.get(id) {
-                Some((v, o)) if *v == version.0 => {
+                Some((v, o)) if *v == version.as_str() => {
                     if *o != ordinal {
                         moved.push((id, version, ordinal));
                     }
@@ -154,7 +154,7 @@ impl ChunkStore for PgChunkStore {
         }
         let kept: HashSet<(&str, &str)> = drafts
             .iter()
-            .map(|(id, version, _)| (id.as_str(), version.0.as_str()))
+            .map(|(id, version, _)| (id.as_str(), version.as_str()))
             .collect();
         let stale: Vec<&str> = current
             .iter()
@@ -165,7 +165,7 @@ impl ChunkStore for PgChunkStore {
         // A draft can return to a version stored earlier (an edit reverted); that row is revived, not re-embedded.
         let (ids, versions): (Vec<&str>, Vec<&str>) = changed
             .iter()
-            .map(|(id, version, _, _)| (id.as_str(), version.0.as_str()))
+            .map(|(id, version, _, _)| (id.as_str(), version.as_str()))
             .unzip();
         let stored: HashSet<(String, String)> = sqlx::query_as::<_, (String, String)>(
             "SELECT id, version FROM chunks
@@ -177,9 +177,10 @@ impl ChunkStore for PgChunkStore {
         .await?
         .into_iter()
         .collect();
-        let (revived, fresh): (Vec<_>, Vec<_>) = changed
-            .into_iter()
-            .partition(|(id, version, _, _)| stored.contains(&((*id).clone(), version.0.clone())));
+        let (revived, fresh): (Vec<_>, Vec<_>) =
+            changed.into_iter().partition(|(id, version, _, _)| {
+                stored.contains(&((*id).clone(), version.as_str().to_owned()))
+            });
 
         let embeddings = if fresh.is_empty() {
             Vec::new()
@@ -191,7 +192,7 @@ impl ChunkStore for PgChunkStore {
             let embeddings = embedder
                 .embed(&texts, EmbedPurpose::Document)
                 .await
-                .with_context(|| format!("embedding chunks of {}", document_id.0))?;
+                .with_context(|| format!("embedding chunks of {}", document_id.as_str()))?;
             ensure!(
                 embeddings.len() == texts.len(),
                 "embedder returned {} vectors for {} texts",
@@ -217,7 +218,7 @@ impl ChunkStore for PgChunkStore {
                  source_updated_at = EXCLUDED.source_updated_at,
                  last_ingested_at = now()",
         )
-        .bind(&document_id.0)
+        .bind(document_id.as_str())
         .bind(document.source.as_str())
         .bind(&document.external_id)
         .bind(&document.title)
@@ -230,7 +231,7 @@ impl ChunkStore for PgChunkStore {
             "UPDATE chunks SET superseded_at = now()
              WHERE document_id = $1 AND superseded_at IS NULL AND id = ANY($2)",
         )
-        .bind(&document_id.0)
+        .bind(document_id.as_str())
         .bind(&stale)
         .execute(&mut *tx)
         .await?
@@ -239,7 +240,7 @@ impl ChunkStore for PgChunkStore {
         for (id, version, ordinal) in &moved {
             sqlx::query("UPDATE chunks SET ordinal = $3 WHERE id = $1 AND version = $2")
                 .bind(id)
-                .bind(&version.0)
+                .bind(version.as_str())
                 .bind(ordinal)
                 .execute(&mut *tx)
                 .await?;
@@ -250,7 +251,7 @@ impl ChunkStore for PgChunkStore {
                 "UPDATE chunks SET superseded_at = NULL, ordinal = $3 WHERE id = $1 AND version = $2",
             )
             .bind(id)
-            .bind(&version.0)
+            .bind(version.as_str())
             .bind(ordinal)
             .execute(&mut *tx)
             .await?;
@@ -263,13 +264,13 @@ impl ChunkStore for PgChunkStore {
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
             )
             .bind(id)
-            .bind(&version.0)
-            .bind(&document_id.0)
+            .bind(version.as_str())
+            .bind(document_id.as_str())
             .bind(ordinal)
             .bind(&draft.heading)
             .bind(&draft.url)
             .bind(&draft.text)
-            .bind(draft.authoritative)
+            .bind(draft.standing.is_authoritative())
             .bind(document.labels.acl.to_strings())
             .bind(document.labels.sensitivity.as_str())
             .bind(Vector::from(embedding))
@@ -335,7 +336,7 @@ impl ChunkStore for PgChunkStore {
         source: &SourceName,
         present: &[DocumentId],
     ) -> eros::Result<u64> {
-        let ids: Vec<&str> = present.iter().map(|d| d.0.as_str()).collect();
+        let ids: Vec<&str> = present.iter().map(|d| d.as_str()).collect();
         Ok(sqlx::query(
             "UPDATE chunks SET superseded_at = now()
              WHERE superseded_at IS NULL

@@ -22,14 +22,14 @@ fn chunk(name: &str, text: &str) -> Chunk {
     let document_id = DocumentId::new(&markdown::NAME, &format!("{name}.md"));
     Chunk {
         id: ChunkId::new(&document_id, name),
-        version: ChunkVersion("v1".into()),
+        version: ChunkVersion::try_from(String::from("v1")).unwrap(),
         document_id,
         source: markdown::NAME.clone(),
         title: format!("{name} notes"),
         heading: Some(name.into()),
         url: format!("https://wiki.example.test/{name}"),
         text: text.into(),
-        authoritative: true,
+        standing: recall::domain::Standing::Authoritative,
         labels: Labels {
             acl: Acl::anyone(),
             sensitivity: Sensitivity::Internal,
@@ -119,8 +119,7 @@ pub async fn hits_are_best_first_without_duplicates(
     let hits = retriever.retrieve(QUESTION, &everything()).await?;
 
     assert!(
-        hits.windows(2)
-            .all(|pair| pair[0].score.0 >= pair[1].score.0),
+        hits.windows(2).all(|pair| pair[0].score >= pair[1].score),
         "{hits:#?}"
     );
     let unique: HashSet<_> = hits.iter().map(|hit| &hit.chunk.id).collect();
@@ -258,7 +257,7 @@ pub async fn only_chunks_the_scope_admits_come_back(
             assert!(
                 scope.admits(&hit.chunk.labels),
                 "{name}: {}",
-                hit.chunk.id.0
+                hit.chunk.id.as_str()
             );
         }
     }
@@ -277,7 +276,7 @@ pub async fn a_user_id_never_matches_a_role_entry(
         .retrieve(QUESTION, &clash)
         .await?
         .into_iter()
-        .map(|hit| hit.chunk.id.0)
+        .map(|hit| String::from(hit.chunk.id))
         .collect();
 
     assert!(found.contains("markdown:faq.md#open"), "{found:?}");
@@ -356,9 +355,9 @@ mod hybrid {
             "INSERT INTO documents (id, source, external_id, title, url, source_updated_at)
              VALUES ($1, $2, $3, $4, $5, now()) ON CONFLICT (id) DO NOTHING",
         )
-        .bind(&chunk.document_id.0)
+        .bind(chunk.document_id.as_str())
         .bind(chunk.source.as_str())
-        .bind(&chunk.document_id.0)
+        .bind(chunk.document_id.as_str())
         .bind(&chunk.title)
         .bind(&chunk.url)
         .execute(pool)
@@ -375,13 +374,13 @@ mod hybrid {
                                  sensitivity, embedding, embedding_model, embedding_model_version)
              VALUES ($1, $2, $3, $13, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
         )
-        .bind(&chunk.id.0)
-        .bind(&chunk.version.0)
-        .bind(&chunk.document_id.0)
+        .bind(chunk.id.as_str())
+        .bind(chunk.version.as_str())
+        .bind(chunk.document_id.as_str())
         .bind(&chunk.heading)
         .bind(&chunk.url)
         .bind(&chunk.text)
-        .bind(chunk.authoritative)
+        .bind(chunk.standing.is_authoritative())
         .bind(chunk.labels.acl.to_strings())
         .bind(chunk.labels.sensitivity.as_str())
         .bind(Vector::from(embedding))

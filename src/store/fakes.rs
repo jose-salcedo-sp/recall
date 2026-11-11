@@ -158,7 +158,7 @@ impl ChunkStore for MemoryChunkStore {
             eros::ensure!(
                 locators.insert(draft.locator.as_str()),
                 "document {} has duplicate chunk locator {:?}",
-                document_id.0,
+                document_id.as_str(),
                 draft.locator
             );
         }
@@ -176,7 +176,7 @@ impl ChunkStore for MemoryChunkStore {
                     heading: draft.heading.clone(),
                     url: draft.url.clone(),
                     text: draft.text.clone(),
-                    authoritative: draft.authoritative,
+                    standing: draft.standing,
                     labels: document.labels.clone(),
                 };
                 (chunk, ordinal)
@@ -203,7 +203,9 @@ impl ChunkStore for MemoryChunkStore {
             let embeddings = embedder
                 .embed(&texts, EmbedPurpose::Document)
                 .await
-                .map_err(|error| error.context(format!("embedding chunks of {}", document_id.0)))?;
+                .map_err(|error| {
+                    error.context(format!("embedding chunks of {}", document_id.as_str()))
+                })?;
             eros::ensure!(
                 embeddings.len() == texts.len(),
                 "embedder returned {} vectors for {} texts",

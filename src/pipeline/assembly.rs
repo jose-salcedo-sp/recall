@@ -13,10 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     access::Authorizer,
     clock::{Clock, RunIds},
-    config::{
-        AdmitJudge, PipelineConfig, RerankCandidates, RerankJudge, StepName, SupportCheck,
-        SupportCutoff,
-    },
+    config::{AdmitJudge, PipelineConfig, RerankJudge, StepName, SupportCheck, SupportCutoff},
     domain::{AtLeastOne, CategoryKind},
     llm::{ChatModel, ModelRef, judge::Judge},
     retrieval::Retriever,
@@ -171,9 +168,7 @@ pub(super) fn assemble(config: &PipelineConfig, ports: &Ports) -> Result<Assembl
     let judge = ports.judge.as_ref();
     let rerank_judge = match (config.rerank.judge(), judge) {
         (RerankJudge::None, _) => Ok(None),
-        (RerankJudge::Judged(RerankCandidates { candidates }), Some(judge)) => {
-            Ok(Some((judge, candidates)))
-        }
+        (RerankJudge::Judged(_), Some(judge)) => Ok(Some(judge)),
         (RerankJudge::Judged(_), None) => Err(JudgedCheck::Rerank),
     };
     let admit = match (config.admit.judge, judge) {
@@ -257,14 +252,13 @@ pub(super) fn assemble(config: &PipelineConfig, ports: &Ports) -> Result<Assembl
 
 fn rerank<TCategory>(
     config: &PipelineConfig,
-    judge: Option<(&Arc<dyn Judge>, usize)>,
+    judge: Option<&Arc<dyn Judge>>,
     category: CategoryKind,
 ) -> Rerank<TCategory> {
     let by = match judge {
         None => RerankBy::Retrieval,
-        Some((judge, candidates)) => RerankBy::Judge {
+        Some(judge) => RerankBy::Judge {
             judge: Arc::clone(judge),
-            candidates,
             threshold: config.threshold(category, StepName::Rerank),
         },
     };

@@ -13,7 +13,7 @@ use reqwest::Url;
 
 use crate::{
     access::Acl,
-    domain::{ChunkDraft, Document, Labels, Sensitivity, SourceName},
+    domain::{ChunkDraft, Document, Labels, Sensitivity, SourceName, Standing},
 };
 
 use super::Source;
@@ -45,8 +45,8 @@ pub struct MarkdownConfig {
 pub struct Connector {
     root: PathBuf,
     base_url: Option<String>,
-    /// `(path relative to root, authoritative)`; `None` skips the path.
-    layers: Vec<(PathBuf, Option<bool>)>,
+    /// `(path relative to root, standing)`; `None` skips the path.
+    layers: Vec<(PathBuf, Option<Standing>)>,
 }
 
 impl Connector {
@@ -77,13 +77,13 @@ impl Connector {
         if authoritative.is_empty() {
             authoritative.push(PathBuf::new());
         }
-        let layers: Vec<(PathBuf, Option<bool>)> = authoritative
+        let layers: Vec<(PathBuf, Option<Standing>)> = authoritative
             .into_iter()
-            .map(|p| (p, Some(true)))
+            .map(|p| (p, Some(Standing::Authoritative)))
             .chain(
                 listed(&config.evidence)
                     .into_iter()
-                    .map(|p| (p, Some(false))),
+                    .map(|p| (p, Some(Standing::Evidence))),
             )
             .chain(listed(&config.skip).into_iter().map(|p| (p, None)))
             .collect();
@@ -116,15 +116,15 @@ impl Connector {
     }
 
     /// `None` when the file is skipped or outside every listed path, so not part of the corpus.
-    fn authoritative(&self, rel: &Path) -> Option<bool> {
+    fn standing(&self, rel: &Path) -> Option<Standing> {
         self.layers
             .iter()
             .filter(|(path, _)| rel.starts_with(path))
             .max_by_key(|(path, _)| path.components().count())
-            .and_then(|(_, authoritative)| *authoritative)
+            .and_then(|(_, standing)| *standing)
     }
 
-    fn document(&self, path: &Path, authoritative: bool) -> eros::Result<Document> {
+    fn document(&self, path: &Path, standing: Standing) -> eros::Result<Document> {
         let rel = path
             .strip_prefix(&self.root)
             .map_err(|_| eros::error!("path outside docs root"))?;
@@ -137,7 +137,7 @@ impl Connector {
         let title = document_title(&text, path);
         let updated_at = file_mtime(path)?;
         let file_url = self.file_url(&external_id);
-        let chunks = chunks(&file_url, &text, authoritative)?;
+        let chunks = chunks(&file_url, &text, standing)?;
         Ok(Document {
             source: NAME.clone(),
             external_id,
@@ -238,7 +238,7 @@ struct Section {
 /// # Errors
 ///
 /// None today: every input splits into sections.
-pub fn chunks(file_url: &str, content: &str, authoritative: bool) -> eros::Result<Vec<ChunkDraft>> {
+pub fn chunks(file_url: &str, content: &str, standing: Standing) -> eros::Result<Vec<ChunkDraft>> {
     let body = strip_front_matter(content);
     let sections = sections(body)?;
     let mut used = HashSet::from([INTRO.to_owned()]);
@@ -268,7 +268,7 @@ pub fn chunks(file_url: &str, content: &str, authoritative: bool) -> eros::Resul
             heading,
             url,
             text: section.text.trim().to_owned(),
-            authoritative,
+            standing,
         });
     }
     Ok(drafts)
@@ -403,8 +403,8 @@ impl Connector {
         let mut documents = Vec::new();
         for path in self.collect_md_files()? {
             let rel = path.strip_prefix(&self.root)?;
-            if let Some(authoritative) = self.authoritative(rel) {
-                documents.push(self.document(&path, authoritative)?);
+            if let Some(standing) = self.standing(rel) {
+                documents.push(self.document(&path, standing)?);
             }
         }
         Ok(documents)
@@ -426,7 +426,7 @@ mod tests {
     #[test]
     fn ignores_headings_in_fences() {
         let md = "# Real\n\n```\n# Fake\n```\n\nMore";
-        let drafts = chunks("https://example.test/a.md", md, true).unwrap();
+        let drafts = chunks("https://example.test/a.md", md, Standing::Authoritative).unwrap();
         assert_eq!(drafts.len(), 1);
         assert_eq!(drafts[0].heading.as_deref(), Some("Real"));
         assert!(drafts[0].text.contains("# Fake"));
@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn nested_headings() {
         let md = "# Page\n\nIntro.\n\n## Section\n\nDetail.";
-        let drafts = chunks("https://example.test/doc.md", md, true).unwrap();
+        let drafts = chunks("https://example.test/doc.md", md, Standing::Authoritative).unwrap();
         assert_eq!(drafts.len(), 2);
         assert_eq!(drafts[0].heading.as_deref(), Some("Page"));
         assert!(drafts[0].text.contains("Intro."));
@@ -486,12 +486,8 @@ mod tests {
             .unwrap()
             .into_iter()
             .map(|d| {
-                assert!(
-                    d.chunks
-                        .iter()
-                        .all(|c| c.authoritative == d.chunks[0].authoritative)
-                );
-                (d.external_id, d.chunks[0].authoritative)
+                assert!(d.chunks.iter().all(|c| c.standing == d.chunks[0].standing));
+                (d.external_id, d.chunks[0].standing.is_authoritative())
             })
             .collect()
     }

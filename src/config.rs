@@ -460,12 +460,24 @@ impl From<RerankJudge> for serde_json::Value {
     }
 }
 
-/// [`RerankJudge::Judged`].
+/// [`RerankJudge::Judged`]: how many of the best matches by fused retrieval score the judge reads. Only a
+/// [`RerankConfig`] reaches `Rerank`, and it holds at least `top_k` candidates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RerankCandidates {
-    /// Best matches by fused retrieval score that the judge reads.
-    pub candidates: usize,
+    candidates: usize,
+}
+
+impl RerankCandidates {
+    /// The judge reads the best `candidates` matches; [`RerankConfig::new`] checks it against `top_k`.
+    pub fn new(candidates: usize) -> Self {
+        Self { candidates }
+    }
+
+    /// Matches the judge reads.
+    pub fn get(self) -> usize {
+        self.candidates
+    }
 }
 
 /// A rerank config that breaks [`RerankConfig`]'s invariants.
@@ -713,7 +725,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             config.rerank.judge(),
-            RerankJudge::Judged(RerankCandidates { candidates: 25 })
+            RerankJudge::Judged(RerankCandidates::new(25))
         );
         assert_eq!(
             serde_json::to_value(config.rerank.judge()).unwrap(),

@@ -29,7 +29,12 @@ async fn snapshot(source: &dyn Source) -> eros::Result<Vec<Document>> {
 /// When the fetch fails.
 pub async fn every_document_carries_the_source_name(source: &dyn Source) -> eros::Result<()> {
     for document in snapshot(source).await? {
-        assert_eq!(&document.source, source.name(), "{}", document.id().0);
+        assert_eq!(
+            &document.source,
+            source.name(),
+            "{}",
+            document.id().as_str()
+        );
     }
     Ok(())
 }
@@ -47,7 +52,7 @@ pub async fn external_ids_are_unique_and_non_empty(source: &dyn Source) -> eros:
         assert!(
             ids.insert(document.id()),
             "{} is listed twice",
-            document.id().0
+            document.id().as_str()
         );
     }
     Ok(())
@@ -65,13 +70,13 @@ pub async fn chunks_have_unique_locators_and_text(source: &dyn Source) -> eros::
             assert!(
                 locators.insert(draft.locator.as_str()),
                 "{} repeats locator {:?}",
-                document.id().0,
+                document.id().as_str(),
                 draft.locator
             );
             assert!(
                 !draft.text.trim().is_empty(),
                 "{} has an empty chunk {:?}",
-                document.id().0,
+                document.id().as_str(),
                 draft.locator
             );
         }
