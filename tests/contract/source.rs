@@ -9,7 +9,7 @@ use recall::{
     ingest::{
         Source,
         fakes::StaticSource,
-        markdown::{Connector, MarkdownArgs},
+        markdown::{Connector, MarkdownConfig},
     },
 };
 
@@ -67,14 +67,11 @@ impl MarkdownDocs {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, text).unwrap();
         }
-        let connector = Connector::from_args(&MarkdownArgs {
-            docs: Some(root.clone()),
-            docs_base_url: Some("https://docs.example.test/blob/main".into()),
-            authoritative: vec![],
-            evidence: vec![],
-            skip: vec![],
+        let connector = Connector::new(&MarkdownConfig {
+            docs: root.clone(),
+            base_url: Some("https://docs.example.test/blob/main".into()),
+            ..MarkdownConfig::default()
         })
-        .unwrap()
         .unwrap();
         Self { root, connector }
     }

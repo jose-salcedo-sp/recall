@@ -1,6 +1,6 @@
 allow-unwrap-in-tests = true
 allow-dbg-in-tests = true
-# The library's only consumers are this crate's binary, tests and doctests.
+# The library interface is pre-1.0, so lints may ask for breaking changes to `pub` items.
 avoid-breaking-exported-api = false
 
 disallowed-methods = [

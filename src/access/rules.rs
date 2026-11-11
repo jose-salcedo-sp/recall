@@ -7,7 +7,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt, fs,
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use async_trait::async_trait;
@@ -24,25 +24,6 @@ use super::{
 
 /// Where the shipped policy lives unless `RECALL_ACCESS` says otherwise.
 pub const DEFAULT_PATH: &str = "config/access.json";
-
-/// Where to load the [`AccessConfig`] from.
-#[derive(Clone, Debug, clap::Args)]
-pub struct AccessArgs {
-    /// Access policy JSON: roles, members and label rules. Required: without it nobody may read anything.
-    #[arg(id = "access", long = "access", env = "RECALL_ACCESS", default_value = DEFAULT_PATH)]
-    pub path: PathBuf,
-}
-
-impl AccessArgs {
-    /// Reads and validates the policy.
-    ///
-    /// # Errors
-    ///
-    /// As [`AccessConfig::read`].
-    pub fn load(&self) -> eros::Result<AccessConfig> {
-        AccessConfig::read(&self.path)
-    }
-}
 
 /// What one role may read.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

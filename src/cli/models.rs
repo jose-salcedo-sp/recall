@@ -1,7 +1,7 @@
 //! `recall models check`: one call to each model backend `recall serve` and `recall eval run` would use, with the same
 //! arguments, so a wrong URL, key, model id or AWS profile shows in seconds instead of mid-run.
 //!
-//! Backends are parsed and built by [`crate::llm::backend`], which also says what to print about a backend's
+//! Backends are parsed and built by [`super::backend`], which also says what to print about a backend's
 //! ambient settings; this module only calls the ports.
 
 use std::{fmt, sync::Arc, time::Duration};
@@ -10,14 +10,15 @@ use eros::{Context, ensure};
 use serde_json::{Value, json};
 use tokio::time::Instant;
 
-use crate::{
-    llm::{
-        ChatModel, ChatRequest, EMBEDDING_DIM, EmbedPurpose, Embedder, ModelRef,
-        backend::{ChatBackend, EmbedBackend, Endpoint, SystemOneBackend},
-        judge::{Judge, JudgeQuestion, JudgeRequest, SystemOneJudge},
-        system_one::SystemOne,
-    },
-    pipeline::answerer::PipelineArgs,
+use crate::llm::{
+    ChatModel, ChatRequest, EMBEDDING_DIM, EmbedPurpose, Embedder, Endpoint, ModelRef,
+    judge::{Judge, JudgeQuestion, JudgeRequest, SystemOneJudge},
+    system_one::SystemOne,
+};
+
+use super::{
+    backend::{ChatBackend, EmbedBackend, SystemOneBackend},
+    pipeline::PipelineArgs,
 };
 
 /// `Explain`'s own budget: a reasoning effort that spends it all before answering fails here too.

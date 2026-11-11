@@ -102,6 +102,9 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: cargo clippy (library without the cli feature)
+        run: cargo clippy --lib --no-default-features -- -D warnings
+
       - name: cargo doc
         run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 

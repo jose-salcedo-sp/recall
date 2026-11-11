@@ -1,11 +1,6 @@
 //! Every pipeline tunable in one JSON file (`config/recall.json`), so `recall eval` can print and record what it ran with.
 
-use std::{
-    collections::BTreeMap,
-    fmt, fs,
-    path::{Path, PathBuf},
-    str::FromStr,
-};
+use std::{collections::BTreeMap, fmt, fs, path::Path, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
@@ -100,38 +95,6 @@ impl Thresholds {
 impl FromIterator<(StepName, Probability)> for Thresholds {
     fn from_iter<T: IntoIterator<Item = (StepName, Probability)>>(iter: T) -> Self {
         Self(iter.into_iter().collect())
-    }
-}
-
-/// Where to load the [`PipelineConfig`] from.
-#[derive(Clone, Debug, Default, clap::Args)]
-pub struct ConfigArgs {
-    /// Pipeline configuration JSON. Unset: `config/recall.json` when it exists, else built-in defaults.
-    #[arg(long = "config", env = "RECALL_CONFIG")]
-    pub path: Option<PathBuf>,
-}
-
-impl ConfigArgs {
-    /// Loads and validates the config. An empty `RECALL_CONFIG`, as in `.env.example`, counts as unset.
-    ///
-    /// # Errors
-    ///
-    /// When the file cannot be read, is not valid JSON, has unknown keys, or fails [`PipelineConfig::parse`]'s checks.
-    pub fn load(&self) -> eros::Result<PipelineConfig> {
-        match self
-            .path
-            .as_ref()
-            .filter(|path| !path.as_os_str().is_empty())
-        {
-            Some(path) => PipelineConfig::read(path),
-            None if Path::new(DEFAULT_PATH).exists() => {
-                PipelineConfig::read(Path::new(DEFAULT_PATH))
-            }
-            None => {
-                tracing::warn!("no {DEFAULT_PATH} and no --config; using built-in defaults");
-                Ok(PipelineConfig::default())
-            }
-        }
     }
 }
 
@@ -701,18 +664,6 @@ mod tests {
                 .threshold(CategoryKind::Boolean, StepName::Answer)
                 .is_some()
         );
-    }
-
-    #[test]
-    fn an_empty_path_is_unset_and_a_missing_one_is_an_error() {
-        let empty = ConfigArgs {
-            path: Some(PathBuf::new()),
-        };
-        assert!(empty.load().is_ok());
-        let missing = ConfigArgs {
-            path: Some("no/such/recall.json".into()),
-        };
-        assert!(missing.load().is_err());
     }
 
     #[test]

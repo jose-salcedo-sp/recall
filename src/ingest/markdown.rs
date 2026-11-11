@@ -24,23 +24,18 @@ const INTRO: &str = "intro";
 pub static NAME: SourceName = SourceName::from_static("markdown");
 
 /// Where the markdown corpus is and how its paths split into layers.
-#[derive(Debug, clap::Args)]
-pub struct MarkdownArgs {
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MarkdownConfig {
     /// Root directory of the markdown corpus.
-    #[arg(long, env = "RECALL_DOCS_DIR")]
-    pub docs: Option<PathBuf>,
+    pub docs: PathBuf,
     /// Optional base URL for citations (e.g. a GitHub blob URL ending in `/`).
-    #[arg(long, env = "RECALL_DOCS_BASE_URL")]
-    pub docs_base_url: Option<String>,
-    /// Comma-separated paths under the docs root holding settled, authoritative answers. Empty means the whole root.
-    #[arg(long, env = "RECALL_DOCS_AUTHORITATIVE", value_delimiter = ',')]
+    pub base_url: Option<String>,
+    /// Paths under the docs root holding settled, authoritative answers. Empty means the whole root.
     pub authoritative: Vec<PathBuf>,
-    /// Comma-separated paths under the docs root ingested as supporting evidence, not authoritative.
-    /// The longest listed path containing a file decides its layer; files under no listed path are skipped.
-    #[arg(long, env = "RECALL_DOCS_EVIDENCE", value_delimiter = ',')]
+    /// Paths under the docs root ingested as supporting evidence, not authoritative. The longest listed path
+    /// containing a file decides its layer; files under no listed path are skipped.
     pub evidence: Vec<PathBuf>,
-    /// Comma-separated paths under the docs root to leave out, even inside an authoritative or evidence path.
-    #[arg(long, env = "RECALL_DOCS_SKIP", value_delimiter = ',')]
+    /// Paths under the docs root to leave out, even inside an authoritative or evidence path.
     pub skip: Vec<PathBuf>,
 }
 
@@ -55,22 +50,20 @@ pub struct Connector {
 }
 
 impl Connector {
-    /// `None` when `RECALL_DOCS_DIR` is unset, so the source is not configured.
+    /// The corpus `config` describes.
     ///
     /// # Errors
     ///
     /// When the docs root is not a directory, the base URL does not parse, or a layer path is absolute, contains
     /// `..`, does not exist under the root, or is listed twice.
-    pub fn from_args(args: &MarkdownArgs) -> eros::Result<Option<Self>> {
-        let Some(root) = args.docs.clone() else {
-            return Ok(None);
-        };
+    pub fn new(config: &MarkdownConfig) -> eros::Result<Self> {
+        let root = config.docs.clone();
         eros::ensure!(
             root.is_dir(),
             "docs path {} is not a directory",
             root.display()
         );
-        if let Some(base) = &args.docs_base_url {
+        if let Some(base) = &config.base_url {
             Url::parse(base).map_err(|e| eros::error!("invalid docs base URL: {e}"))?;
         }
         let listed = |paths: &[PathBuf]| -> Vec<PathBuf> {
@@ -80,15 +73,19 @@ impl Connector {
                 .cloned()
                 .collect()
         };
-        let mut authoritative = listed(&args.authoritative);
+        let mut authoritative = listed(&config.authoritative);
         if authoritative.is_empty() {
             authoritative.push(PathBuf::new());
         }
         let layers: Vec<(PathBuf, Option<bool>)> = authoritative
             .into_iter()
             .map(|p| (p, Some(true)))
-            .chain(listed(&args.evidence).into_iter().map(|p| (p, Some(false))))
-            .chain(listed(&args.skip).into_iter().map(|p| (p, None)))
+            .chain(
+                listed(&config.evidence)
+                    .into_iter()
+                    .map(|p| (p, Some(false))),
+            )
+            .chain(listed(&config.skip).into_iter().map(|p| (p, None)))
             .collect();
         for (path, _) in &layers {
             eros::ensure!(
@@ -111,11 +108,11 @@ impl Connector {
                 path.display()
             );
         }
-        Ok(Some(Self {
+        Ok(Self {
             root,
-            base_url: args.docs_base_url.clone(),
+            base_url: config.base_url.clone(),
             layers,
-        }))
+        })
     }
 
     /// `None` when the file is skipped or outside every listed path, so not part of the corpus.
@@ -466,10 +463,10 @@ mod tests {
             Self(root)
         }
 
-        fn args(&self, authoritative: &[&str], evidence: &[&str]) -> MarkdownArgs {
-            MarkdownArgs {
-                docs: Some(self.0.clone()),
-                docs_base_url: None,
+        fn args(&self, authoritative: &[&str], evidence: &[&str]) -> MarkdownConfig {
+            MarkdownConfig {
+                docs: self.0.clone(),
+                base_url: None,
                 authoritative: authoritative.iter().map(PathBuf::from).collect(),
                 evidence: evidence.iter().map(PathBuf::from).collect(),
                 skip: vec![],
@@ -505,7 +502,7 @@ mod tests {
         let docs = TempDocs::new(&["a.md", "sub/b.md"]);
         for (authoritative, evidence) in [(&[][..], &[][..]), (&[""][..], &[""][..])] {
             let args = docs.args(authoritative, evidence);
-            let connector = Connector::from_args(&args).unwrap().unwrap();
+            let connector = Connector::new(&args).unwrap();
 
             assert_eq!(
                 layers(connector).await,
@@ -532,7 +529,7 @@ mod tests {
             &["knowledge", "runbooks"],
         );
         args.skip = vec!["runbooks/tools".into()];
-        let connector = Connector::from_args(&args).unwrap().unwrap();
+        let connector = Connector::new(&args).unwrap();
 
         assert_eq!(
             layers(connector).await,
@@ -553,13 +550,8 @@ mod tests {
             "https://example.test/blob/master/",
         ] {
             let mut args = docs.args(&[], &[]);
-            args.docs_base_url = Some(base.into());
-            let documents = Connector::from_args(&args)
-                .unwrap()
-                .unwrap()
-                .fetch_all()
-                .await
-                .unwrap();
+            args.base_url = Some(base.into());
+            let documents = Connector::new(&args).unwrap().fetch_all().await.unwrap();
             assert_eq!(
                 documents[0].url,
                 "https://example.test/blob/master/settled/a.md"
@@ -575,7 +567,7 @@ mod tests {
             (&["../settled"][..], &[][..]),
             (&["settled"][..], &["settled"][..]),
         ] {
-            assert!(Connector::from_args(&docs.args(authoritative, evidence)).is_err());
+            assert!(Connector::new(&docs.args(authoritative, evidence)).is_err());
         }
     }
 }

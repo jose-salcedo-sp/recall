@@ -5,22 +5,13 @@ use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 
 use crate::{
-    access::{
-        Authorizer, PolicyRef, Principal,
-        rules::{AccessArgs, RulePolicy},
-    },
-    clock::{SystemClock, UuidV7},
-    config::{ConfigArgs, PipelineConfig},
+    access::{Authorizer, PolicyRef, Principal},
+    config::PipelineConfig,
     domain::{CategoryKind, Chunk, Provenance, Question, RunId},
-    llm::{
-        self, ModelRef,
-        backend::{ChatArgs, EmbedArgs, SystemOneArgs},
-        judge::Judge,
-    },
-    retrieval::{Retrieved, hybrid::HybridRetriever},
+    llm::{ModelRef, judge::Judge},
+    retrieval::Retrieved,
 };
 
 use super::{
@@ -45,31 +36,10 @@ pub enum Classified<'a> {
     Open(Run<Open, Reranked>),
 }
 
-/// Everything [`PipelineAnswerer::from_args`] needs besides the database.
-#[derive(Clone, Debug, clap::Args)]
-pub struct PipelineArgs {
-    /// The tunables file.
-    #[command(flatten)]
-    pub config: ConfigArgs,
-    /// The query embedder; must match the corpus's model.
-    #[command(flatten)]
-    pub embed: EmbedArgs,
-    /// The `Explain` LLM.
-    #[command(flatten)]
-    pub chat: ChatArgs,
-    /// The judge's backend (System One), for `Classify`, `Answer`, and `Rerank`, `Admit` and `Verify` when their
-    /// config names a judge.
-    #[command(flatten)]
-    pub system_one: SystemOneArgs,
-    /// The access policy every run is authorized by.
-    #[command(flatten)]
-    pub access: AccessArgs,
-}
-
 /// The models a pipeline calls, recorded with every `recall eval` run.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Models {
-    /// `None` when the retriever was built outside `from_args`.
+    /// The retriever's embedding model; `None` when [`Ports::embedding`] does not name it.
     pub embedding: Option<ModelRef>,
     /// The `Explain` LLM.
     pub explain: ModelRef,
@@ -116,17 +86,11 @@ impl PipelineAnswerer {
         })
     }
 
-    /// The default config, which names no judged check, over `ports`; `ports.judge` is replaced by none, so every
-    /// question is `open` until [`PipelineAnswerer::with_judge`].
+    /// The default config over `ports`, judge included: with a judge, Classify and Answer run on it; without one,
+    /// every question is `open`.
     pub fn new(ports: Ports) -> Self {
-        Self::assemble(
-            PipelineConfig::default(),
-            Ports {
-                judge: None,
-                ..ports
-            },
-        )
-        .expect("the default config names no judged check and no rerank threshold")
+        Self::assemble(PipelineConfig::default(), ports)
+            .expect("the default config names no judged check and no rerank threshold")
     }
 
     /// Reassembles with `judge`: Classify and Answer on it, and every check whose config names a judge.
@@ -174,32 +138,6 @@ impl PipelineAnswerer {
             verify: self.steps.open.pipeline.1.judged_by(),
             policy: Some(self.ports.authorizer.policy()),
         }
-    }
-
-    /// Hybrid retrieval and `Explain` on Bedrock or OpenAI-compatible servers; `Classify` and `Answer` on the judge
-    /// when one is configured, and `Rerank`, `Admit` and `Verify`'s support check too when their config names it.
-    /// Every tunable comes from the pipeline config file.
-    ///
-    /// # Errors
-    ///
-    /// When the config or the access policy does not load, a model client cannot be built, or the config does not
-    /// assemble with the backends selected.
-    pub async fn from_args(pool: PgPool, args: &PipelineArgs) -> eros::Result<Self> {
-        let config = args.config.load()?;
-        let authorizer = Arc::new(RulePolicy::new(args.access.load()?));
-        let embedder = llm::embedder(&args.embed).await?;
-        let embedding = Some(embedder.model());
-        let retriever = HybridRetriever::new(pool, embedder, config.retrieval.clone());
-        let ports = Ports {
-            retriever: Arc::new(retriever),
-            embedding,
-            explain: llm::explain_model(&args.chat).await?,
-            judge: llm::judge(&args.system_one)?,
-            authorizer,
-            clock: Arc::new(SystemClock),
-            ids: Arc::new(UuidV7),
-        };
-        Ok(Self::assemble(config, ports)?)
     }
 
     /// `choice` and `ranking` take the open path until their `Answer` steps exist; the returned category is still

@@ -5,7 +5,7 @@ use crate::{
     access::{
         Access,
         fakes::{FailingAuthorizer, StaticAuthorizer, tester},
-        rules::AccessConfig,
+        rules::{AccessConfig, RulePolicy},
     },
     clock::fakes::{FixedClock, SequentialIds},
     domain::{ChunkId, Labels, Sensitivity, UserId},
@@ -1080,4 +1080,26 @@ async fn an_explain_model_that_cannot_answer_fails_the_run_at_explain() {
         &report.outcome,
         Outcome::Failed { at, error } if at == "explain" && error.contains("connection refused")
     ));
+}
+
+#[test]
+fn new_keeps_the_judge_it_is_given() {
+    let chat = Arc::new(ScriptedChat::replying(Vec::<String>::new()));
+    let without = ports(
+        Arc::new(KeywordRetriever { chunks: corpus() }),
+        chat,
+        Arc::new(StaticAuthorizer::tester()),
+    );
+    let with = Ports {
+        judge: Some(provenance_judge()),
+        ..without.clone()
+    };
+    assert_eq!(
+        PipelineAnswerer::new(without).plan().classify,
+        crate::pipeline::trace::ClassifyMode::AllOpen
+    );
+    assert_eq!(
+        PipelineAnswerer::new(with).plan().classify,
+        crate::pipeline::trace::ClassifyMode::Judged
+    );
 }
