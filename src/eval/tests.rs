@@ -71,7 +71,7 @@ fn eval_ports() -> (EvalPorts, Arc<MemoryFiles>) {
 
 fn tester_args() -> AsArgs {
     AsArgs {
-        user: tester().id().0.clone(),
+        user: tester().id().clone(),
     }
 }
 

@@ -32,7 +32,7 @@ use runs::reports;
 async fn the_status_column_follows_the_outcome(pool: PgPool) -> eros::Result<()> {
     let store = PgRunStore::new(pool.clone(), Arc::new(SystemClock));
     for (report, status) in reports() {
-        store.save(&UserId("ana".into()), &report).await?;
+        store.save(&UserId::new("ana").unwrap(), &report).await?;
 
         let (column,): (String,) = sqlx::query_as("SELECT status FROM pipeline_runs WHERE id = $1")
             .bind(report.id.as_uuid())
@@ -55,7 +55,12 @@ async fn served_runs_are_persisted_in_postgres(pool: PgPool) -> eros::Result<()>
         keys: Arc::new("sk-ana:ana".parse().unwrap()),
         clock: Arc::new(SystemClock),
         authorizer: Arc::new(recall::access::rules::RulePolicy::new(
-            recall::access::rules::AccessConfig::parse(include_str!("../config/access.json"))?,
+            recall::access::rules::AccessConfig::parse(
+                r#"{
+                    "roles": { "reader": { "clearance": "internal", "runs": "own" } },
+                    "everyone": ["reader"]
+                }"#,
+            )?,
         )),
     };
     let app = router(state);

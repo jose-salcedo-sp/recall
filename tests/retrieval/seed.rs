@@ -65,7 +65,7 @@ pub struct SeedChunk {
 }
 
 /// The ACL every seeded chunk carries.
-pub const ACL_GROUP: &str = "group:arm";
+pub const ACL_GROUP: &str = "role:arm";
 
 impl SeedChunk {
     /// A current chunk embedded with `HashEmbedder` over its text.

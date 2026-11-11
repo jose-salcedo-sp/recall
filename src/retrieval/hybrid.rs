@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction, types::Json};
 
 use crate::{
-    access::{ChunkScope, TenantScope},
+    access::{Acl, ChunkScope, TenantScope},
     domain::{Chunk, ChunkId, ChunkRef, ChunkVersion, DocumentId, Labels, Sensitivity, SourceName},
     llm::{EmbedPurpose, Embedder, ModelRef},
 };
@@ -525,7 +525,7 @@ impl ScopeParams {
             })
             .collect();
         Self {
-            members: scope.members().iter().cloned().collect(),
+            members: scope.members().iter().map(ToString::to_string).collect(),
             grants: Json(grants),
         }
     }
@@ -699,6 +699,7 @@ impl TryFrom<ChunkRow> for Chunk {
         let source = SourceName::new(row.source).with_context(|| format!("chunk {}", row.id))?;
         let sensitivity = Sensitivity::try_from(row.sensitivity.as_str())
             .with_context(|| format!("chunk {}", row.id))?;
+        let acl = Acl::try_from(row.acl).with_context(|| format!("chunk {}", row.id))?;
         Ok(Chunk {
             id: ChunkId(row.id),
             version: ChunkVersion(row.version),
@@ -710,7 +711,7 @@ impl TryFrom<ChunkRow> for Chunk {
             text: row.text,
             authoritative: row.authoritative,
             labels: Labels {
-                acl: row.acl,
+                acl,
                 tenant: row.tenant,
                 sensitivity,
             },

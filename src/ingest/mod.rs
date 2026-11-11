@@ -17,10 +17,7 @@ use async_trait::async_trait;
 use eros::{Context, IntoUnion, ReshapeUnion};
 
 use crate::{
-    access::{
-        Labeler,
-        rules::{AccessArgs, LabelRules},
-    },
+    access::{Labeler, rules::AccessArgs},
     domain::{Document, SourceName},
     llm::{self, Embedder, ModelRef, backend::EmbedArgs},
     store::{
@@ -138,7 +135,7 @@ pub async fn run(args: Args) -> eros::Result<()> {
 #[eros::context("ingesting sources {:?}", sources)]
 pub async fn run_with(args: &IngestArgs, sources: &Sources) -> eros::Result<()> {
     eros::ensure!(!sources.is_empty(), "no sources are configured");
-    let labeler = LabelRules::new(args.access.load()?.labels());
+    let labeler = args.access.load()?.labels().clone();
     let store = PgChunkStore::new(store::connect(&args.db).await?);
     let embedder = llm::embedder(&args.embed).await?;
 

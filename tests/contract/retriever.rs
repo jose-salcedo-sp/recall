@@ -5,8 +5,8 @@
 use std::collections::{BTreeSet, HashSet};
 
 use recall::{
-    access::{ChunkGrant, ChunkScope, Role, TenantScope, fakes::unrestricted},
-    domain::{Chunk, ChunkId, ChunkVersion, DocumentId, Labels, Sensitivity},
+    access::{Acl, AclEntry, ChunkGrant, ChunkScope, Role, TenantScope, fakes::unrestricted},
+    domain::{Chunk, ChunkId, ChunkVersion, DocumentId, Labels, Sensitivity, UserId},
     ingest::markdown,
     retrieval::Retriever,
 };
@@ -31,7 +31,7 @@ fn chunk(name: &str, text: &str) -> Chunk {
         text: text.into(),
         authoritative: true,
         labels: Labels {
-            acl: Vec::new(),
+            acl: Acl::anyone(),
             tenant: None,
             sensitivity: Sensitivity::Internal,
         },
@@ -176,7 +176,7 @@ fn labelled(document: &str, locator: &str, text: &str, labels: Labels) -> Chunk 
 
 fn labels(sensitivity: Sensitivity, tenant: Option<&str>, acl: &[&str]) -> Labels {
     Labels {
-        acl: acl.iter().map(|entry| (*entry).to_owned()).collect(),
+        acl: Acl::only(acl.iter().map(|entry| entry.parse::<AclEntry>().unwrap())),
         tenant: tenant.map(str::to_owned),
         sensitivity,
     }
@@ -209,15 +209,22 @@ fn labelled_corpus() -> Vec<Chunk> {
             "hr",
             "pay",
             about,
-            labels(Sensitivity::Public, None, &["hr"]),
+            labels(Sensitivity::Public, None, &["role:hr"]),
+        ),
+        labelled(
+            "eve",
+            "notes",
+            about,
+            labels(Sensitivity::Public, None, &["user:eve"]),
         ),
         labelled("faq", "open", about, labels(Sensitivity::Public, None, &[])),
     ]
 }
 
-fn scope(members: &[&str], clearance: Sensitivity, tenants: TenantScope) -> ChunkScope {
+fn scope(user: &str, roles: &[&str], clearance: Sensitivity, tenants: TenantScope) -> ChunkScope {
     ChunkScope::new(
-        members.iter().copied(),
+        UserId::new(user).unwrap(),
+        roles.iter().map(|role| Role::new(*role).unwrap()),
         [ChunkGrant::new(
             Role::new("reader").unwrap(),
             clearance,
@@ -231,23 +238,28 @@ fn scopes() -> Vec<(&'static str, ChunkScope)> {
         ("none", ChunkScope::none()),
         (
             "internal",
-            scope(&["eve"], Sensitivity::Internal, TenantScope::default()),
+            scope("eve", &[], Sensitivity::Internal, TenantScope::default()),
         ),
         (
             "public",
-            scope(&["eve"], Sensitivity::Public, TenantScope::default()),
+            scope("eve", &[], Sensitivity::Public, TenantScope::default()),
         ),
         (
             "acme",
             scope(
-                &["ana"],
+                "ana",
+                &[],
                 Sensitivity::Internal,
                 TenantScope::Only(BTreeSet::from(["acme".to_owned()])),
             ),
         ),
         (
             "hr",
-            scope(&["eve", "hr"], Sensitivity::Public, TenantScope::default()),
+            scope("ana", &["hr"], Sensitivity::Public, TenantScope::default()),
+        ),
+        (
+            "a user named hr",
+            scope("hr", &["eve"], Sensitivity::Public, TenantScope::default()),
         ),
         ("everything", everything()),
     ]
@@ -281,6 +293,27 @@ pub async fn only_chunks_the_scope_admits_come_back(
     Ok(())
 }
 
+/// A user entry matches only that user and a role entry only a holder of the role: a principal whose id is `hr`
+/// does not read a chunk ACL'd to the role `hr`, and its role `eve` does not read a chunk ACL'd to the user `eve`.
+pub async fn a_user_id_never_matches_a_role_entry(
+    make: impl AsyncFnOnce(Vec<Chunk>) -> Box<dyn Retriever>,
+) -> eros::Result<()> {
+    let retriever = make(labelled_corpus()).await;
+    let clash = scope("hr", &["eve"], Sensitivity::Public, TenantScope::default());
+
+    let found: HashSet<String> = retriever
+        .retrieve(QUESTION, &clash)
+        .await?
+        .into_iter()
+        .map(|hit| hit.chunk.id.0)
+        .collect();
+
+    assert!(found.contains("markdown:faq.md#open"), "{found:?}");
+    assert!(!found.contains("markdown:hr.md#pay"), "{found:?}");
+    assert!(!found.contains("markdown:eve.md#notes"), "{found:?}");
+    Ok(())
+}
+
 macro_rules! retriever_contract {
     (#[$attr:meta] $args:tt => $make:expr) => {
         retriever_contract!(@cases #[$attr] $args => $make;
@@ -292,6 +325,7 @@ macro_rules! retriever_contract {
             equal_matches_rank_by_chunk_id,
             chunks_come_back_as_stored,
             only_chunks_the_scope_admits_come_back,
+            a_user_id_never_matches_a_role_entry,
         );
     };
     (@cases #[$attr:meta] $args:tt => $make:expr; $($case:ident,)*) => {
@@ -376,7 +410,7 @@ mod hybrid {
         .bind(&chunk.url)
         .bind(&chunk.text)
         .bind(chunk.authoritative)
-        .bind(&chunk.labels.acl)
+        .bind(chunk.labels.acl.to_strings())
         .bind(&chunk.labels.tenant)
         .bind(chunk.labels.sensitivity.as_str())
         .bind(Vector::from(embedding))

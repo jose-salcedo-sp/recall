@@ -90,7 +90,8 @@ mod tests {
         let role = crate::access::Role::new("reader").unwrap();
         Access::new(
             ChunkScope::new(
-                [tester().id().0.clone()],
+                tester().id().clone(),
+                [],
                 [crate::access::ChunkGrant::new(
                     role,
                     Sensitivity::Internal,

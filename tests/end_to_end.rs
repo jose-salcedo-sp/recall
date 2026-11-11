@@ -16,7 +16,7 @@ use http_body_util::BodyExt;
 use recall::{
     access::{
         Authorizer, ConnectorLabels,
-        rules::{AccessConfig, LabelRules, RulePolicy},
+        rules::{AccessConfig, RulePolicy},
     },
     clock::{SystemClock, UuidV7},
     domain::{ChunkDraft, Document, Labels, Sensitivity},
@@ -42,7 +42,7 @@ fn roles_page() -> Document {
         url: "https://wiki.example.test/roles.md".into(),
         updated_at: Utc::now(),
         labels: Labels {
-            acl: vec![],
+            acl: recall::access::Acl::anyone(),
             tenant: None,
             sensitivity: Sensitivity::Internal,
         },
@@ -81,10 +81,16 @@ fn ports(
     }
 }
 
-/// The policy `config/access.json` ships: every user is a `reader` of internal chunks and its own runs.
-fn shipped_policy() -> Arc<dyn Authorizer> {
+/// A policy whose baseline grant makes every user a `reader` of internal chunks and its own runs.
+fn reader_policy() -> Arc<dyn Authorizer> {
     Arc::new(RulePolicy::new(
-        AccessConfig::parse(include_str!("../config/access.json")).unwrap(),
+        AccessConfig::parse(
+            r#"{
+                "roles": { "reader": { "clearance": "internal", "runs": "own" } },
+                "everyone": ["reader"]
+            }"#,
+        )
+        .unwrap(),
     ))
 }
 
@@ -116,7 +122,7 @@ async fn an_ingested_page_answers_a_question_over_http(pool: PgPool) -> eros::Re
         }]
     })
     .to_string()]);
-    let authorizer = shipped_policy();
+    let authorizer = reader_policy();
     let app = router(AppState {
         answerer: Arc::new(PipelineAnswerer::new(ports(
             retriever,
@@ -222,12 +228,12 @@ async fn a_relabelled_confidential_page_never_reaches_a_reader(pool: PgPool) -> 
         documents: vec![roles_page(), pay_page()],
     })])?;
     let rules = AccessConfig::parse(
-        r#"{ "roles": {}, "labels": [{ "documents": "markdown:hr/", "sensitivity": "confidential" }] }"#,
+        r#"{ "roles": {}, "labels": [{ "source": "markdown", "path": "hr/", "sensitivity": "confidential" }] }"#,
     )?;
     ingest(
         &PgChunkStore::new(pool.clone()),
         &HashEmbedder,
-        &LabelRules::new(rules.labels()),
+        rules.labels(),
         &sources,
         false,
     )
@@ -245,7 +251,7 @@ async fn a_relabelled_confidential_page_never_reaches_a_reader(pool: PgPool) -> 
         Arc::new(HashEmbedder),
         HybridConfig::default(),
     );
-    let authorizer = shipped_policy();
+    let authorizer = reader_policy();
     let app = router(AppState {
         answerer: Arc::new(PipelineAnswerer::new(ports(
             retriever,

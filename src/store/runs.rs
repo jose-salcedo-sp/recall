@@ -48,7 +48,7 @@ impl RunStore for PgRunStore {
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(report.id.as_uuid())
-        .bind(&user.0)
+        .bind(user.as_str())
         .bind(report.question.as_str())
         .bind(report.category.as_ref().map(CategoryKind::as_str))
         .bind(status(&report.outcome))
@@ -79,7 +79,7 @@ impl RunStore for PgRunStore {
         let Json(trace): Json<Trace> = row.try_get("trace")?;
         let created_at: DateTime<Utc> = row.try_get("created_at")?;
         Ok(Some(StoredRun {
-            user: UserId(row.try_get("user_id")?),
+            user: UserId::new(row.try_get::<String, _>("user_id")?)?,
             created_at,
             report: RunReport {
                 id,

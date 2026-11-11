@@ -89,19 +89,14 @@ pub struct RetrievalCommand {
 #[derive(Clone, Debug, clap::Args)]
 pub struct AsArgs {
     /// The user id every golden question is asked as; the access policy decides what it may read.
-    #[arg(
-        long = "as",
-        env = "RECALL_EVAL_AS",
-        value_name = "USER",
-        value_parser = clap::builder::NonEmptyStringValueParser::new()
-    )]
-    pub user: String,
+    #[arg(long = "as", env = "RECALL_EVAL_AS", value_name = "USER")]
+    pub user: UserId,
 }
 
 impl AsArgs {
     /// The principal, with no asserted roles.
     pub fn principal(&self) -> Principal {
-        Principal::new(UserId(self.user.clone()))
+        Principal::new(self.user.clone())
     }
 }
 

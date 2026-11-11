@@ -1,5 +1,5 @@
-//! Schema constraints: check constraints accept every domain enum variant and exactly the valid source names, and a
-//! chunk has one current version.
+//! Schema constraints: check constraints accept every domain enum variant, exactly the valid source names and ACL
+//! entries, and a chunk has one current version; migrations rewrite stored data into the current formats.
 
 #![allow(
     clippy::unwrap_used,
@@ -8,6 +8,7 @@
 
 use pgvector::Vector;
 use recall::{
+    access::AclEntry,
     domain::{CategoryKind, Sensitivity, SourceName},
     llm::EMBEDDING_DIM,
 };
@@ -102,5 +103,117 @@ async fn a_chunk_has_one_current_version(pool: PgPool) -> sqlx::Result<()> {
         .execute(&pool)
         .await?;
     insert("v2").execute(&pool).await?;
+    Ok(())
+}
+
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
+async fn the_acl_check_accepts_exactly_the_entries_acl_entry_parses(
+    pool: PgPool,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT INTO documents (id, source, external_id, title, url, source_updated_at)
+         VALUES ('markdown:1', 'markdown', '1', 'Roles', 'https://example.test/1', now())",
+    )
+    .execute(&pool)
+    .await?;
+    for (ordinal, entry) in [
+        "user:ana",
+        "user:Ana Smith",
+        "role:hr",
+        "role:hr:payroll",
+        "hr",
+        "group:hr",
+        "user:",
+        "role:",
+        "role:HR",
+        "user:a\nb",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let inserted = sqlx::query(
+            "INSERT INTO chunks (id, version, document_id, ordinal, url, text, authoritative, acl,
+                                 sensitivity, embedding, embedding_model, embedding_model_version)
+             VALUES ($1, 'v1', 'markdown:1', $2, 'https://example.test/1', 'text', true, ARRAY[$3], 'internal',
+                     $4, 'fake', '1')",
+        )
+        .bind(format!("markdown:1#{ordinal}"))
+        .bind(i32::try_from(ordinal).unwrap())
+        .bind(entry)
+        .bind(Vector::from(vec![0.0; EMBEDDING_DIM]))
+        .execute(&pool)
+        .await;
+        assert_eq!(
+            inserted.is_ok(),
+            entry.parse::<AclEntry>().is_ok(),
+            "{entry:?}"
+        );
+    }
+    Ok(())
+}
+
+const TAGGED_ACL_MIGRATION: i64 = 20261111000000;
+
+/// Applies every migration before `version`, then runs `seed`, then applies the rest.
+async fn migrate_around(pool: &PgPool, version: i64, seed: String) -> sqlx::Result<()> {
+    for migration in recall::store::MIGRATOR.iter() {
+        if migration.version == version {
+            sqlx::raw_sql(sqlx::AssertSqlSafe(seed.clone()))
+                .execute(pool)
+                .await?;
+        }
+        sqlx::raw_sql(migration.sql.clone()).execute(pool).await?;
+    }
+    Ok(())
+}
+
+/// Untagged ACL entries and stored scope members become tagged, never naming more than they did.
+#[sqlx::test(migrations = false)]
+async fn the_tagged_acl_migration_rewrites_stored_entries(pool: PgPool) -> sqlx::Result<()> {
+    let trace = serde_json::json!([
+        {
+            "step": "authorize",
+            "record": {
+                "kind": "authorize",
+                "access": { "chunks": { "members": ["hr", "reader"], "grants": [] }, "runs": { "runs": "nothing" } }
+            }
+        },
+        { "step": "retrieve", "record": null }
+    ]);
+    let seed = format!(
+        "INSERT INTO documents (id, source, external_id, title, url, source_updated_at)
+         VALUES ('markdown:1', 'markdown', '1', 'Roles', 'https://example.test/1', now());
+         INSERT INTO chunks (id, version, document_id, ordinal, url, text, authoritative, acl, sensitivity,
+                             embedding, embedding_model, embedding_model_version)
+         VALUES ('markdown:1#a', 'v1', 'markdown:1', 0, 'u', 't', true, ARRAY['hr', 'Ana Smith'], 'internal',
+                 array_fill(0, ARRAY[{EMBEDDING_DIM}])::vector, 'fake', '1'),
+                ('markdown:1#b', 'v1', 'markdown:1', 1, 'u', 't', true, '{{}}', 'internal',
+                 array_fill(0, ARRAY[{EMBEDDING_DIM}])::vector, 'fake', '1');
+         INSERT INTO pipeline_runs (id, user_id, question, status, outcome, trace)
+         VALUES ('{}', 'hr', 'q', 'failed', '{{}}', '{}');",
+        Uuid::now_v7(),
+        trace
+    );
+
+    migrate_around(&pool, TAGGED_ACL_MIGRATION, seed).await?;
+
+    let acls: Vec<Vec<String>> = sqlx::query_scalar("SELECT acl FROM chunks ORDER BY id")
+        .fetch_all(&pool)
+        .await?;
+    assert_eq!(
+        acls,
+        [
+            vec!["role:hr".to_owned(), "user:Ana Smith".to_owned()],
+            vec![]
+        ]
+    );
+    let trace: serde_json::Value = sqlx::query_scalar("SELECT trace FROM pipeline_runs")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(
+        trace[0]["record"]["access"]["chunks"]["members"],
+        serde_json::json!(["role:reader", "user:hr"])
+    );
+    assert_eq!(trace[1]["step"], "retrieve");
     Ok(())
 }

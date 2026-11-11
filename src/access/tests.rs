@@ -6,9 +6,21 @@ fn role(name: &str) -> Role {
     Role::new(name).unwrap()
 }
 
-fn labels(sensitivity: Sensitivity, tenant: Option<&str>, acl: &[&str]) -> Labels {
+fn user(id: &str) -> UserId {
+    UserId::new(id).unwrap()
+}
+
+fn acl(entries: &[&str]) -> Acl {
+    Acl::only(
+        entries
+            .iter()
+            .map(|entry| entry.parse::<AclEntry>().unwrap()),
+    )
+}
+
+fn labels(sensitivity: Sensitivity, tenant: Option<&str>, entries: &[&str]) -> Labels {
     Labels {
-        acl: acl.iter().map(|entry| (*entry).to_owned()).collect(),
+        acl: acl(entries),
         tenant: tenant.map(str::to_owned),
         sensitivity,
     }
@@ -42,7 +54,8 @@ fn no_scope_admits_nothing() {
 #[test]
 fn a_grant_admits_up_to_its_clearance_and_its_tenants() {
     let scope = ChunkScope::new(
-        ["ana"],
+        user("ana"),
+        [],
         [ChunkGrant::new(
             role("reader"),
             Sensitivity::Internal,
@@ -64,7 +77,8 @@ fn a_grant_admits_up_to_its_clearance_and_its_tenants() {
 #[test]
 fn the_acl_is_checked_before_any_grant() {
     let scope = ChunkScope::new(
-        ["ana", "hr"],
+        user("ana"),
+        [role("hr")],
         [ChunkGrant::new(
             role("maintainer"),
             Sensitivity::Confidential,
@@ -72,17 +86,73 @@ fn the_acl_is_checked_before_any_grant() {
         )],
     );
     assert_eq!(
-        scope.decide(&labels(Sensitivity::Public, None, &["finance"])),
+        scope.decide(&labels(Sensitivity::Public, None, &["role:finance"])),
         denied(DenyReason::NotInAcl)
     );
-    assert!(scope.admits(&labels(Sensitivity::Public, None, &["finance", "hr"])));
-    assert!(scope.admits(&labels(Sensitivity::Public, None, &["ana"])));
+    assert!(scope.admits(&labels(
+        Sensitivity::Public,
+        None,
+        &["role:finance", "role:hr"]
+    )));
+    assert!(scope.admits(&labels(Sensitivity::Public, None, &["user:ana"])));
+    assert_eq!(
+        scope.decide(&labels(Sensitivity::Public, None, &["user:hr", "role:ana"])),
+        denied(DenyReason::NotInAcl)
+    );
+}
+
+#[test]
+fn acl_entries_are_tagged_users_or_roles() {
+    assert_eq!(
+        "user:Ana Smith".parse::<AclEntry>().unwrap(),
+        AclEntry::User(user("Ana Smith"))
+    );
+    assert_eq!(
+        "role:hr:payroll".parse::<AclEntry>().unwrap(),
+        AclEntry::Role(role("hr:payroll"))
+    );
+    for bad in [
+        "hr",
+        "",
+        "user:",
+        "role:",
+        "role:HR",
+        "group:hr",
+        "user:a\nb",
+    ] {
+        assert!(bad.parse::<AclEntry>().is_err(), "{bad}");
+    }
+    let entries = acl(&["user:hr", "role:hr"]);
+    assert_eq!(entries.entries().len(), 2);
+    let json = serde_json::to_value(&entries).unwrap();
+    assert_eq!(json, serde_json::json!(["user:hr", "role:hr"]));
+    assert_eq!(serde_json::from_value::<Acl>(json).unwrap(), entries);
+    assert!(serde_json::from_value::<Acl>(serde_json::json!(["hr"])).is_err());
+}
+
+#[test]
+fn tightening_an_acl_never_widens_it() {
+    let hr = acl(&["role:hr", "user:ana"]);
+    assert_eq!(Acl::anyone().tighten(&hr).unwrap(), hr);
+    assert_eq!(hr.tighten(&Acl::anyone()).unwrap(), hr);
+    assert_eq!(
+        hr.tighten(&acl(&["role:hr", "role:finance"])).unwrap(),
+        acl(&["role:hr"])
+    );
+    assert!(hr.tighten(&acl(&["role:finance"])).is_err());
+}
+
+#[test]
+fn a_stored_scope_naming_two_users_does_not_load() {
+    let json = serde_json::json!({ "members": ["user:ana", "user:jose"], "grants": [] });
+    assert!(serde_json::from_value::<ChunkScope>(json).is_err());
 }
 
 #[test]
 fn the_first_admitting_grant_is_named() {
     let scope = ChunkScope::new(
-        ["ana"],
+        user("ana"),
+        [],
         [
             ChunkGrant::new(role("reader"), Sensitivity::Public, TenantScope::default()),
             ChunkGrant::new(role("staff"), Sensitivity::Internal, TenantScope::Any),
@@ -123,7 +193,8 @@ fn tenant_scope_is_any_or_a_list_in_json() {
 fn access_round_trips_through_json() {
     let access = Access::new(
         ChunkScope::new(
-            ["ana", "reader"],
+            user("ana"),
+            [role("reader")],
             [ChunkGrant::new(
                 role("reader"),
                 Sensitivity::Internal,
@@ -136,14 +207,18 @@ fn access_round_trips_through_json() {
     );
     let json = serde_json::to_value(&access).unwrap();
     assert_eq!(json["runs"]["runs"], "own");
+    assert_eq!(
+        json["chunks"]["members"],
+        serde_json::json!(["user:ana", "role:reader"])
+    );
     assert_eq!(serde_json::from_value::<Access>(json).unwrap(), access);
 }
 
 #[test]
 fn run_access_decides_by_owner() {
-    let ana = Principal::new(UserId("ana".into()));
+    let ana = Principal::new(user("ana"));
     let mine = ana.id().clone();
-    let theirs = UserId("jose".into());
+    let theirs = user("jose");
     let own = RunAccess::Own {
         role: role("reader"),
     };
@@ -171,20 +246,23 @@ mod static_authorizer {
     };
 
     fn principals() -> Vec<Principal> {
-        ["ana", "jose"]
-            .map(|id| Principal::new(UserId(id.into())))
+        ["ana", "jose", "staff"]
+            .map(|id| Principal::new(UserId::new(id).unwrap()))
             .to_vec()
     }
 
+    /// Everyone but the user `staff` holds the role `staff`.
     fn authorizer() -> StaticAuthorizer {
         StaticAuthorizer::new(principals().into_iter().map(|principal| {
+            let staff = Role::new("staff").unwrap();
+            let roles = (principal.id().as_str() != staff.as_str()).then_some(staff);
             let grant = ChunkGrant::new(
                 Role::new("reader").unwrap(),
                 Sensitivity::Internal,
                 TenantScope::Any,
             );
             let access = Access::new(
-                ChunkScope::new([principal.id().0.clone()], [grant]),
+                ChunkScope::new(principal.id().clone(), roles, [grant]),
                 Default::default(),
             );
             (principal.id().clone(), access)
@@ -203,11 +281,14 @@ mod rule_policy {
         domain::UserId,
     };
 
+    /// `auditor` is both a role jose holds and the id of a user who does not hold it.
     fn principals() -> Vec<Principal> {
+        let user = |id: &str| Principal::new(UserId::new(id).unwrap());
         vec![
-            Principal::new(UserId("ana".into())),
-            Principal::new(UserId("jose".into())),
-            Principal::new(UserId("eve".into())).with_roles([Role::new("auditor").unwrap()]),
+            user("ana"),
+            user("jose"),
+            user("eve").with_roles([Role::new("auditor").unwrap()]),
+            user("auditor"),
         ]
     }
 
@@ -219,7 +300,7 @@ mod rule_policy {
                         "reader": { "clearance": "internal", "runs": "own" },
                         "auditor": { "clearance": "confidential", "tenants": "any", "runs": "any" }
                     },
-                    "members": { "ana": ["reader"], "jose": ["reader", "auditor"] }
+                    "members": { "ana": ["reader"], "jose": ["reader", "auditor"], "auditor": ["reader"] }
                 }"#,
             )
             .unwrap(),
@@ -242,12 +323,12 @@ mod label_rules {
     fn rules() -> LabelRules {
         let config = AccessConfig::parse(
             r#"{ "roles": {}, "labels": [
-                { "documents": "markdown:hr/", "acl": ["hr"], "sensitivity": "confidential" },
-                { "documents": "markdown:hr/public/", "sensitivity": "public" }
+                { "source": "markdown", "path": "hr/", "acl": ["role:hr"], "sensitivity": "confidential" },
+                { "source": "markdown", "path": "hr/public/", "sensitivity": "public" }
             ] }"#,
         )
         .unwrap();
-        LabelRules::new(config.labels())
+        config.labels().clone()
     }
 
     crate::labeler_contract!(#[tokio::test] () => rules(), crate::access::contract::documents());
@@ -256,7 +337,7 @@ mod label_rules {
 #[tokio::test]
 async fn failing_adapters_fail() {
     use super::fakes::{FailingAuthorizer, FailingLabeler};
-    let principal = Principal::new(UserId("ana".into()));
+    let principal = Principal::new(user("ana"));
     assert!(FailingAuthorizer.access(&principal).await.is_err());
     let document = &contract::documents()[0];
     assert!(FailingLabeler.label(document).await.is_err());

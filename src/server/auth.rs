@@ -42,10 +42,11 @@ impl FromStr for ApiKeys {
                 return Err("expected `key:user_id` pairs separated by commas".into());
             };
             let (key, user) = (key.trim(), user.trim());
-            if key.is_empty() || user.is_empty() {
-                return Err("API key and user id must not be empty".into());
+            if key.is_empty() {
+                return Err("API key must not be empty".into());
             }
-            if keys.insert(digest(key), UserId(user.into())).is_some() {
+            let user = UserId::new(user).map_err(|error| error.to_string())?;
+            if keys.insert(digest(key), user.clone()).is_some() {
                 return Err(format!("duplicate API key for user {user}"));
             }
         }
@@ -88,8 +89,8 @@ mod tests {
     #[test]
     fn parses_pairs() {
         let keys: ApiKeys = " k1:ana , k2:jose,".parse().unwrap();
-        assert_eq!(keys.user("k1"), Some(&UserId("ana".into())));
-        assert_eq!(keys.user("k2"), Some(&UserId("jose".into())));
+        assert_eq!(keys.user("k1"), Some(&UserId::new("ana").unwrap()));
+        assert_eq!(keys.user("k2"), Some(&UserId::new("jose").unwrap()));
         assert_eq!(keys.user("k3"), None);
     }
 

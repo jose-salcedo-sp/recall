@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::llm::ModelRef;
+use crate::{
+    access::{Acl, DisjointAcls},
+    llm::ModelRef,
+};
 
 /// The user's question, verbatim. [`Span`]s in [`Provenance::UserPrompt`] index into its bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,10 +69,63 @@ impl fmt::Display for RunId {
     }
 }
 
-/// Who asked: the user mapped from an API bearer key.
+/// Who asked: the user mapped from an API bearer key, or an identity provider's subject. Non-empty, without control
+/// characters; otherwise any text the authenticator chooses.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct UserId(pub String);
+#[serde(try_from = "String", into = "String")]
+pub struct UserId(String);
+
+/// Text rejected by [`UserId::new`].
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error("invalid user id {0:?}: expected non-empty text without control characters")]
+pub struct InvalidUserId(pub String);
+
+impl UserId {
+    /// # Errors
+    ///
+    /// [`InvalidUserId`] when `id` is empty or has a control character.
+    pub fn new(id: impl Into<String>) -> Result<Self, InvalidUserId> {
+        let id = id.into();
+        if id.is_empty() || id.chars().any(char::is_control) {
+            Err(InvalidUserId(id))
+        } else {
+            Ok(Self(id))
+        }
+    }
+
+    /// The id, as stored in `pipeline_runs.user_id` and after `user:` in ACLs.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for UserId {
+    type Error = InvalidUserId;
+
+    fn try_from(id: String) -> Result<Self, InvalidUserId> {
+        Self::new(id)
+    }
+}
+
+impl std::str::FromStr for UserId {
+    type Err = InvalidUserId;
+
+    fn from_str(id: &str) -> Result<Self, InvalidUserId> {
+        Self::new(id)
+    }
+}
+
+impl From<UserId> for String {
+    fn from(id: UserId) -> String {
+        id.0
+    }
+}
+
+impl fmt::Display for UserId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 /// The runtime value of a question category; [`crate::pipeline`] has one marker type per variant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -384,12 +440,46 @@ impl TryFrom<&str> for Sensitivity {
 /// Recorded on every chunk and enforced on every read through [`crate::access::ChunkScope`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Labels {
-    /// Principal ids or role names that may read, inherited from the source ACL; empty means no ACL restriction.
-    pub acl: Vec<String>,
+    /// The users and roles that may read, inherited from the source ACL.
+    pub acl: Acl,
     /// The tenant the content concerns, if any; `None` means visible to every tenant.
     pub tenant: Option<String>,
     /// Visibility tier.
     pub sensitivity: Sensitivity,
+}
+
+/// Two sets of labels that no chunk can carry at once, found by [`Labels::tighten`].
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum LabelConflict {
+    /// Both ACLs restrict, and no entry is in both.
+    #[error(transparent)]
+    Acl(#[from] DisjointAcls),
+    /// The labels name two different tenants.
+    #[error("the labels name two tenants, {0:?} and {1:?}")]
+    Tenant(String, String),
+}
+
+impl Labels {
+    /// Labels no wider than `self` or `other` on any field: the ACLs intersected ([`Acl::tighten`]), the one tenant
+    /// either names, and the higher sensitivity. Whoever may read the result may read under both.
+    ///
+    /// # Errors
+    ///
+    /// [`LabelConflict`] when no chunk could be labelled with both.
+    pub fn tighten(&self, other: &Labels) -> Result<Labels, LabelConflict> {
+        let tenant = match (&self.tenant, &other.tenant) {
+            (Some(a), Some(b)) if a != b => {
+                return Err(LabelConflict::Tenant(a.clone(), b.clone()));
+            }
+            (Some(tenant), _) | (None, Some(tenant)) => Some(tenant.clone()),
+            (None, None) => None,
+        };
+        Ok(Labels {
+            acl: self.acl.tighten(&other.acl)?,
+            tenant,
+            sensitivity: self.sensitivity.max(other.sensitivity),
+        })
+    }
 }
 
 /// What a source connector produces for one unit of its corpus (a file, a page, a record).
@@ -666,6 +756,40 @@ mod tests {
     }
 
     #[test]
+    fn user_ids_are_non_empty_and_free_of_control_characters() {
+        for good in ["ana", "Ana Smith", "auth0|123", "a:b"] {
+            assert_eq!(UserId::new(good).unwrap().as_str(), good);
+        }
+        for bad in ["", "a\nb", "\t"] {
+            assert_eq!(UserId::new(bad), Err(InvalidUserId(bad.to_owned())));
+        }
+        assert!(serde_json::from_str::<UserId>("\"\"").is_err());
+    }
+
+    #[test]
+    fn tightened_labels_are_no_wider_than_either() {
+        let entry = |text: &str| text.parse::<crate::access::AclEntry>().unwrap();
+        let labels = |acl: &[&str], tenant: Option<&str>, sensitivity| Labels {
+            acl: Acl::only(acl.iter().map(|text| entry(text))),
+            tenant: tenant.map(str::to_owned),
+            sensitivity,
+        };
+        let connector = labels(&["role:hr", "user:ana"], None, Sensitivity::Confidential);
+        let rule = labels(&["role:hr"], Some("acme"), Sensitivity::Public);
+        let tight = labels(&["role:hr"], Some("acme"), Sensitivity::Confidential);
+        assert_eq!(connector.tighten(&rule).unwrap(), tight);
+        assert_eq!(rule.tighten(&connector).unwrap(), tight);
+        assert!(matches!(
+            connector.tighten(&labels(&["role:finance"], None, Sensitivity::Public)),
+            Err(LabelConflict::Acl(_))
+        ));
+        assert!(matches!(
+            rule.tighten(&labels(&[], Some("globex"), Sensitivity::Public)),
+            Err(LabelConflict::Tenant(..))
+        ));
+    }
+
+    #[test]
     fn at_least_two_rejects_one() {
         assert!(AtLeastTwo::try_from(vec![1]).is_err());
         assert!(AtLeastTwo::try_from(vec![1, 2]).is_ok());
@@ -686,7 +810,7 @@ mod tests {
             url: "https://example.test/roles.md".into(),
             updated_at: Utc::now(),
             labels: Labels {
-                acl: vec![],
+                acl: Acl::anyone(),
                 tenant: None,
                 sensitivity: Sensitivity::Internal,
             },

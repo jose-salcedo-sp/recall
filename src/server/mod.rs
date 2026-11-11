@@ -167,7 +167,7 @@ async fn chat_completions(
     }
 
     let summary = RunSummary::new(&report);
-    tracing::info!(%run_id, user = user.0, outcome = summary.outcome, "run finished");
+    tracing::info!(%run_id, user = user.as_str(), outcome = summary.outcome, "run finished");
     let content = match &report.outcome {
         Outcome::Answered(answer) => render::answer(answer),
         Outcome::Declined { sources, .. } => render::declined(sources),
@@ -243,7 +243,7 @@ async fn get_run(
     let decision = access.runs().decide(&principal, &run.user);
     tracing::info!(
         %run_id,
-        reader = principal.id().0,
+        reader = principal.id().as_str(),
         policy = ?state.authorizer.policy(),
         ?decision,
         "run read"

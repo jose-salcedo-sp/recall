@@ -11,7 +11,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use reqwest::Url;
 
-use crate::domain::{ChunkDraft, Document, Labels, Sensitivity, SourceName};
+use crate::{
+    access::Acl,
+    domain::{ChunkDraft, Document, Labels, Sensitivity, SourceName},
+};
 
 use super::Source;
 
@@ -145,7 +148,7 @@ impl Connector {
             url: file_url,
             updated_at,
             labels: Labels {
-                acl: vec![],
+                acl: Acl::anyone(),
                 tenant: None,
                 sensitivity: Sensitivity::Internal,
             },

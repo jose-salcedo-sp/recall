@@ -1,21 +1,25 @@
 //! The shipped policy: roles and their grants, role membership and label rules, from `config/access.json`
 //! (`RECALL_ACCESS`). [`RulePolicy`] is its [`Authorizer`], [`LabelRules`] its [`Labeler`].
+//!
+//! `everyone` is a baseline grant: every principal holds those roles, whether or not the policy lists it, so a
+//! non-empty `everyone` is allow-by-default for authenticated callers. The shipped file leaves it empty.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fmt, fs,
     path::{Path, PathBuf},
 };
 
 use async_trait::async_trait;
+use eros::Context;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::domain::{Document, Labels, Sensitivity, UserId};
+use crate::domain::{Document, Labels, Sensitivity, SourceName, UserId};
 
 use super::{
-    Access, Authorizer, ChunkGrant, ChunkScope, Labeler, PolicyRef, Principal, Role, RunAccess,
-    TenantScope,
+    Access, Acl, Authorizer, ChunkGrant, ChunkScope, Labeler, PolicyRef, Principal, Role,
+    RunAccess, TenantScope,
 };
 
 /// Where the shipped policy lives unless `RECALL_ACCESS` says otherwise.
@@ -67,41 +71,91 @@ pub enum RunGrant {
     Any,
 }
 
-/// Labels for every document whose id starts with `documents`, replacing the connector's.
+/// Labels that tighten every document of `source` under the `/`-separated path prefix `path`: the document keeps the
+/// connector's labels, narrowed by these ([`Labels::tighten`]). A rule never widens what the connector set.
+///
+/// Written `{ "source": "markdown", "path": "hr/", "acl": ["role:hr"], "sensitivity": "confidential" }`. `path`
+/// matches whole segments of the external id (`hr` covers `hr/pay.md`, not `hrx/pay.md`) and covers the whole
+/// source when empty; `acl` and `tenant` default to no restriction and `sensitivity` to `public`, which changes
+/// nothing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "RawLabelRule", into = "RawLabelRule")]
 pub struct LabelRule {
-    /// A [`crate::domain::DocumentId`] prefix, e.g. `markdown:hr/`; the longest matching prefix wins.
-    pub documents: String,
-    /// See [`Labels::acl`].
-    #[serde(default)]
-    pub acl: Vec<String>,
-    /// See [`Labels::tenant`].
-    #[serde(default)]
-    pub tenant: Option<String>,
-    /// See [`Labels::sensitivity`].
-    pub sensitivity: Sensitivity,
+    source: SourceName,
+    path: String,
+    labels: Labels,
 }
 
-impl LabelRule {
-    fn labels(&self) -> Labels {
-        Labels {
-            acl: self.acl.clone(),
-            tenant: self.tenant.clone(),
-            sensitivity: self.sensitivity,
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLabelRule {
+    source: SourceName,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    acl: Acl,
+    #[serde(default)]
+    tenant: Option<String>,
+    #[serde(default = "least_sensitive")]
+    sensitivity: Sensitivity,
+}
+
+fn least_sensitive() -> Sensitivity {
+    Sensitivity::Public
+}
+
+impl From<RawLabelRule> for LabelRule {
+    fn from(raw: RawLabelRule) -> Self {
+        Self {
+            source: raw.source,
+            path: raw.path.trim_end_matches('/').to_owned(),
+            labels: Labels {
+                acl: raw.acl,
+                tenant: raw.tenant,
+                sensitivity: raw.sensitivity,
+            },
         }
     }
 }
 
-/// The parsed policy. Every role named in `everyone` or `members` is defined in `roles`, and label prefixes are
-/// non-empty and distinct; unknown keys are rejected.
+impl From<LabelRule> for RawLabelRule {
+    fn from(rule: LabelRule) -> Self {
+        Self {
+            source: rule.source,
+            path: rule.path,
+            acl: rule.labels.acl,
+            tenant: rule.labels.tenant,
+            sensitivity: rule.labels.sensitivity,
+        }
+    }
+}
+
+impl LabelRule {
+    fn covers(&self, document: &Document) -> bool {
+        document.source == self.source
+            && (self.path.is_empty()
+                || document
+                    .external_id
+                    .strip_prefix(&self.path)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('/')))
+    }
+}
+
+impl fmt::Display for LabelRule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.source, self.path)
+    }
+}
+
+/// The parsed policy. Every role named in `everyone` or `members` is defined in `roles`, and no two label rules
+/// cover the same source and path; unknown keys are rejected.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "RawAccessConfig", into = "RawAccessConfig")]
 pub struct AccessConfig {
     roles: BTreeMap<Role, RoleGrant>,
     everyone: BTreeSet<Role>,
     members: BTreeMap<UserId, BTreeSet<Role>>,
-    labels: Vec<LabelRule>,
+    labels: LabelRules,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -113,7 +167,7 @@ struct RawAccessConfig {
     #[serde(default)]
     members: BTreeMap<UserId, BTreeSet<Role>>,
     #[serde(default)]
-    labels: Vec<LabelRule>,
+    labels: LabelRules,
 }
 
 /// A policy whose parts disagree.
@@ -127,13 +181,12 @@ pub enum InvalidAccessConfig {
         /// `everyone` or `members.<user>`.
         used_by: String,
     },
-    /// A label rule with an empty `documents` prefix, which would relabel every document.
-    #[error("a label rule has an empty `documents` prefix")]
-    EmptyPrefix,
-    /// Two label rules for one prefix.
-    #[error("two label rules have the prefix {0:?}")]
-    DuplicatePrefix(String),
 }
+
+/// Two label rules for one source and path.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error("two label rules cover {0}")]
+pub struct DuplicateLabelRule(pub String);
 
 impl TryFrom<RawAccessConfig> for AccessConfig {
     type Error = InvalidAccessConfig;
@@ -152,17 +205,8 @@ impl TryFrom<RawAccessConfig> for AccessConfig {
             return Err(error);
         }
         for (user, roles) in &raw.members {
-            if let Some(error) = undefined(roles, &|| format!("members.{}", user.0)) {
+            if let Some(error) = undefined(roles, &|| format!("members.{user}")) {
                 return Err(error);
-            }
-        }
-        let mut prefixes = BTreeSet::new();
-        for rule in &raw.labels {
-            if rule.documents.is_empty() {
-                return Err(InvalidAccessConfig::EmptyPrefix);
-            }
-            if !prefixes.insert(rule.documents.as_str()) {
-                return Err(InvalidAccessConfig::DuplicatePrefix(rule.documents.clone()));
             }
         }
         Ok(Self {
@@ -202,8 +246,8 @@ impl AccessConfig {
         Ok(serde_json::from_str(text)?)
     }
 
-    /// The label rules, for [`LabelRules::new`].
-    pub fn labels(&self) -> &[LabelRule] {
+    /// The label rules, the policy's [`Labeler`].
+    pub fn labels(&self) -> &LabelRules {
         &self.labels
     }
 
@@ -263,8 +307,6 @@ impl Authorizer for RulePolicy {
         let grants = defined.iter().map(|(role, grant)| {
             ChunkGrant::new((*role).clone(), grant.clearance, grant.tenants.clone())
         });
-        let members = std::iter::once(principal.id().0.clone())
-            .chain(roles.iter().map(|role| role.as_str().to_owned()));
         let runs = defined
             .iter()
             .filter_map(|(role, grant)| {
@@ -277,50 +319,82 @@ impl Authorizer for RulePolicy {
             })
             .max_by_key(|(widest, _)| *widest)
             .map_or(RunAccess::Nothing, |(_, runs)| runs);
-        Ok(Access::new(ChunkScope::new(members, grants), runs))
+        let chunks = ChunkScope::new(principal.id().clone(), roles.iter().cloned(), grants);
+        Ok(Access::new(chunks, runs))
     }
 }
 
-/// The shipped [`Labeler`]: the longest [`LabelRule::documents`] prefix of a document's id sets its labels; a
-/// document no rule matches keeps the connector's.
-#[derive(Clone, Debug, Default)]
+/// The shipped [`Labeler`]: every [`LabelRule`] that covers a document tightens the connector's labels, so adding a
+/// rule never widens access. No two rules cover the same source and path.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<LabelRule>", into = "Vec<LabelRule>")]
 pub struct LabelRules {
     rules: Vec<LabelRule>,
 }
 
 impl LabelRules {
-    /// Labels by `rules`.
-    pub fn new(rules: &[LabelRule]) -> Self {
-        Self {
-            rules: rules.to_vec(),
+    /// # Errors
+    ///
+    /// [`DuplicateLabelRule`] when two rules cover the same source and path.
+    pub fn new(rules: Vec<LabelRule>) -> Result<Self, DuplicateLabelRule> {
+        let mut covered = BTreeSet::new();
+        if let Some(duplicate) = rules
+            .iter()
+            .find(|rule| !covered.insert((&rule.source, &rule.path)))
+        {
+            return Err(DuplicateLabelRule(duplicate.to_string()));
         }
+        Ok(Self { rules })
+    }
+}
+
+impl TryFrom<Vec<LabelRule>> for LabelRules {
+    type Error = DuplicateLabelRule;
+
+    fn try_from(rules: Vec<LabelRule>) -> Result<Self, DuplicateLabelRule> {
+        Self::new(rules)
+    }
+}
+
+impl From<LabelRules> for Vec<LabelRule> {
+    fn from(rules: LabelRules) -> Self {
+        rules.rules
     }
 }
 
 #[async_trait]
 impl Labeler for LabelRules {
     async fn label(&self, document: &Document) -> eros::Result<Labels> {
-        let id = document.id();
-        Ok(self
-            .rules
-            .iter()
-            .filter(|rule| id.0.starts_with(&rule.documents))
-            .max_by_key(|rule| rule.documents.len())
-            .map_or_else(|| document.labels.clone(), LabelRule::labels))
+        let mut labels = document.labels.clone();
+        for rule in self.rules.iter().filter(|rule| rule.covers(document)) {
+            labels = labels.tighten(&rule.labels).with_context(|| {
+                format!("label rule {rule} conflicts with the connector's labels")
+            })?;
+        }
+        Ok(labels)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::access::{AclEntry, Decision};
 
     fn user(id: &str) -> Principal {
-        Principal::new(UserId(id.into()))
+        Principal::new(UserId::new(id).unwrap())
     }
 
-    fn labels(sensitivity: Sensitivity, tenant: Option<&str>, acl: &[&str]) -> Labels {
+    fn acl(entries: &[&str]) -> Acl {
+        Acl::only(
+            entries
+                .iter()
+                .map(|entry| entry.parse::<AclEntry>().unwrap()),
+        )
+    }
+
+    fn labels(sensitivity: Sensitivity, tenant: Option<&str>, entries: &[&str]) -> Labels {
         Labels {
-            acl: acl.iter().map(|entry| (*entry).to_owned()).collect(),
+            acl: acl(entries),
             tenant: tenant.map(str::to_owned),
             sensitivity,
         }
@@ -340,10 +414,13 @@ mod tests {
         "members": { "jose": ["maintainer"], "ana": ["acme"] }
     }"#;
 
-    #[test]
-    fn the_shipped_policy_parses() {
+    #[tokio::test]
+    async fn the_shipped_policy_denies_a_user_it_does_not_list() {
         let config = AccessConfig::parse(include_str!("../../config/access.json")).unwrap();
         assert!(!config.roles.is_empty());
+        let access = RulePolicy::new(config).access(&user("eve")).await.unwrap();
+        assert!(access.chunks().grants().is_empty());
+        assert_eq!(access.runs(), &RunAccess::Nothing);
     }
 
     #[tokio::test]
@@ -361,7 +438,7 @@ mod tests {
         let ana = policy.access(&user("ana")).await.unwrap();
         assert_eq!(
             ana.chunks().decide(&acme),
-            super::super::Decision::Allowed {
+            Decision::Allowed {
                 role: Role::new("acme").unwrap()
             }
         );
@@ -379,55 +456,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_acl_needs_the_principal_or_one_of_its_roles() {
+    async fn an_acl_needs_the_user_or_one_of_its_roles() {
         let policy = policy(POLICY);
         let jose = policy.access(&user("jose")).await.unwrap();
-        assert!(
-            !jose
-                .chunks()
-                .admits(&labels(Sensitivity::Public, None, &["hr"]))
-        );
-        assert!(
-            jose.chunks()
-                .admits(&labels(Sensitivity::Public, None, &["hr", "jose"]))
-        );
-        assert!(
-            jose.chunks()
-                .admits(&labels(Sensitivity::Public, None, &["maintainer"]))
-        );
+        let public = |entries: &[&str]| labels(Sensitivity::Public, None, entries);
+        assert!(!jose.chunks().admits(&public(&["role:hr"])));
+        assert!(jose.chunks().admits(&public(&["role:hr", "user:jose"])));
+        assert!(jose.chunks().admits(&public(&["role:maintainer"])));
+        assert!(!jose.chunks().admits(&public(&["user:ana"])));
         let hr = user("eve").with_roles([Role::new("hr").unwrap()]);
         let hr = policy.access(&hr).await.unwrap();
+        assert!(hr.chunks().admits(&public(&["role:hr"])));
+    }
+
+    #[tokio::test]
+    async fn a_user_whose_id_is_a_role_name_does_not_hold_the_role() {
+        let policy = policy(POLICY);
+        let restricted = labels(Sensitivity::Public, None, &["role:maintainer"]);
+        let named_maintainer = policy.access(&user("maintainer")).await.unwrap();
         assert!(
-            hr.chunks()
-                .admits(&labels(Sensitivity::Public, None, &["hr"]))
+            named_maintainer
+                .chunks()
+                .admits(&labels(Sensitivity::Internal, None, &[]))
         );
+        assert_eq!(
+            named_maintainer.chunks().decide(&restricted),
+            Decision::Denied {
+                reason: crate::access::DenyReason::NotInAcl
+            }
+        );
+        assert!(
+            policy
+                .access(&user("jose"))
+                .await
+                .unwrap()
+                .chunks()
+                .admits(&restricted)
+        );
+        assert!(named_maintainer.chunks().admits(&labels(
+            Sensitivity::Public,
+            None,
+            &["user:maintainer"]
+        )));
     }
 
     #[tokio::test]
     async fn run_access_is_the_widest_role_grant() {
         let policy = policy(POLICY);
         let eve = user("eve");
+        let ana = UserId::new("ana").unwrap();
         let reader = policy.access(&eve).await.unwrap();
-        assert!(
-            reader
-                .runs()
-                .decide(&eve, &UserId("eve".into()))
-                .is_allowed()
-        );
-        assert!(
-            !reader
-                .runs()
-                .decide(&eve, &UserId("ana".into()))
-                .is_allowed()
-        );
+        assert!(reader.runs().decide(&eve, eve.id()).is_allowed());
+        assert!(!reader.runs().decide(&eve, &ana).is_allowed());
         let jose = user("jose");
         let maintainer = policy.access(&jose).await.unwrap();
-        assert!(
-            maintainer
-                .runs()
-                .decide(&jose, &UserId("ana".into()))
-                .is_allowed()
-        );
+        assert!(maintainer.runs().decide(&jose, &ana).is_allowed());
     }
 
     #[tokio::test]
@@ -453,9 +536,14 @@ mod tests {
         for bad in [
             r#"{ "roles": {}, "everyone": ["reader"] }"#,
             r#"{ "roles": {}, "members": { "ana": ["reader"] } }"#,
-            r#"{ "roles": {}, "labels": [{ "documents": "", "sensitivity": "public" }] }"#,
-            r#"{ "roles": {}, "labels": [{ "documents": "a", "sensitivity": "public" },
-                                         { "documents": "a", "sensitivity": "internal" }] }"#,
+            r#"{ "roles": {}, "members": { "": [] } }"#,
+            r#"{ "roles": {}, "labels": [{ "source": "markdown", "path": "a", "sensitivity": "public" },
+                                         { "source": "markdown", "path": "a/", "sensitivity": "internal" }] }"#,
+            r#"{ "roles": {}, "labels": [{ "source": "markdown", "acl": ["hr"] }] }"#,
+            r#"{ "roles": {}, "labels": [{ "source": "markdown", "acl": ["group:hr"] }] }"#,
+            r#"{ "roles": {}, "labels": [{ "source": "markdown", "acl": ["user:"] }] }"#,
+            r#"{ "roles": {}, "labels": [{ "source": "Markdown" }] }"#,
+            r#"{ "roles": {}, "labels": [{ "documents": "markdown:hr/", "sensitivity": "public" }] }"#,
             r#"{ "roles": { "Reader": { "clearance": "public" } } }"#,
             r#"{ "roles": {}, "admins": [] }"#,
             r#"{ "everyone": [] }"#,
@@ -473,36 +561,75 @@ mod tests {
         assert_eq!(a, policy(POLICY).policy());
     }
 
-    #[tokio::test]
-    async fn the_longest_prefix_labels_a_document() {
-        let config = AccessConfig::parse(
-            r#"{ "roles": {}, "labels": [
-                { "documents": "markdown:hr/", "acl": ["hr"], "sensitivity": "confidential" },
-                { "documents": "markdown:hr/public/", "sensitivity": "public" }
-            ] }"#,
-        )
-        .unwrap();
-        let rules = LabelRules::new(config.labels());
-        let document = |path: &str| Document {
-            source: crate::domain::SourceName::from_static("markdown"),
+    fn rules(json: &str) -> LabelRules {
+        AccessConfig::parse(&format!(r#"{{ "roles": {{}}, "labels": {json} }}"#))
+            .unwrap()
+            .labels()
+            .clone()
+    }
+
+    fn document(source: &'static str, path: &str, labels: Labels) -> Document {
+        Document {
+            source: SourceName::from_static(source),
             external_id: path.into(),
             title: path.into(),
             url: String::new(),
             updated_at: chrono::Utc::now(),
-            labels: labels(Sensitivity::Internal, None, &[]),
+            labels,
             chunks: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn every_covering_rule_tightens_the_connector_labels() {
+        let rules = rules(
+            r#"[
+                { "source": "markdown", "path": "hr/", "acl": ["role:hr"], "sensitivity": "confidential" },
+                { "source": "markdown", "path": "hr/public", "sensitivity": "public" }
+            ]"#,
+        );
+        let internal = labels(Sensitivity::Internal, None, &[]);
+        let hr = labels(Sensitivity::Confidential, None, &["role:hr"]);
+        let label = async |source, path| {
+            rules
+                .label(&document(source, path, internal.clone()))
+                .await
+                .unwrap()
         };
-        assert_eq!(
-            rules.label(&document("hr/pay.md")).await.unwrap(),
-            labels(Sensitivity::Confidential, None, &["hr"])
+        assert_eq!(label("markdown", "hr/pay.md").await, hr);
+        assert_eq!(label("markdown", "hr/public/faq.md").await, hr);
+        assert_eq!(label("markdown", "hr").await, hr);
+        assert_eq!(label("markdown", "hrx/pay.md").await, internal);
+        assert_eq!(label("markdown", "eng/hr/pay.md").await, internal);
+        assert_eq!(label("wiki", "hr/pay.md").await, internal);
+    }
+
+    #[tokio::test]
+    async fn a_rule_never_drops_the_connector_acl_or_lowers_its_sensitivity() {
+        let rules = rules(
+            r#"[{ "source": "wiki", "acl": ["role:hr", "role:finance"], "tenant": "acme", "sensitivity": "internal" }]"#,
         );
+        let inherited = labels(Sensitivity::Confidential, None, &["role:hr", "user:ana"]);
         assert_eq!(
-            rules.label(&document("hr/public/faq.md")).await.unwrap(),
-            labels(Sensitivity::Public, None, &[])
+            rules
+                .label(&document("wiki", "pay", inherited))
+                .await
+                .unwrap(),
+            labels(Sensitivity::Confidential, Some("acme"), &["role:hr"])
         );
-        assert_eq!(
-            rules.label(&document("eng/roles.md")).await.unwrap(),
-            labels(Sensitivity::Internal, None, &[])
+        let disjoint = labels(Sensitivity::Public, None, &["user:ana"]);
+        assert!(
+            rules
+                .label(&document("wiki", "pay", disjoint))
+                .await
+                .is_err()
+        );
+        let other_tenant = labels(Sensitivity::Public, Some("globex"), &[]);
+        assert!(
+            rules
+                .label(&document("wiki", "pay", other_tenant))
+                .await
+                .is_err()
         );
     }
 }

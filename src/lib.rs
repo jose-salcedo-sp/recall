@@ -36,7 +36,7 @@
 //! |---|---|
 //! | [`ingest::Source`] | [`ingest::markdown::Connector`], the markdown directory; a domain passes its own connectors to [`ingest::run_with`] |
 //! | [`access::Authorizer`] | [`access::rules::RulePolicy`], roles from `config/access.json`; asked once per run, enforced at every step |
-//! | [`access::Labeler`] | [`access::rules::LabelRules`], by document-id prefix; [`access::ConnectorLabels`] keeps the connector's |
+//! | [`access::Labeler`] | [`access::rules::LabelRules`], tightening by source and path prefix; [`access::ConnectorLabels`] keeps the connector's |
 //! | [`llm::Embedder`] | Bedrock or an OpenAI-compatible server (Ollama, Workers AI), chosen by [`llm::embedder`] |
 //! | [`llm::ChatModel`] | Bedrock or an OpenAI-compatible server (Ollama, Workers AI), chosen by [`llm::explain_model`] |
 //! | [`llm::system_one::SystemOne`] | [`llm::system_one::HttpSystemOne`] (Kev, system-one.dev) or [`llm::workers_ai::WorkersAiSystemOne`], chosen by [`llm::system_one_client`] |

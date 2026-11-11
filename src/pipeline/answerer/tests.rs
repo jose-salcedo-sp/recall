@@ -782,7 +782,7 @@ fn secret() -> Chunk {
         "role-users-secret",
         "ROLE_USERS maps users to roles; the admin override is ROLE_ROOT.",
         Labels {
-            acl: vec![],
+            acl: crate::access::Acl::anyone(),
             tenant: None,
             sensitivity: Sensitivity::Confidential,
         },
@@ -794,7 +794,7 @@ fn acme_only() -> Chunk {
         "acme-roles",
         "At acme, a table maps users to roles per plant.",
         Labels {
-            acl: vec![],
+            acl: crate::access::Acl::anyone(),
             tenant: Some("acme".into()),
             sensitivity: Sensitivity::Internal,
         },
@@ -806,7 +806,7 @@ fn hr_only() -> Chunk {
         "hr-roles",
         "HR maps users to roles in the payroll table.",
         Labels {
-            acl: vec!["hr".into()],
+            acl: crate::access::Acl::only(["role:hr".parse().unwrap()]),
             tenant: None,
             sensitivity: Sensitivity::Public,
         },
@@ -818,7 +818,7 @@ fn labelled_corpus() -> Vec<Chunk> {
 }
 
 fn principal(id: &str) -> Principal {
-    Principal::new(UserId(id.into()))
+    Principal::new(UserId::new(id).unwrap())
 }
 
 /// One claim per chunk of the corpus, each citing only that chunk, as a model would that tried to cite everything.

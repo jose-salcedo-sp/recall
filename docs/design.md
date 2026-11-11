@@ -33,7 +33,7 @@ The `Source` port returns a full snapshot of documents; `ingest` versions, embed
 Ingestion:
 
 - `recall ingest` reads the full snapshot on each run. Documents no longer in the snapshot have their current chunks superseded.
-- Each chunk records labels: ACL (empty for markdown), tenant (if any), sensitivity (`public` < `internal` < `confidential`). The `Labeler` port sets them per document before versioning; the shipped `LabelRules` relabels by document-id prefix from the access policy, and a document it cannot label is not stored.
+- Each chunk records labels: ACL (empty for markdown), tenant (if any), sensitivity (`public` < `internal` < `confidential`). An ACL entry is tagged, `user:<id>` or `role:<name>`, so a user id never matches a role. The `Labeler` port sets them per document before versioning; the shipped `LabelRules` tightens the connector's labels by source and path prefix from the access policy (ACLs intersected, the higher sensitivity, one tenant), so a rule never widens access, and a document it cannot label is not stored.
 - Chunks are **immutable and content-addressed**. Re-ingestion inserts new versions and marks old ones superseded, so traces stay reproducible.
 - Every chunk records the embedding model and version. Changing models means a full re-embed; mixing is never allowed.
 - Ingested text is treated as data: delimited in prompts, never as instructions.
@@ -301,12 +301,12 @@ What was assembled is a `Plan` (the classify, rerank, admit and support modes), 
 
 ## 8. Access control
 
-Every run is asked by a `Principal` (a user id and the roles its authenticator asserts). The `Authorizer` port, injected in `Ports`, compiles it once per run into `Access`: a `ChunkScope` (the principal's ACL members and one grant per role, each a sensitivity clearance and the tenants it reads) and a `RunAccess`. A chunk is readable when its ACL is empty or names a member, and a grant clears its sensitivity and tenant. Deny by default: an unknown principal gets nothing, and an authorizer error fails the run at `authorize`, before retrieval.
+Every run is asked by a `Principal` (a user id and the roles its authenticator asserts). The `Authorizer` port, injected in `Ports`, compiles it once per run into `Access`: a `ChunkScope` (the principal's ACL members and one grant per role, each a sensitivity clearance and the tenants it reads) and a `RunAccess`. A chunk is readable when its ACL is empty or names a member (`user:<the principal's id>` or `role:<one of its roles>`), and a grant clears its sensitivity and tenant. Deny by default: an unknown principal gets nothing, and an authorizer error fails the run at `authorize`, before retrieval.
 
 - **Retrieval** filters by the scope in SQL: glossary, full-text, vector (HNSW iterative scan) and neighbour queries. The `Retriever` contract checks that exactly the readable chunks come back.
 - **Every step that reads chunks** (`Retrieve`, `Rerank`, `Admit`, `Answer`, `Explain`, `Verify`) rechecks its sources against the same scope and records one decision per chunk, so a retriever that leaks still leaks nothing into a prompt, a citation or a decline.
 - **Ingestion** labels through the `Labeler` port; **eval** asks as an explicit `--as` principal.
-- `RulePolicy` (roles, `everyone`, `members`, label rules from `config/access.json`) is the shipped adapter; `access::contract` holds the port's rules for other adapters.
+- `RulePolicy` (roles, `everyone`, `members`, label rules from `config/access.json`) is the shipped adapter; `access::contract` holds the port's rules for other adapters. `everyone` is a baseline grant: every authenticated caller holds those roles, known to the policy or not, so a non-empty `everyone` opts out of deny by default. The shipped policy leaves it empty and lists `admin` as a `maintainer`.
 
 Not built: Postgres RLS, ingestion on change with bounded revocation delays, and per-question principals in eval.
 

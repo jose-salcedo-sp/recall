@@ -22,7 +22,7 @@ fn fake() -> StaticSource {
         url: format!("https://wiki.example.test/{external_id}"),
         updated_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
         labels: Labels {
-            acl: vec![],
+            acl: recall::access::Acl::anyone(),
             tenant: None,
             sensitivity: Sensitivity::Internal,
         },
