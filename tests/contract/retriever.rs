@@ -119,8 +119,7 @@ pub async fn hits_are_best_first_without_duplicates(
     let hits = retriever.retrieve(QUESTION, &everything()).await?;
 
     assert!(
-        hits.windows(2)
-            .all(|pair| pair[0].score.0 >= pair[1].score.0),
+        hits.windows(2).all(|pair| pair[0].score >= pair[1].score),
         "{hits:#?}"
     );
     let unique: HashSet<_> = hits.iter().map(|hit| &hit.chunk.id).collect();

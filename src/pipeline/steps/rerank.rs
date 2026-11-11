@@ -17,7 +17,7 @@ use crate::{
         Ask, Category, DeclineReason, Scored, Step, StepError,
         trace::{RerankMode, RerankRecord},
     },
-    retrieval::Retrieved,
+    retrieval::{Relevance, Retrieved},
 };
 
 use super::{CONCURRENT_REQUESTS, Candidates, Reranked, enforce, judged_text, ranked, with_access};
@@ -161,7 +161,7 @@ impl<TCategory> Rerank<TCategory> {
             .into_vec()
             .into_iter()
             .partition(|hit| hit.context_for.is_none());
-        matches.sort_by(|a, b| b.score.0.total_cmp(&a.score.0));
+        matches.sort_by(|a, b| Relevance::descending(&a.score, &b.score));
 
         let penalty = self.evidence_rank_penalty;
         let mut raw = None;
@@ -273,7 +273,6 @@ mod tests {
         },
         pipeline::steps::MAX_STATE_CHARS,
         pipeline::{Open, StepErrorKind, steps::fixtures::chunk},
-        retrieval::Relevance,
     };
 
     fn keeping(top_k: usize) -> RerankConfig {
@@ -303,7 +302,7 @@ mod tests {
     fn hit(locator: &str, text: &str, score: f32) -> Retrieved {
         Retrieved {
             chunk: chunk(locator, "Roles", text),
-            score: Relevance(score),
+            score: Relevance::new(score).unwrap(),
             context_for: None,
         }
     }
@@ -311,7 +310,7 @@ mod tests {
     fn context(of: &Retrieved, locator: &str, score: f32) -> Retrieved {
         Retrieved {
             chunk: chunk(locator, "Roles", "context"),
-            score: Relevance(score),
+            score: Relevance::new(score).unwrap(),
             context_for: Some(of.chunk.id.clone()),
         }
     }
@@ -405,7 +404,7 @@ mod tests {
         let raw: BTreeMap<String, f32> =
             serde_json::from_str(scored.record.raw.as_deref().unwrap()).unwrap();
         assert_eq!(raw.len(), 3);
-        assert_eq!(scored.output.0[0].score, Relevance(0.8));
+        assert_eq!(scored.output.0[0].score, Relevance::new(0.8).unwrap());
         let judged: Vec<_> = scored
             .record
             .chunks
@@ -414,7 +413,10 @@ mod tests {
             .collect();
         assert_eq!(
             judged,
-            [(Relevance(0.8), Some(0.95)), (Relevance(0.9), Some(0.2))]
+            [
+                (Relevance::new(0.8).unwrap(), Some(0.95)),
+                (Relevance::new(0.9).unwrap(), Some(0.2))
+            ]
         );
     }
 
@@ -525,7 +527,7 @@ mod tests {
                 text: "x".repeat(MAX_STATE_CHARS * 2),
                 ..chunk("long", "Roles", "")
             },
-            score: Relevance(1.0),
+            score: Relevance::new(1.0).unwrap(),
             context_for: None,
         };
         let state = judged_text(&long.chunk);

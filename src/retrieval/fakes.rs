@@ -28,16 +28,14 @@ impl Retriever for KeywordRetriever {
                 let shared = query.intersection(&words(&chunk.text)).count();
                 Retrieved {
                     chunk: chunk.clone(),
-                    score: Relevance(shared as f32 / query.len().max(1) as f32),
+                    score: Relevance::new(shared as f32 / query.len().max(1) as f32)
+                        .expect("a share of at least one query word is finite"),
                     context_for: None,
                 }
             })
             .collect();
         hits.sort_by(|a, b| {
-            b.score
-                .0
-                .total_cmp(&a.score.0)
-                .then_with(|| a.chunk.id.cmp(&b.chunk.id))
+            Relevance::descending(&a.score, &b.score).then_with(|| a.chunk.id.cmp(&b.chunk.id))
         });
         Ok(hits)
     }
@@ -65,7 +63,7 @@ impl Retriever for LeakyRetriever {
             .iter()
             .map(|chunk| Retrieved {
                 chunk: chunk.clone(),
-                score: Relevance(1.0),
+                score: Relevance::new(1.0).expect("1 is finite"),
                 context_for: None,
             })
             .collect())

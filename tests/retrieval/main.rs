@@ -15,7 +15,7 @@ use recall::{
     ingest::markdown,
     llm::{Embedder, ModelRef, fakes::HashEmbedder},
     retrieval::{
-        Relevance, Retrieved, Retriever,
+        Retrieved, Retriever,
         hybrid::{EmbeddingModelMismatch, ExpansionConfig, HybridConfig, HybridRetriever},
     },
     store::chunks::{ChunkStore, PgChunkStore},
@@ -255,7 +255,10 @@ async fn fusion_orders_by_reciprocal_rank(pool: PgPool) {
     assert_eq!(results.len(), expected.len());
     for (result, (id, score)) in results.iter().zip(&expected) {
         assert_eq!(result.chunk.id, *id);
-        assert!((f64::from(result.score.0) - score).abs() < 1e-6, "{id:?}");
+        assert!(
+            (f64::from(result.score.get()) - score).abs() < 1e-6,
+            "{id:?}"
+        );
     }
 }
 
@@ -349,7 +352,7 @@ async fn hits_expand_to_neighbouring_sections(pool: PgPool) {
     for neighbour in [&sections[1], &sections[3]] {
         let at = position(&results, neighbour).unwrap();
         assert_eq!(at, hit + if neighbour == &sections[1] { 1 } else { 2 });
-        assert_eq!(results[at].score, Relevance(hit_score.0.next_down()));
+        assert_eq!(results[at].score, hit_score.next_down());
     }
     for far in [&sections[0], &sections[4]] {
         assert_eq!(position(&results, far), None);

@@ -160,14 +160,13 @@ pub async fn a_user_id_never_reads_as_a_role(
     Ok(())
 }
 
-/// The policy ref names an adapter and a version, and does not change between calls.
+/// The policy ref does not change between calls.
 ///
 /// # Errors
 ///
 /// Never; the signature matches the other checks.
 pub async fn the_policy_ref_is_stable(authorizer: &dyn Authorizer) -> eros::Result<()> {
     let policy = authorizer.policy();
-    assert!(!policy.id.is_empty() && !policy.version.is_empty());
     authorizer.access(&stranger()).await?;
     assert_eq!(authorizer.policy(), policy);
     Ok(())

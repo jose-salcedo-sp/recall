@@ -13,7 +13,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use async_trait::async_trait;
 use serde::Serialize;
 
-use crate::domain::{NotAProbability, Probability};
+use crate::domain::{AtLeastOne, NotAProbability, Probability};
 
 use super::{
     ModelRef,
@@ -41,8 +41,8 @@ pub enum JudgeQuestion {
     OneOf {
         /// The question.
         instructions: String,
-        /// At least one option, in the order they are offered; option order can change an answer.
-        options: Vec<JudgeOption>,
+        /// In the order they are offered; option order can change an answer.
+        options: AtLeastOne<JudgeOption>,
     },
 }
 
@@ -200,6 +200,7 @@ fn decision(question: &JudgeQuestion) -> Decision {
             instructions: instructions.clone(),
             criteria: Options(
                 options
+                    .as_slice()
                     .iter()
                     .map(|option| (option.name.to_owned(), Some(option.description.to_owned())))
                     .collect(),
@@ -217,6 +218,7 @@ fn judgement(question: &JudgeQuestion, answer: Option<&DecisionAnswer>) -> RawJu
             JudgeQuestion::OneOf { options, .. },
             Some(DecisionAnswer::Choice { probabilities, .. }),
         ) => options
+            .as_slice()
             .iter()
             .map(|option| probabilities.get(option.name).copied())
             .collect::<Option<Vec<_>>>()
@@ -322,7 +324,7 @@ mod tests {
     fn a_choice_missing_an_option_reads_as_missing() {
         let question = JudgeQuestion::OneOf {
             instructions: "?".into(),
-            options: vec![
+            options: AtLeastOne::try_from(vec![
                 JudgeOption {
                     name: "a",
                     description: "A",
@@ -331,7 +333,8 @@ mod tests {
                     name: "b",
                     description: "B",
                 },
-            ],
+            ])
+            .unwrap(),
         };
         let answer = DecisionAnswer::Choice {
             choice: "a".into(),

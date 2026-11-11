@@ -619,6 +619,14 @@ macro_rules! at_least {
             }
         }
 
+        impl<T: Clone> std::ops::Deref for $name<T> {
+            type Target = [T];
+
+            fn deref(&self) -> &[T] {
+                &self.0
+            }
+        }
+
         impl<T: Clone> From<$name<T>> for Vec<T> {
             fn from(items: $name<T>) -> Vec<T> {
                 items.0

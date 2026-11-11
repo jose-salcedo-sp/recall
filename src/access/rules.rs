@@ -265,10 +265,8 @@ impl RulePolicy {
 #[async_trait]
 impl Authorizer for RulePolicy {
     fn policy(&self) -> PolicyRef {
-        PolicyRef {
-            id: "rules".into(),
-            version: self.version.clone(),
-        }
+        PolicyRef::new("rules", self.version.clone())
+            .expect("the version is a hex digest, never empty")
     }
 
     async fn access(&self, principal: &Principal) -> eros::Result<Access> {
@@ -530,8 +528,8 @@ mod tests {
     fn the_version_changes_with_the_config() {
         let a = policy(POLICY).policy();
         let b = policy(r#"{ "roles": {} }"#).policy();
-        assert_eq!(a.id, "rules");
-        assert_ne!(a.version, b.version);
+        assert_eq!(a.id(), "rules");
+        assert_ne!(a.version(), b.version());
         assert_eq!(a, policy(POLICY).policy());
     }
 

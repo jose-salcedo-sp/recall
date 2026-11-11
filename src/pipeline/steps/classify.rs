@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-    domain::{CategoryKind, Probability, Question},
+    domain::{AtLeastOne, CategoryKind, Probability, Question},
     llm::judge::{Judge, JudgeOption, JudgeQuestion, JudgeRequest},
     pipeline::{
         Ask, Asked, DeclineReason, Scored, Step, StepError, Unclassified,
@@ -94,7 +94,13 @@ fn request(question: &Question) -> JudgeRequest {
         text: question.as_str().to_owned(),
         questions: vec![JudgeQuestion::OneOf {
             instructions: "What kind of answer does this question ask for?".to_owned(),
-            options: OPTIONS.iter().map(|(_, option)| *option).collect(),
+            options: AtLeastOne::try_from(
+                OPTIONS
+                    .iter()
+                    .map(|(_, option)| *option)
+                    .collect::<Vec<_>>(),
+            )
+            .expect("OPTIONS lists every category"),
         }],
     }
 }

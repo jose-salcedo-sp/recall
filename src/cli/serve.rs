@@ -1,6 +1,6 @@
 //! `recall serve`: the OpenAI-compatible API over Postgres and the configured models, until SIGINT or SIGTERM.
 
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use eros::Context;
 
@@ -20,7 +20,7 @@ pub struct Args {
     pub db: DbArgs,
     /// Socket address to listen on.
     #[arg(long, env = "RECALL_BIND", default_value = "0.0.0.0:8080")]
-    pub bind: String,
+    pub bind: SocketAddr,
     /// Per-user bearer keys: `key:user_id` pairs, comma-separated.
     #[arg(long, env = "RECALL_API_KEYS", hide_env_values = true)]
     pub api_keys: ApiKeys,
@@ -46,7 +46,7 @@ pub async fn run(args: Args) -> eros::Result<()> {
         keys: Arc::new(args.api_keys),
         clock,
     };
-    let listener = tokio::net::TcpListener::bind(&args.bind)
+    let listener = tokio::net::TcpListener::bind(args.bind)
         .await
         .with_context(|| format!("binding {}", args.bind))?;
     tracing::info!(addr = %listener.local_addr()?, "recall serve listening");

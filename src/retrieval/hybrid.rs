@@ -568,7 +568,8 @@ fn expand(
         let hit = chunks
             .get(id)
             .ok_or_else(|| error!("hit {} has no current row", id.0))?;
-        let score = *fused as f32;
+        let score =
+            Relevance::new(*fused as f32).expect("a fused score is a finite sum of reciprocals");
         result.add(hit, score, None);
         let Some(page) = pages.get(&hit.document_id) else {
             continue;
@@ -592,7 +593,7 @@ fn expand(
         }
     }
     let mut out = result.out;
-    out.sort_by(|a, b| b.score.0.total_cmp(&a.score.0));
+    out.sort_by(|a, b| Relevance::descending(&a.score, &b.score));
     Ok(out)
 }
 
@@ -605,11 +606,13 @@ struct Expansion {
 
 impl Expansion {
     /// A chunk that is a match anywhere stays a match, even if it was first added as another match's context.
-    fn add(&mut self, chunk: &Chunk, score: f32, context_for: Option<&ChunkId>) {
+    fn add(&mut self, chunk: &Chunk, score: Relevance, context_for: Option<&ChunkId>) {
         match self.position.get(&chunk.id) {
             Some(&i) => {
                 let existing = &mut self.out[i];
-                existing.score = Relevance(existing.score.0.max(score));
+                if score > existing.score {
+                    existing.score = score;
+                }
                 if context_for.is_none() {
                     existing.context_for = None;
                 }
@@ -622,7 +625,7 @@ impl Expansion {
                     .or_default() += 1;
                 self.out.push(Retrieved {
                     chunk: chunk.clone(),
-                    score: Relevance(score),
+                    score,
                     context_for: context_for.cloned(),
                 });
             }

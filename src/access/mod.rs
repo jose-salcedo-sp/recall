@@ -501,14 +501,64 @@ pub struct AccessDecision {
     pub decision: Decision,
 }
 
-/// Which policy decided, recorded in every run's `authorize` entry. Two refs are the same policy only if both fields
-/// match.
+/// Which policy decided, recorded in every run's `authorize` entry. Two refs are the same policy only if both the
+/// id and the version match; neither is empty.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "RawPolicyRef")]
 pub struct PolicyRef {
-    /// The adapter, e.g. `rules`.
+    id: String,
+    version: String,
+}
+
+#[derive(Deserialize)]
+struct RawPolicyRef {
+    id: String,
+    version: String,
+}
+
+/// A [`PolicyRef`] with an empty id or version.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error("a policy ref needs a non-empty id and version, got {id:?} and {version:?}")]
+pub struct EmptyPolicyRef {
+    /// The id given.
     pub id: String,
-    /// Changes whenever the policy's decisions can change, e.g. a hash of its config.
+    /// The version given.
     pub version: String,
+}
+
+impl PolicyRef {
+    /// `id` names the adapter, e.g. `rules`; `version` changes whenever the policy's decisions can change, e.g. a
+    /// hash of its config.
+    ///
+    /// # Errors
+    ///
+    /// [`EmptyPolicyRef`] when either is empty.
+    pub fn new(id: impl Into<String>, version: impl Into<String>) -> Result<Self, EmptyPolicyRef> {
+        let (id, version) = (id.into(), version.into());
+        if id.is_empty() || version.is_empty() {
+            Err(EmptyPolicyRef { id, version })
+        } else {
+            Ok(Self { id, version })
+        }
+    }
+
+    /// The adapter.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The policy's version.
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+}
+
+impl TryFrom<RawPolicyRef> for PolicyRef {
+    type Error = EmptyPolicyRef;
+
+    fn try_from(raw: RawPolicyRef) -> Result<Self, EmptyPolicyRef> {
+        Self::new(raw.id, raw.version)
+    }
 }
 
 /// Decides what a principal may read. Injected at assembly; every run asks it once, before retrieval.

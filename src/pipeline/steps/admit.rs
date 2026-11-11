@@ -285,7 +285,7 @@ mod tests {
     fn hit(locator: &str, text: &str) -> Retrieved {
         Retrieved {
             chunk: chunk(locator, "Roles", text),
-            score: Relevance(0.5),
+            score: Relevance::new(0.5).unwrap(),
             context_for: None,
         }
     }

@@ -186,12 +186,12 @@ mod tests {
         let hits = vec![
             Retrieved {
                 chunk: matched.clone(),
-                score: Relevance(0.5),
+                score: Relevance::new(0.5).unwrap(),
                 context_for: None,
             },
             Retrieved {
                 chunk: next,
-                score: Relevance(0.4),
+                score: Relevance::new(0.4).unwrap(),
                 context_for: Some(matched.id.clone()),
             },
         ];
@@ -224,7 +224,7 @@ mod tests {
             Ok(Retrieval {
                 hits: vec![Retrieved {
                     chunk: chunk("hit", "page", "the earlier screens"),
-                    score: Relevance(0.5),
+                    score: Relevance::new(0.5).unwrap(),
                     context_for: None,
                 }],
                 expansion: self.0.expand(query, 8),

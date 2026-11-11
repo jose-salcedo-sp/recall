@@ -53,7 +53,7 @@ fn ranked(ids: &[&str]) -> Vec<RankedChunk> {
         .enumerate()
         .map(|(rank, id)| RankedChunk {
             chunk: chunk(id),
-            score: Relevance(1.0 - rank as f32 / 100.0),
+            score: Relevance::new(1.0 - rank as f32 / 100.0).unwrap(),
             probability: None,
             context_for: None,
         })
