@@ -1414,7 +1414,7 @@ fn a_results_file_written_before_modes_were_named_by_role_still_reads() {
 
     assert_eq!(
         setup.config.rerank.judge(),
-        RerankJudge::Judged(RerankCandidates { candidates: 25 })
+        RerankJudge::Judged(RerankCandidates::new(25))
     );
     assert!(matches!(setup.config.admit.judge, AdmitJudge::Judged(_)));
     assert_eq!(
@@ -1434,6 +1434,6 @@ fn a_results_file_written_before_modes_were_named_by_role_still_reads() {
     .unwrap();
     assert_eq!(
         flat.config.rerank.judge(),
-        RerankJudge::Judged(RerankCandidates { candidates: 30 })
+        RerankJudge::Judged(RerankCandidates::new(30))
     );
 }

@@ -7,7 +7,7 @@ use std::{
 use futures::{StreamExt, TryStreamExt, stream};
 
 use crate::{
-    config::RerankConfig,
+    config::{RerankConfig, RerankJudge},
     domain::{AtLeastOne, ChunkId, Probability, Question},
     llm::{
         ModelRef,
@@ -38,6 +38,8 @@ const RRF_K: f32 = 60.0;
 /// `evidence_rank_penalty` places lower, so settled answers lead unless the evidence is clearly better.
 pub struct Rerank<TCategory> {
     top_k: usize,
+    /// At least `top_k`: the config's judge candidates, or `top_k` when the config names no judge.
+    candidates: usize,
     evidence_rank_penalty: usize,
     by: RerankBy,
     category: PhantomData<TCategory>,
@@ -47,12 +49,10 @@ pub struct Rerank<TCategory> {
 pub enum RerankBy {
     /// Retrieval rank alone. The step is unscored, so it has no threshold.
     Retrieval,
-    /// The judge asks about the best `candidates` matches by fused score.
+    /// The judge asks about the best matches by fused score: as many as the config's `rerank.judge` candidates.
     Judge {
         /// The judge.
         judge: Arc<dyn Judge>,
-        /// Matches judged, at least `top_k` when it comes from a [`RerankConfig`].
-        candidates: usize,
         /// Applies to the best kept match's probability.
         threshold: Option<Probability>,
     },
@@ -61,8 +61,13 @@ pub enum RerankBy {
 impl<TCategory> Rerank<TCategory> {
     /// `config`'s `top_k` and evidence penalty, ordered `by` what the pipeline's assembly resolved its judge to.
     pub fn new(config: &RerankConfig, by: RerankBy) -> Self {
+        let candidates = match config.judge() {
+            RerankJudge::Judged(candidates) => candidates.get(),
+            RerankJudge::None => config.top_k(),
+        };
         Self {
             top_k: config.top_k(),
+            candidates,
             evidence_rank_penalty: config.evidence_rank_penalty(),
             by,
             category: PhantomData,
@@ -167,11 +172,8 @@ impl<TCategory> Rerank<TCategory> {
         let mut raw = None;
         let mut model = None;
         let mut judged: HashMap<ChunkId, Probability> = HashMap::new();
-        if let RerankBy::Judge {
-            judge, candidates, ..
-        } = &self.by
-        {
-            matches.truncate(*candidates);
+        if let RerankBy::Judge { judge, .. } = &self.by {
+            matches.truncate(self.candidates);
             let judged_by = model.insert(judge.model()).clone();
             let requests: Vec<_> = matches
                 .iter()
@@ -288,12 +290,20 @@ mod tests {
         Rerank::new(&keeping(top_k), RerankBy::Retrieval)
     }
 
+    fn judging(top_k: usize, candidates: usize) -> RerankConfig {
+        RerankConfig::new(
+            top_k,
+            RerankJudge::Judged(crate::config::RerankCandidates::new(candidates)),
+            RerankConfig::default().evidence_rank_penalty(),
+        )
+        .unwrap()
+    }
+
     fn judged(top_k: usize, candidates: usize, judge: Arc<dyn Judge>) -> Rerank<Open> {
         Rerank::new(
-            &keeping(top_k),
+            &judging(top_k, candidates),
             RerankBy::Judge {
                 judge,
-                candidates,
                 threshold: None,
             },
         )
@@ -491,10 +501,9 @@ mod tests {
         let judge = by_text();
         let threshold = Some(Probability::new(0.5).unwrap());
         let step = Rerank::<Open>::new(
-            &keeping(2),
+            &judging(2, 3),
             RerankBy::Judge {
                 judge: Arc::<FnJudge>::clone(&judge),
-                candidates: 3,
                 threshold,
             },
         );

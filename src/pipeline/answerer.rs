@@ -15,7 +15,7 @@ use crate::{
 };
 
 use super::{
-    Boolean, Category, Choice, Halt, Halted, Open, Pipeline, Ranking, Run, Unclassified,
+    Boolean, Category, Halt, Halted, Open, Pipeline, Run, Unclassified,
     assembly::{self, Assembled, Path, Plan, Ports, Unassembled},
     report::{Answer, Answerer, Citation, Outcome, RunReport, Verdict},
     steps::{Admit, Candidates, Decisive, Reranked, Verified},
@@ -24,14 +24,11 @@ use super::{
 
 const EXCERPT_CHARS: usize = 200;
 
-/// The one place where runtime data becomes a type. See `docs/design.md` section 5.4.
+/// The one place where runtime data becomes a type. See `docs/design.md` section 5.4. `choice` and `ranking`
+/// questions take the `Open` arm until their `Answer` steps exist; each gets its arm then.
 pub enum Classified<'a> {
     /// Continues through the [`Decisive<Boolean>`] it carries, which exists only when a judge classifies.
     Boolean(Run<Boolean, Reranked>, &'a Decisive<Boolean>),
-    /// Not produced until `Answer<Choice>` exists; `choice` questions take the `Open` arm.
-    Choice(Run<Choice, Reranked>),
-    /// Not produced until `Answer<Ranking>` exists; `ranking` questions take the `Open` arm.
-    Ranking(Run<Ranking, Reranked>),
     /// Continues through [`OpenEnded`](super::steps::OpenEnded).
     Open(Run<Open, Reranked>),
 }
@@ -197,8 +194,6 @@ impl Answerer for PipelineAnswerer {
                     Err(halted) => halted_report(halted, &sources),
                 }
             }
-            Classified::Choice(run) => halted_report(answer_not_implemented(run), &[]),
-            Classified::Ranking(run) => halted_report(answer_not_implemented(run), &[]),
             Classified::Open(run) => {
                 let sources = run.state().sources().to_vec();
                 match self.steps.open.pipeline.drive(run).await {
@@ -224,20 +219,6 @@ async fn reranked<TCategory: Category, TPipeline>(
     match &path.admit {
         Some(admit) => run.then(admit).await,
         None => Ok(run),
-    }
-}
-
-fn answer_not_implemented<TCategory: Category>(run: Run<TCategory, Reranked>) -> Halted {
-    let (id, question, _, trace) = run.into_parts();
-    Halted {
-        id,
-        question,
-        trace,
-        category: TCategory::KIND,
-        at: "answer",
-        halt: Halt::Failed {
-            error: "Answer is not implemented until milestone 6".into(),
-        },
     }
 }
 
