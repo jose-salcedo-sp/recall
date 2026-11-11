@@ -16,8 +16,8 @@ use serde_json::json;
 fn citation() -> Citation {
     Citation {
         chunk: ChunkRef {
-            id: ChunkId("markdown:roles.md#roles".into()),
-            version: ChunkVersion("v1".into()),
+            id: ChunkId::try_from(String::from("markdown:roles.md#roles")).unwrap(),
+            version: ChunkVersion::try_from(String::from("v1")).unwrap(),
         },
         title: "Roles".into(),
         url: "https://wiki.example.test/1".into(),

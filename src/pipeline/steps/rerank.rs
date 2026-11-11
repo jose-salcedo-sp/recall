@@ -122,7 +122,7 @@ async fn relevance(
     judgements.yes(0).map_err(|error| {
         StepError::decline(DeclineReason::InvalidModelOutput(format!(
             "{}: {error}",
-            chunk.0
+            chunk.as_str()
         )))
     })
 }
@@ -191,7 +191,7 @@ impl<TCategory> Rerank<TCategory> {
             let by_chunk: BTreeMap<&str, Probability> = matches
                 .iter()
                 .zip(&probabilities)
-                .map(|(hit, p)| (hit.chunk.id.0.as_str(), *p))
+                .map(|(hit, p)| (hit.chunk.id.as_str(), *p))
                 .collect();
             raw = Some(
                 serde_json::to_string(&by_chunk)
@@ -382,11 +382,11 @@ mod tests {
             .record
             .chunks
             .iter()
-            .map(|c| c.chunk.id.0.as_str())
+            .map(|c| c.chunk.id.as_str())
             .collect();
         assert_eq!(
             recorded[..2],
-            [first.chunk.id.0.as_str(), second.chunk.id.0.as_str()]
+            [first.chunk.id.as_str(), second.chunk.id.as_str()]
         );
         assert_eq!(recorded.len(), 4);
     }

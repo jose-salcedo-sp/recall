@@ -534,8 +534,8 @@ async fn run_with_a_denial(runs: &MemoryRunStore) -> RunId {
     let mut json = serde_json::to_value(&report.trace).unwrap();
     let denied = AccessDecision {
         chunk: ChunkRef {
-            id: ChunkId("markdown:hr/pay.md#bands".into()),
-            version: ChunkVersion("v1".into()),
+            id: ChunkId::try_from(String::from("markdown:hr/pay.md#bands")).unwrap(),
+            version: ChunkVersion::try_from(String::from("v1")).unwrap(),
         },
         decision: Decision::Denied {
             reason: DenyReason::NoGrant,

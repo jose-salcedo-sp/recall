@@ -10,14 +10,14 @@ use crate::{
 };
 
 pub fn chunk_id(n: usize) -> ChunkId {
-    ChunkId(format!("markdown:doc.md#s{n}"))
+    ChunkId::try_from(format!("markdown:doc.md#s{n}")).unwrap()
 }
 
 pub fn citation(n: usize) -> Citation {
     Citation {
         chunk: ChunkRef {
             id: chunk_id(n),
-            version: ChunkVersion(format!("v{n}")),
+            version: ChunkVersion::try_from(format!("v{n}")).unwrap(),
         },
         title: format!("Page {n}"),
         url: format!("https://wiki.example.test/{n}"),

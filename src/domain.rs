@@ -330,36 +330,161 @@ impl fmt::Display for SourceName {
     }
 }
 
-/// One document as its source identifies it. Format: `{source}:{external_id}`.
+/// One document as its source identifies it. Format: `{source}:{external_id}`, where `source` is a valid
+/// [`SourceName`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct DocumentId(pub String);
+#[serde(try_from = "String", into = "String")]
+pub struct DocumentId(String);
+
+/// Text that is not a [`DocumentId`], [`ChunkId`] or [`ChunkVersion`]: a stored row, a golden file or a model's
+/// citation.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error("invalid {kind} {text:?}: expected {format}")]
+pub struct InvalidId {
+    /// Which id was parsed.
+    pub kind: &'static str,
+    /// The format it must have.
+    pub format: &'static str,
+    /// The rejected text.
+    pub text: String,
+}
 
 impl DocumentId {
     /// `{source}:{external_id}`.
     pub fn new(source: &SourceName, external_id: &str) -> Self {
         Self(format!("{source}:{external_id}"))
     }
+
+    /// The id, as stored.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Whether `text` starts with a valid source name and `:`.
+fn has_source_prefix(text: &str) -> bool {
+    text.split_once(':')
+        .is_some_and(|(source, _)| is_source_name(source))
+}
+
+impl TryFrom<String> for DocumentId {
+    type Error = InvalidId;
+
+    fn try_from(text: String) -> Result<Self, InvalidId> {
+        if has_source_prefix(&text) {
+            Ok(Self(text))
+        } else {
+            Err(InvalidId {
+                kind: "document id",
+                format: "{source}:{external_id}",
+                text,
+            })
+        }
+    }
+}
+
+impl From<DocumentId> for String {
+    fn from(id: DocumentId) -> String {
+        id.0
+    }
+}
+
+impl fmt::Display for DocumentId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// Stable identity of a chunk across re-ingestion. Format: `{document_id}#{locator}`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ChunkId(pub String);
+#[serde(try_from = "String", into = "String")]
+pub struct ChunkId(String);
 
 impl ChunkId {
     /// `{document_id}#{locator}`; `locator` is [`ChunkDraft::locator`].
     pub fn new(document: &DocumentId, locator: &str) -> Self {
         Self(format!("{}#{locator}", document.0))
     }
+
+    /// The id, as stored and cited.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
-/// Content address of one immutable chunk version: hex SHA-256 over its content, labels, and embedding model.
+impl TryFrom<String> for ChunkId {
+    type Error = InvalidId;
+
+    fn try_from(text: String) -> Result<Self, InvalidId> {
+        let valid = text
+            .split_once(':')
+            .is_some_and(|(source, rest)| is_source_name(source) && rest.contains('#'));
+        if valid {
+            Ok(Self(text))
+        } else {
+            Err(InvalidId {
+                kind: "chunk id",
+                format: "{source}:{external_id}#{locator}",
+                text,
+            })
+        }
+    }
+}
+
+impl TryFrom<&str> for ChunkId {
+    type Error = InvalidId;
+
+    fn try_from(text: &str) -> Result<Self, InvalidId> {
+        Self::try_from(text.to_owned())
+    }
+}
+
+impl From<ChunkId> for String {
+    fn from(id: ChunkId) -> String {
+        id.0
+    }
+}
+
+impl fmt::Display for ChunkId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Content address of one immutable chunk version: hex SHA-256 over its content, labels, and embedding model, as
+/// [`ChunkVersion::compute`] makes it. Read back from the store as written; never empty.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ChunkVersion(pub String);
+#[serde(try_from = "String", into = "String")]
+pub struct ChunkVersion(String);
+
+impl TryFrom<String> for ChunkVersion {
+    type Error = InvalidId;
+
+    fn try_from(text: String) -> Result<Self, InvalidId> {
+        if text.is_empty() {
+            Err(InvalidId {
+                kind: "chunk version",
+                format: "a non-empty content address",
+                text,
+            })
+        } else {
+            Ok(Self(text))
+        }
+    }
+}
+
+impl From<ChunkVersion> for String {
+    fn from(version: ChunkVersion) -> String {
+        version.0
+    }
+}
 
 impl ChunkVersion {
+    /// The content address, as stored.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
     /// Hashes everything that affects what retrieval returns for the chunk, so any change to the text, its labels,
     /// or the embedding model yields a new version.
     pub fn compute(document: &Document, draft: &ChunkDraft, embedding_model: &ModelRef) -> Self {
@@ -759,7 +884,7 @@ mod tests {
         assert!(serde_json::from_str::<SourceName>("\"wiki:x\"").is_err());
         assert_eq!(
             DocumentId::new(&name, "a/b.md"),
-            DocumentId("wiki:a/b.md".into())
+            DocumentId::try_from(String::from("wiki:a/b.md")).unwrap()
         );
     }
 
@@ -796,6 +921,25 @@ mod tests {
             connector
                 .tighten(&labels(&["role:finance"], Sensitivity::Public))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn ids_parse_only_in_their_format() {
+        assert!(DocumentId::try_from(String::from("markdown:hr/pay.md")).is_ok());
+        assert!(ChunkId::try_from("markdown:hr/pay.md#bands").is_ok());
+        for bad in ["", "hr/pay.md", "Markdown:hr.md", ":x"] {
+            assert!(DocumentId::try_from(String::from(bad)).is_err(), "{bad}");
+        }
+        for bad in ["", "x", "markdown:hr.md", "Wiki:a#b", "#a"] {
+            assert!(ChunkId::try_from(bad).is_err(), "{bad}");
+        }
+        assert!(ChunkVersion::try_from(String::new()).is_err());
+        assert!(serde_json::from_str::<ChunkId>("\"x\"").is_err());
+        let id = ChunkId::new(&DocumentId::new(&SourceName::from_static("wiki"), "a"), "b");
+        assert_eq!(
+            serde_json::from_value::<ChunkId>(serde_json::to_value(&id).unwrap()).unwrap(),
+            id
         );
     }
 

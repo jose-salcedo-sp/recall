@@ -210,12 +210,12 @@ async fn ingest_source(
         eros::ensure!(
             document.source == *name,
             "{name} source returned document {}",
-            document.id().0
+            document.id().as_str()
         );
         let labels = labeler
             .label(&document)
             .await
-            .with_context(|| format!("labelling document {}", document.id().0))?;
+            .with_context(|| format!("labelling document {}", document.id().as_str()))?;
         let document = Document { labels, ..document };
         report.stored += store.store(&document, embedder).await?;
         report.documents += 1;

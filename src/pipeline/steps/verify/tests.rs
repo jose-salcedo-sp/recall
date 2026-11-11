@@ -20,7 +20,7 @@ fn hit(locator: &str, text: &str) -> Retrieved {
 }
 
 fn id(locator: &str) -> String {
-    hit(locator, "").chunk.id.0
+    hit(locator, "").chunk.id.as_str().to_owned()
 }
 
 /// Explains with a scripted reply of `claims`, each `(text, cited locators)`, over `sources`.
@@ -129,7 +129,10 @@ async fn an_unknown_citation_still_declines_before_any_judge_call() {
         error.kind,
         StepErrorKind::Decline(DeclineReason::Unverified(_))
     ));
-    assert_eq!(record(error).unknown_citations, [ChunkId(id("b"))]);
+    assert_eq!(
+        record(error).unknown_citations,
+        [ChunkId::try_from(id("b")).unwrap()]
+    );
     assert!(judge.requests().is_empty());
 }
 
@@ -196,7 +199,7 @@ async fn a_supported_claim_is_published_with_the_judge_recorded() {
     assert_eq!(scored.record.support, SupportMode::Judged);
     assert!(matches!(
         verdicts(&scored.record)[..],
-        [ClaimVerdict::Supported { by }] if by.chunk.0 == id("b") && by.relation == RelationKind::Supports
+        [ClaimVerdict::Supported { by }] if by.chunk.as_str() == id("b") && by.relation == RelationKind::Supports
     ));
     assert_eq!(judge.requests().len(), 2);
     assert_eq!(scored.model, Some(ModelRef::new("fake-fn-judge", "1")));

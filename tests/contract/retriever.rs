@@ -22,7 +22,7 @@ fn chunk(name: &str, text: &str) -> Chunk {
     let document_id = DocumentId::new(&markdown::NAME, &format!("{name}.md"));
     Chunk {
         id: ChunkId::new(&document_id, name),
-        version: ChunkVersion("v1".into()),
+        version: ChunkVersion::try_from(String::from("v1")).unwrap(),
         document_id,
         source: markdown::NAME.clone(),
         title: format!("{name} notes"),
@@ -257,7 +257,7 @@ pub async fn only_chunks_the_scope_admits_come_back(
             assert!(
                 scope.admits(&hit.chunk.labels),
                 "{name}: {}",
-                hit.chunk.id.0
+                hit.chunk.id.as_str()
             );
         }
     }
@@ -276,7 +276,7 @@ pub async fn a_user_id_never_matches_a_role_entry(
         .retrieve(QUESTION, &clash)
         .await?
         .into_iter()
-        .map(|hit| hit.chunk.id.0)
+        .map(|hit| String::from(hit.chunk.id))
         .collect();
 
     assert!(found.contains("markdown:faq.md#open"), "{found:?}");
@@ -355,9 +355,9 @@ mod hybrid {
             "INSERT INTO documents (id, source, external_id, title, url, source_updated_at)
              VALUES ($1, $2, $3, $4, $5, now()) ON CONFLICT (id) DO NOTHING",
         )
-        .bind(&chunk.document_id.0)
+        .bind(chunk.document_id.as_str())
         .bind(chunk.source.as_str())
-        .bind(&chunk.document_id.0)
+        .bind(chunk.document_id.as_str())
         .bind(&chunk.title)
         .bind(&chunk.url)
         .execute(pool)
@@ -374,9 +374,9 @@ mod hybrid {
                                  sensitivity, embedding, embedding_model, embedding_model_version)
              VALUES ($1, $2, $3, $13, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
         )
-        .bind(&chunk.id.0)
-        .bind(&chunk.version.0)
-        .bind(&chunk.document_id.0)
+        .bind(chunk.id.as_str())
+        .bind(chunk.version.as_str())
+        .bind(chunk.document_id.as_str())
         .bind(&chunk.heading)
         .bind(&chunk.url)
         .bind(&chunk.text)

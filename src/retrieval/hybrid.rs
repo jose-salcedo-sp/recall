@@ -30,8 +30,8 @@ use sqlx::{PgPool, Postgres, Transaction};
 use crate::{
     access::{Acl, ChunkGrant, ChunkScope},
     domain::{
-        Chunk, ChunkId, ChunkRef, ChunkVersion, DocumentId, Labels, Sensitivity, SourceName,
-        Standing,
+        Chunk, ChunkId, ChunkRef, ChunkVersion, DocumentId, InvalidId, Labels, Sensitivity,
+        SourceName, Standing,
     },
     llm::{EmbedPurpose, Embedder, ModelRef},
 };
@@ -262,7 +262,7 @@ impl HybridRetriever {
         if config.documents.is_empty() || config.max_terms == 0 {
             return Ok(Glossary::default());
         }
-        let documents: Vec<&str> = config.documents.iter().map(|id| id.0.as_str()).collect();
+        let documents: Vec<&str> = config.documents.iter().map(DocumentId::as_str).collect();
         let query = concat!(
             "SELECT id, version, text FROM chunks c
              WHERE superseded_at IS NULL AND document_id = ANY($1) AND ",
@@ -276,13 +276,17 @@ impl HybridRetriever {
             .bind(&scope.sensitivities)
             .fetch_all(&self.pool)
             .await?;
-        Ok(Glossary::parse(rows.iter().map(|(id, version, text)| {
-            let source = ChunkRef {
-                id: ChunkId(id.clone()),
-                version: ChunkVersion(version.clone()),
-            };
-            (source, text.as_str())
-        })))
+        let sources = rows
+            .iter()
+            .map(|(id, version, text)| {
+                let source = ChunkRef {
+                    id: ChunkId::try_from(id.clone())?,
+                    version: ChunkVersion::try_from(version.clone())?,
+                };
+                Ok((source, text.as_str()))
+            })
+            .collect::<Result<Vec<_>, InvalidId>>()?;
+        Ok(Glossary::parse(sources))
     }
 
     /// Full-text candidates for the prose words of `prose` (the question with its glossary expansion) and the
@@ -365,7 +369,10 @@ impl HybridRetriever {
             .bind(&scope.sensitivities)
             .fetch_all(&mut **tx)
             .await?;
-        Ok(ids.into_iter().map(ChunkId).collect())
+        Ok(ids
+            .into_iter()
+            .map(ChunkId::try_from)
+            .collect::<Result<_, _>>()?)
     }
 
     #[eros::context("vector candidates")]
@@ -396,7 +403,10 @@ impl HybridRetriever {
             .bind(&scope.sensitivities)
             .fetch_all(&mut **tx)
             .await?;
-        Ok(ids.into_iter().map(ChunkId).collect())
+        Ok(ids
+            .into_iter()
+            .map(ChunkId::try_from)
+            .collect::<Result<_, _>>()?)
     }
 
     /// Current rows for `hits`, plus the adjacent current chunks (by ordinal) of each hit's document that the scope
@@ -485,7 +495,7 @@ impl Retriever for HybridRetriever {
         };
         let mut fused = reciprocal_rank_fusion(&[&full_text, &vector], self.config.rrf_k);
         fused.truncate(self.config.fused_limit);
-        let ids: Vec<String> = fused.iter().map(|(id, _)| id.0.clone()).collect();
+        let ids: Vec<String> = fused.iter().map(|(id, _)| id.as_str().to_owned()).collect();
         let rows = self.fetch_with_neighbours(&mut tx, &ids, &scope).await?;
         tx.commit().await?;
 
@@ -570,7 +580,7 @@ fn expand(
     for (id, fused) in hits {
         let hit = chunks
             .get(id)
-            .ok_or_else(|| error!("hit {} has no current row", id.0))?;
+            .ok_or_else(|| error!("hit {} has no current row", id.as_str()))?;
         let score =
             Relevance::new(*fused as f32).expect("a fused score is a finite sum of reciprocals");
         result.add(hit, score, None);
@@ -580,7 +590,7 @@ fn expand(
         let at = page
             .iter()
             .position(|(_, chunk)| chunk == id)
-            .ok_or_else(|| error!("hit {} missing from its page", id.0))?;
+            .ok_or_else(|| error!("hit {} missing from its page", id.as_str()))?;
         let neighbours = [at.checked_sub(1), Some(at + 1)]
             .into_iter()
             .flatten()
@@ -688,9 +698,9 @@ impl TryFrom<ChunkRow> for Chunk {
             .with_context(|| format!("chunk {}", row.id))?;
         let acl = Acl::try_from(row.acl).with_context(|| format!("chunk {}", row.id))?;
         Ok(Chunk {
-            id: ChunkId(row.id),
-            version: ChunkVersion(row.version),
-            document_id: DocumentId(row.document_id),
+            id: ChunkId::try_from(row.id)?,
+            version: ChunkVersion::try_from(row.version)?,
+            document_id: DocumentId::try_from(row.document_id)?,
             source,
             title: row.title,
             heading: row.heading,
@@ -707,7 +717,10 @@ mod tests {
     use super::*;
 
     fn ids(names: &[&str]) -> Vec<ChunkId> {
-        names.iter().map(|name| ChunkId(name.to_string())).collect()
+        names
+            .iter()
+            .map(|name| ChunkId::try_from(format!("markdown:{name}.md#{name}")).unwrap())
+            .collect()
     }
 
     #[test]
@@ -715,8 +728,14 @@ mod tests {
         let full_text = ids(&["x", "z"]);
         let vector = ids(&["y", "z", "f1", "f2", "x"]);
         let fused = reciprocal_rank_fusion(&[&full_text, &vector], 60.0);
-        let order: Vec<_> = fused.iter().map(|(id, _)| id.0.as_str()).collect();
-        assert_eq!(order, ["z", "x", "y", "f1", "f2"]);
+        let order: Vec<_> = fused.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            order,
+            ids(&["z", "x", "y", "f1", "f2"])
+                .iter()
+                .map(ChunkId::as_str)
+                .collect::<Vec<_>>()
+        );
         assert!((fused[0].1 - 2.0 / 62.0).abs() < 1e-12);
         assert!((fused[1].1 - (1.0 / 61.0 + 1.0 / 65.0)).abs() < 1e-12);
         assert!((fused[2].1 - 1.0 / 61.0).abs() < 1e-12);
@@ -727,8 +746,14 @@ mod tests {
         let full_text = ids(&["b", "c"]);
         let vector = ids(&["a", "d"]);
         let fused = reciprocal_rank_fusion(&[&full_text, &vector], 60.0);
-        let order: Vec<_> = fused.iter().map(|(id, _)| id.0.as_str()).collect();
-        assert_eq!(order, ["a", "b", "c", "d"]);
+        let order: Vec<_> = fused.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            order,
+            ids(&["a", "b", "c", "d"])
+                .iter()
+                .map(ChunkId::as_str)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

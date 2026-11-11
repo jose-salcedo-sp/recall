@@ -190,7 +190,7 @@ async fn uncited_claim_declines_with_the_reranked_sources() {
 
 #[tokio::test]
 async fn citation_outside_the_reranked_sources_declines() {
-    let forged = ChunkId("markdown:secrets.md#passwords".into());
+    let forged = ChunkId::try_from(String::from("markdown:secrets.md#passwords")).unwrap();
     let chat = Arc::new(ScriptedChat::replying([reply(&json!([
         { "text": "ROLE_USERS maps users to roles.", "chunk_ids": [role_users().id, forged] },
     ]))]));
@@ -328,7 +328,7 @@ async fn prompt_delimits_sources_as_data() {
     );
     assert!(request.user.contains(&format!(
         "<source chunk_id=\"{}\" title=\"Schema tables\" heading=\"role-users\" authoritative=\"false\">\n{}\n</source>",
-        role_users().id.0,
+        role_users().id.as_str(),
         role_users().text,
     )));
     assert!(request.user.contains(
@@ -495,7 +495,11 @@ async fn explain_may_cite_only_this_run_s_sources() {
     let TraceRecord::Rerank(rerank) = record(&report, "rerank") else {
         panic!("expected the rerank record");
     };
-    let sources: Vec<_> = rerank.chunks.iter().map(|c| json!(c.chunk.id.0)).collect();
+    let sources: Vec<_> = rerank
+        .chunks
+        .iter()
+        .map(|c| json!(c.chunk.id.as_str()))
+        .collect();
     assert_eq!(allowed, &json!(sources));
 }
 
@@ -833,7 +837,7 @@ fn principal(id: &str) -> Principal {
 fn cite_everything() -> String {
     let claims: Vec<_> = labelled_corpus()
         .iter()
-        .map(|chunk| json!({ "text": format!("{} says so.", chunk.id.0), "chunk_ids": [chunk.id] }))
+        .map(|chunk| json!({ "text": format!("{} says so.", chunk.id.as_str()), "chunk_ids": [chunk.id] }))
         .collect();
     reply(&json!(claims))
 }
@@ -852,7 +856,7 @@ fn exposed(report: &RunReport, chat: &ScriptedChat) -> Vec<ChunkId> {
                 || request
                     .json_schema
                     .as_ref()
-                    .is_some_and(|schema| schema.to_string().contains(&chunk.id.0))
+                    .is_some_and(|schema| schema.to_string().contains(chunk.id.as_str()))
         })
     });
     let citations = match &report.outcome {
@@ -895,7 +899,7 @@ async fn no_principal_sees_a_chunk_its_access_denies() {
                 assert!(
                     access.chunks().admits(&chunk.labels),
                     "{id} ({kind}) saw {}",
-                    exposed.0
+                    exposed.as_str()
                 );
             }
         }
@@ -1031,7 +1035,11 @@ async fn a_boolean_verdict_is_judged_only_on_readable_sources() {
 
     for request in judge.requests() {
         for denied in [secret(), ana_only(), hr_only()] {
-            assert!(!request.text.contains(&denied.text), "{}", denied.id.0);
+            assert!(
+                !request.text.contains(&denied.text),
+                "{}",
+                denied.id.as_str()
+            );
         }
     }
     assert!(judge.requests().len() > 1, "the judge answered the verdict");

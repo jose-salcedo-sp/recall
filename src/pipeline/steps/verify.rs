@@ -447,7 +447,7 @@ async fn support(
         let (chosen, probability) = judgements.one_of(0).map_err(|error| {
             StepError::decline(DeclineReason::InvalidModelOutput(format!(
                 "{}: {error}",
-                hit.chunk.id.0
+                hit.chunk.id.as_str()
             )))
         })?;
         let relation = Relation {

@@ -257,7 +257,7 @@ pub async fn labels_depend_only_on_the_document(
             &labeler.label(document).await?,
             first,
             "{}",
-            document.id().0
+            document.id().as_str()
         );
     }
     Ok(())

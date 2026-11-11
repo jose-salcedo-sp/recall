@@ -80,6 +80,6 @@ pub struct FailingLabeler;
 #[async_trait]
 impl Labeler for FailingLabeler {
     async fn label(&self, document: &Document) -> eros::Result<Labels> {
-        eros::bail!("labels for {} are unavailable", document.id().0)
+        eros::bail!("labels for {} are unavailable", document.id().as_str())
     }
 }

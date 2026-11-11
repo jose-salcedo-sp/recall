@@ -294,8 +294,8 @@ mod tests {
 
     fn source(name: &str) -> ChunkRef {
         ChunkRef {
-            id: ChunkId(format!("markdown:{name}")),
-            version: ChunkVersion("v1".into()),
+            id: ChunkId::try_from(format!("markdown:{name}#glossary")).unwrap(),
+            version: ChunkVersion::try_from(String::from("v1")).unwrap(),
         }
     }
 

@@ -691,5 +691,5 @@ async fn ingestion_into_memory_is_readable_by_a_retriever() {
         .await
         .unwrap();
 
-    assert_eq!(hits[0].chunk.id.0, "markdown:roles.md#roles");
+    assert_eq!(hits[0].chunk.id.as_str(), "markdown:roles.md#roles");
 }

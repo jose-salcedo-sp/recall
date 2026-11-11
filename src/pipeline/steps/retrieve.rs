@@ -235,8 +235,8 @@ mod tests {
     #[tokio::test]
     async fn the_record_lists_the_expansion() {
         let source = ChunkRef {
-            id: ChunkId("markdown:LEXICON.md#generations".into()),
-            version: ChunkVersion("v1".into()),
+            id: ChunkId::try_from(String::from("markdown:LEXICON.md#generations")).unwrap(),
+            version: ChunkVersion::try_from(String::from("v1")).unwrap(),
         };
         let glossary = Glossary::parse([(
             source.clone(),

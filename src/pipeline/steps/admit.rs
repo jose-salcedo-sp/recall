@@ -116,7 +116,7 @@ async fn screen(
     let invalid = |error| {
         StepError::decline(DeclineReason::InvalidModelOutput(format!(
             "{}: {error}",
-            hit.chunk.id.0
+            hit.chunk.id.as_str()
         )))
     };
     let yes = |index| judgements.yes(index).map_err(invalid);

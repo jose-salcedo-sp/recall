@@ -227,6 +227,9 @@ pub enum InvalidExplanation {
     /// A claim citing a blank chunk id.
     #[error("claim {0} cites a blank chunk id")]
     BlankChunkId(usize),
+    /// A claim citing text that is not a chunk id.
+    #[error("claim {0} cites text that is not a chunk id")]
+    MalformedChunkId(usize),
 }
 
 impl TryFrom<RawExplanation> for Explanation {
@@ -251,8 +254,10 @@ impl TryFrom<RawExplanation> for Explanation {
                     if id.is_empty() {
                         return Err(InvalidExplanation::BlankChunkId(i + 1));
                     }
-                    if !chunks.iter().any(|known| known.0 == id) {
-                        chunks.push(ChunkId(id.to_owned()));
+                    let id = ChunkId::try_from(id)
+                        .map_err(|_| InvalidExplanation::MalformedChunkId(i + 1))?;
+                    if !chunks.contains(&id) {
+                        chunks.push(id);
                     }
                 }
                 Ok(Claim {
@@ -357,7 +362,7 @@ fn prompt(question: &Question, sources: &[Retrieved]) -> String {
         let _ = write!(
             prompt,
             "<source chunk_id=\"{}\" title=\"{}\"",
-            escape(&chunk.id.0),
+            escape(chunk.id.as_str()),
             escape(&chunk.title)
         );
         if let Some(heading) = &chunk.heading {
@@ -392,11 +397,7 @@ fn escape(text: &str) -> String {
 /// `chunk_ids` may only name this run's sources, so the model cannot cite a chunk id it misremembered.
 /// Explaining a verdict adds the required `contradicts_verdict` flag.
 fn schema(sources: &Reranked, explaining: Explaining) -> serde_json::Value {
-    let ids: Vec<&str> = sources
-        .0
-        .iter()
-        .map(|hit| hit.chunk.id.0.as_str())
-        .collect();
+    let ids: Vec<&str> = sources.0.iter().map(|hit| hit.chunk.id.as_str()).collect();
     let mut schema = json!({
         "type": "object",
         "properties": {
@@ -442,12 +443,15 @@ mod tests {
     #[test]
     fn conversion_trims_and_dedupes_citations() {
         let explanation =
-            parse(r#"{"claims":[{"text":" A ","chunk_ids":["x"," x","y"]}]}"#).unwrap();
+            parse(r#"{"claims":[{"text":" A ","chunk_ids":["m:x#1"," m:x#1","m:y#1"]}]}"#).unwrap();
         assert_eq!(
             explanation.claims(),
             [Claim {
                 text: "A".into(),
-                chunks: vec![ChunkId("x".into()), ChunkId("y".into())],
+                chunks: vec![
+                    ChunkId::try_from("m:x#1").unwrap(),
+                    ChunkId::try_from("m:y#1").unwrap()
+                ],
             }]
         );
     }
@@ -460,6 +464,10 @@ mod tests {
         ));
         assert!(matches!(
             parse(r#"{"claims":[{"text":"A","chunk_ids":[""]}]}"#),
+            Err(DeclineReason::InvalidModelOutput(_))
+        ));
+        assert!(matches!(
+            parse(r#"{"claims":[{"text":"A","chunk_ids":["not a chunk id"]}]}"#),
             Err(DeclineReason::InvalidModelOutput(_))
         ));
     }
