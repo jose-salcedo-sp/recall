@@ -360,7 +360,7 @@ async fn every_outcome_is_persisted_for_the_caller() {
         assert_eq!(stored.user, UserId::new("ana").unwrap());
         assert_eq!(stored.report.question, Question::new("Is it?"));
         assert_eq!(stored.report.outcome, outcome);
-        assert_eq!(crate::store::runs::status(&stored.report.outcome), status);
+        assert_eq!(stored.report.outcome.status(), status);
     }
 }
 

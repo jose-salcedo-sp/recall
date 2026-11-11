@@ -138,7 +138,7 @@ struct RunView {
 impl From<StoredRun> for RunView {
     fn from(run: StoredRun) -> Self {
         Self {
-            status: crate::store::runs::status(&run.report.outcome),
+            status: run.report.outcome.status(),
             report: run.report,
             user: run.user,
             created_at: run.created_at,

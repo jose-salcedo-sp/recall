@@ -27,7 +27,8 @@ pub struct RunReport {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
-/// How a run ended; stored as `pipeline_runs.status` and `outcome`.
+/// How a run ended; stored as `pipeline_runs.outcome`, whose `status` tag the schema derives `pipeline_runs.status`
+/// from.
 pub enum Outcome {
     /// A verified answer.
     Answered(Answer),
@@ -51,6 +52,17 @@ pub enum Outcome {
         /// The error rendered with `{:#?}`.
         error: String,
     },
+}
+
+impl Outcome {
+    /// The `status` tag: `answered`, `declined` or `failed`.
+    pub fn status(&self) -> &'static str {
+        match self {
+            Self::Answered(_) => "answered",
+            Self::Declined { .. } => "declined",
+            Self::Failed { .. } => "failed",
+        }
+    }
 }
 
 /// Built only from a verified run, so every claim and option cites a chunk in `citations` or the prompt.

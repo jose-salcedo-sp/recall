@@ -63,8 +63,8 @@ async fn check_constraints_accept_every_enum_variant(pool: PgPool) -> sqlx::Resu
 
     let run = |category: &str| {
         sqlx::query(
-            "INSERT INTO pipeline_runs (id, user_id, question, category, status, outcome, trace)
-             VALUES ($1, 'jose', 'q', $2, 'failed', '{}', '{}')",
+            "INSERT INTO pipeline_runs (id, user_id, question, category, outcome, trace)
+             VALUES ($1, 'jose', 'q', $2, '{\"status\": \"failed\"}', '{}')",
         )
         .bind(Uuid::now_v7())
         .bind(category.to_owned())
@@ -190,7 +190,7 @@ async fn the_tagged_acl_migration_rewrites_stored_entries(pool: PgPool) -> sqlx:
                 ('markdown:1#b', 'v1', 'markdown:1', 1, 'u', 't', true, '{{}}', 'internal',
                  array_fill(0, ARRAY[{EMBEDDING_DIM}])::vector, 'fake', '1');
          INSERT INTO pipeline_runs (id, user_id, question, status, outcome, trace)
-         VALUES ('{}', 'hr', 'q', 'failed', '{{}}', '{}');",
+         VALUES ('{}', 'hr', 'q', 'failed', '{{\"status\": \"failed\"}}', '{}');",
         Uuid::now_v7(),
         trace
     );
@@ -260,5 +260,74 @@ async fn the_single_tenant_migration_drops_the_column(pool: PgPool) -> sqlx::Res
         !columns.iter().any(|column| column == "tenant"),
         "{columns:?}"
     );
+    Ok(())
+}
+
+/// `status` is derived from the outcome's tag, so the two cannot disagree; an unknown tag does not store.
+#[sqlx::test(migrator = "recall::store::MIGRATOR")]
+async fn the_status_column_is_the_outcome_tag(pool: PgPool) -> sqlx::Result<()> {
+    let insert = |outcome: serde_json::Value| {
+        sqlx::query(
+            "INSERT INTO pipeline_runs (id, user_id, question, outcome, trace) VALUES ($1, 'jose', 'q', $2, '[]')
+             RETURNING status",
+        )
+        .bind(Uuid::now_v7())
+        .bind(outcome)
+    };
+    for status in ["answered", "declined", "failed"] {
+        let stored: String = insert(serde_json::json!({ "status": status }))
+            .fetch_one(&pool)
+            .await
+            .map(|row| sqlx::Row::get(&row, "status"))?;
+        assert_eq!(stored, status);
+    }
+    assert!(
+        insert(serde_json::json!({ "status": "pending" }))
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    let written = sqlx::query(
+        "INSERT INTO pipeline_runs (id, user_id, question, status, outcome, trace)
+         VALUES ($1, 'jose', 'q', 'failed', '{\"status\": \"answered\"}', '[]')",
+    )
+    .bind(Uuid::now_v7())
+    .execute(&pool)
+    .await;
+    assert!(written.is_err(), "status is generated, never written");
+    Ok(())
+}
+
+const EXPLAIN_BY_PATH_MIGRATION: i64 = 20261111030000;
+
+/// An open-path explain record loses the flag it never meant anything on; a verdict-path one keeps it.
+#[sqlx::test(migrations = false)]
+async fn the_explain_migration_keeps_the_flag_only_on_the_verdict_path(
+    pool: PgPool,
+) -> sqlx::Result<()> {
+    let explain = serde_json::json!({ "step": "explain", "record": { "kind": "explain", "raw": "{}", "contradicts_verdict": false } });
+    let answer = serde_json::json!({ "step": "answer", "record": { "kind": "answer", "raw": null, "parsed": null } });
+    let open = serde_json::json!([explain]);
+    let verdict = serde_json::json!([answer, explain]);
+    let seed = format!(
+        "INSERT INTO pipeline_runs (id, user_id, question, outcome, trace) VALUES
+         ('{}', 'ana', 'open', '{{\"status\": \"failed\"}}', '{open}'),
+         ('{}', 'ana', 'verdict', '{{\"status\": \"failed\"}}', '{verdict}');",
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+    );
+
+    migrate_around(&pool, EXPLAIN_BY_PATH_MIGRATION, seed).await?;
+
+    let traces: Vec<(String, serde_json::Value)> =
+        sqlx::query_as("SELECT question, trace FROM pipeline_runs ORDER BY question")
+            .fetch_all(&pool)
+            .await?;
+    assert_eq!(traces[0].0, "open");
+    assert_eq!(
+        traces[0].1[0]["record"],
+        serde_json::json!({ "kind": "explain", "raw": "{}" })
+    );
+    assert_eq!(traces[1].1[1]["record"]["contradicts_verdict"], false);
     Ok(())
 }

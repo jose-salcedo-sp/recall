@@ -305,3 +305,60 @@ async fn the_injected_clock_stamps_every_entry() {
     let started: Vec<_> = run.trace().entries().iter().map(|e| e.started_at).collect();
     assert_eq!(started[1] - started[0], chrono::Duration::seconds(3));
 }
+
+#[test]
+fn trace_records_keep_their_stored_shape_and_read_legacy_records() {
+    use super::trace::{ClassifyRecord, ExplainRecord, RerankOrder, RerankRecord};
+    use serde_json::json;
+
+    let judged = ClassifyRecord::Judged {
+        raw: "{}".into(),
+        category: Some(CategoryKind::Open),
+        fallback_from: Some(CategoryKind::Boolean),
+    };
+    let json = serde_json::to_value(&judged).unwrap();
+    assert_eq!(
+        json,
+        json!({ "mode": "judged", "raw": "{}", "category": "open", "fallback_from": "boolean" })
+    );
+    assert_eq!(
+        serde_json::from_value::<ClassifyRecord>(json).unwrap(),
+        judged
+    );
+    let legacy_open = json!({ "raw": null, "category": "open" });
+    assert_eq!(
+        serde_json::from_value::<ClassifyRecord>(legacy_open).unwrap(),
+        ClassifyRecord::AllOpen
+    );
+
+    let legacy_judged = json!({ "raw": "{\"a\": 0.5}", "chunks": [] });
+    assert_eq!(
+        serde_json::from_value::<RerankRecord>(legacy_judged)
+            .unwrap()
+            .order,
+        RerankOrder::Judged {
+            raw: "{\"a\": 0.5}".into()
+        }
+    );
+    let retrieval = RerankRecord {
+        order: RerankOrder::RetrievalOrder,
+        chunks: vec![],
+    };
+    assert_eq!(
+        serde_json::to_value(&retrieval).unwrap(),
+        json!({ "mode": "retrieval_order", "raw": null, "chunks": [] })
+    );
+
+    let open = ExplainRecord::Open { raw: "{}".into() };
+    assert_eq!(serde_json::to_value(&open).unwrap(), json!({ "raw": "{}" }));
+    assert_eq!(
+        serde_json::from_value::<ExplainRecord>(
+            json!({ "raw": "{}", "contradicts_verdict": true })
+        )
+        .unwrap(),
+        ExplainRecord::Verdict {
+            raw: "{}".into(),
+            contradicts_verdict: true
+        }
+    );
+}

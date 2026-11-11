@@ -31,27 +31,17 @@ impl PgRunStore {
     }
 }
 
-/// The `pipeline_runs.status` value for an outcome.
-pub fn status(outcome: &Outcome) -> &'static str {
-    match outcome {
-        Outcome::Answered(_) => "answered",
-        Outcome::Declined { .. } => "declined",
-        Outcome::Failed { .. } => "failed",
-    }
-}
-
 #[async_trait]
 impl RunStore for PgRunStore {
     async fn save(&self, user: &UserId, report: &RunReport) -> eros::Result<()> {
         sqlx::query(
-            "INSERT INTO pipeline_runs (id, user_id, question, category, status, outcome, trace, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            "INSERT INTO pipeline_runs (id, user_id, question, category, outcome, trace, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(report.id.as_uuid())
         .bind(user.as_str())
         .bind(report.question.as_str())
         .bind(report.category.as_ref().map(CategoryKind::as_str))
-        .bind(status(&report.outcome))
         .bind(Json(&report.outcome))
         .bind(Json(&report.trace))
         .bind(self.clock.now())

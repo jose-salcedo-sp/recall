@@ -151,7 +151,7 @@ async fn answers_with_citations_numbered_by_first_use() {
     assert_eq!(explain.model, Some(chat.model()));
     assert!(matches!(
         record(&report, "classify"),
-        TraceRecord::Classify(r) if r.category == Some(CategoryKind::Open)
+        TraceRecord::Classify(r) if r.category() == Some(CategoryKind::Open)
     ));
     let TraceRecord::Rerank(rerank) = record(&report, "rerank") else {
         panic!("rerank record");
@@ -252,7 +252,7 @@ async fn invalid_json_declines_with_the_raw_output_in_the_trace() {
     assert!(matches!(explain.outcome, StepOutcome::Declined { .. }));
     assert!(matches!(
         &explain.record,
-        Some(TraceRecord::Explain(r)) if r.raw.as_deref() == Some("Sure! ROLE_USERS, I think.")
+        Some(TraceRecord::Explain(r)) if r.raw() == "Sure! ROLE_USERS, I think."
     ));
     assert_eq!(
         explain.model.as_ref().map(|m| m.id.as_str()),
@@ -518,7 +518,13 @@ async fn sources_that_contradict_the_verdict_decline_the_run() {
     let TraceRecord::Explain(explain) = record(&report, "explain") else {
         panic!("expected the explain record");
     };
-    assert!(explain.contradicts_verdict);
+    assert!(matches!(
+        explain,
+        crate::pipeline::trace::ExplainRecord::Verdict {
+            contradicts_verdict: true,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -567,7 +573,13 @@ async fn an_unsure_classification_falls_back_to_the_open_path() {
     let TraceRecord::Classify(classify) = record(&report, "classify") else {
         panic!("expected the classify record");
     };
-    assert_eq!(classify.fallback_from, Some(CategoryKind::Boolean));
+    assert!(matches!(
+        classify,
+        crate::pipeline::trace::ClassifyRecord::Judged {
+            fallback_from: Some(CategoryKind::Boolean),
+            ..
+        }
+    ));
     assert!(!steps(&report).iter().any(|(step, _)| *step == "answer"));
 }
 
@@ -726,11 +738,11 @@ async fn the_plan_and_each_step_s_record_say_what_ran() {
     assert!(matches!(report.outcome, Outcome::Answered(_)));
     assert!(matches!(
         record(&report, "classify"),
-        TraceRecord::Classify(r) if r.mode == ClassifyMode::AllOpen
+        TraceRecord::Classify(r) if r.mode() == ClassifyMode::AllOpen
     ));
     assert!(matches!(
         record(&report, "rerank"),
-        TraceRecord::Rerank(r) if r.mode == RerankMode::RetrievalOrder
+        TraceRecord::Rerank(r) if r.order.mode() == RerankMode::RetrievalOrder
     ));
     assert!(!steps(&report).iter().any(|(step, _)| *step == "admit"));
     assert!(matches!(

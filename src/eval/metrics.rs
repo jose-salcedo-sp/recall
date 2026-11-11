@@ -275,7 +275,7 @@ fn classified_correctly(
     }
     let predicted = report
         .category
-        .or_else(|| classify.and_then(|record| record.category));
+        .or_else(|| classify.and_then(ClassifyRecord::category));
     Some(predicted == Some(expected))
 }
 

@@ -121,13 +121,7 @@ impl Step for Classify {
         let (judge, min_confidence) = match &self.mode {
             Classifier::AllOpen => {
                 let category = CategoryKind::Open;
-                let record = ClassifyRecord {
-                    mode: ClassifyMode::AllOpen,
-                    raw: None,
-                    category: Some(category),
-                    fallback_from: None,
-                };
-                return Ok(Scored::new(category, record));
+                return Ok(Scored::new(category, ClassifyRecord::AllOpen));
             }
             Classifier::Judged {
                 judge,
@@ -139,11 +133,11 @@ impl Step for Classify {
         let judgements = judge.judge(request(question)).await.map_err(|error| {
             StepError::from(error).with_model(model.clone(), CLASSIFY_PROMPT_VERSION)
         })?;
-        let raw = serde_json::to_string(judgements.raw(0)).ok();
+        let raw = serde_json::to_string(judgements.raw(0))
+            .expect("a judgement is plain data, which always serializes");
         let (chosen, score) = judgements.one_of(0).map_err(|error| {
             StepError::decline(DeclineReason::InvalidModelOutput(error.to_string()))
-                .with_record(ClassifyRecord {
-                    mode: ClassifyMode::Judged,
+                .with_record(ClassifyRecord::Judged {
                     raw: raw.clone(),
                     category: None,
                     fallback_from: None,
@@ -157,8 +151,7 @@ impl Step for Classify {
         } else {
             (chosen, None)
         };
-        let record = ClassifyRecord {
-            mode: ClassifyMode::Judged,
+        let record = ClassifyRecord::Judged {
             raw,
             category: Some(category),
             fallback_from,
@@ -228,8 +221,11 @@ mod tests {
 
         assert_eq!(scored.output, CategoryKind::Boolean);
         assert_eq!(scored.score, Some(p(0.87)));
-        assert_eq!(scored.record.mode, ClassifyMode::Judged);
-        assert!(scored.record.raw.unwrap().starts_with(r#"{"one_of":"#));
+        assert_eq!(scored.record.mode(), ClassifyMode::Judged);
+        let ClassifyRecord::Judged { raw, .. } = &scored.record else {
+            panic!("{:?}", scored.record);
+        };
+        assert!(raw.starts_with(r#"{"one_of":"#));
         assert_eq!(scored.prompt_version, Some(CLASSIFY_PROMPT_VERSION));
         let request = &judge.requests()[0];
         assert_eq!(request.text, "Does ROLE_USERS hold role assignments?");
@@ -251,15 +247,33 @@ mod tests {
         let scored = unsure("boolean", 0.55).await;
         assert_eq!(scored.output, CategoryKind::Open);
         assert_eq!(scored.score, Some(p(0.55)));
-        assert_eq!(scored.record.fallback_from, Some(CategoryKind::Boolean));
+        assert!(matches!(
+            scored.record,
+            ClassifyRecord::Judged {
+                fallback_from: Some(CategoryKind::Boolean),
+                ..
+            }
+        ));
 
         let scored = unsure("boolean", 0.65).await;
         assert_eq!(scored.output, CategoryKind::Boolean);
-        assert_eq!(scored.record.fallback_from, None);
+        assert!(matches!(
+            scored.record,
+            ClassifyRecord::Judged {
+                fallback_from: None,
+                ..
+            }
+        ));
 
         let scored = unsure("open", 0.3).await;
         assert_eq!(scored.output, CategoryKind::Open);
-        assert_eq!(scored.record.fallback_from, None);
+        assert!(matches!(
+            scored.record,
+            ClassifyRecord::Judged {
+                fallback_from: None,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -305,6 +319,6 @@ mod tests {
             .unwrap();
         assert_eq!(scored.output, CategoryKind::Open);
         assert_eq!(scored.score, None);
-        assert_eq!(scored.record.mode, ClassifyMode::AllOpen);
+        assert_eq!(scored.record.mode(), ClassifyMode::AllOpen);
     }
 }

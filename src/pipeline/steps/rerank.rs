@@ -16,7 +16,7 @@ use crate::{
     },
     pipeline::{
         Ask, Category, DeclineReason, Scored, Step, StepError,
-        trace::{RerankMode, RerankRecord},
+        trace::{RerankMode, RerankOrder, RerankRecord},
     },
     retrieval::{Relevance, Retrieved},
 };
@@ -193,7 +193,10 @@ impl<TCategory> Rerank<TCategory> {
                 .zip(&probabilities)
                 .map(|(hit, p)| (hit.chunk.id.0.as_str(), *p))
                 .collect();
-            raw = serde_json::to_string(&by_chunk).ok();
+            raw = Some(
+                serde_json::to_string(&by_chunk)
+                    .expect("probabilities by chunk id are plain data, which always serializes"),
+            );
             let mut by_probability: Vec<usize> = (0..matches.len()).collect();
             by_probability
                 .sort_by(|&a, &b| probabilities[b].get().total_cmp(&probabilities[a].get()));
@@ -250,8 +253,10 @@ impl<TCategory> Rerank<TCategory> {
         }
         chunks.extend(ranked(&kept_context));
         let record = RerankRecord {
-            mode: self.mode(),
-            raw,
+            order: match raw {
+                Some(raw) => RerankOrder::Judged { raw },
+                None => RerankOrder::RetrievalOrder,
+            },
             chunks,
         };
         let scored = Scored::new(Reranked(sources), record);
@@ -411,8 +416,10 @@ mod tests {
         assert_eq!(ids(&scored.output), ["fused-second", "fused-best"]);
         assert_eq!(scored.score, Some(Probability::new(0.95).unwrap()));
         assert_eq!(scored.prompt_version, Some(RERANK_PROMPT_VERSION));
-        let raw: BTreeMap<String, f32> =
-            serde_json::from_str(scored.record.raw.as_deref().unwrap()).unwrap();
+        let RerankOrder::Judged { raw } = &scored.record.order else {
+            panic!("{:?}", scored.record.order);
+        };
+        let raw: BTreeMap<String, f32> = serde_json::from_str(raw).unwrap();
         assert_eq!(raw.len(), 3);
         assert_eq!(scored.output.0[0].score, Relevance::new(0.8).unwrap());
         let judged: Vec<_> = scored
@@ -491,8 +498,7 @@ mod tests {
         assert_eq!(ids(&scored.output), ["fused-third", "fused-best"]);
         assert_eq!(scored.score, None);
         assert_eq!(scored.model, None);
-        assert_eq!(scored.record.mode, RerankMode::RetrievalOrder);
-        assert_eq!(scored.record.raw, None);
+        assert_eq!(scored.record.order, RerankOrder::RetrievalOrder);
         assert!(scored.record.chunks.iter().all(|c| c.probability.is_none()));
     }
 
@@ -523,7 +529,7 @@ mod tests {
         .await;
 
         assert_eq!(judge.requests().len(), 3);
-        assert_eq!(scored.record.mode, RerankMode::Judged);
+        assert_eq!(scored.record.order.mode(), RerankMode::Judged);
         assert_eq!(ids(&scored.output), ["fused-third", "fused-second"]);
         assert_eq!(scored.score, Some(Probability::new(0.95).unwrap()));
         assert_eq!(scored.prompt_version, Some(RERANK_PROMPT_VERSION));

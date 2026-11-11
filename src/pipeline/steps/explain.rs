@@ -75,32 +75,30 @@ impl<TCategory> Explain<TCategory> {
         }
     }
 
-    fn system(&self, verdict: bool) -> String {
+    fn system(&self, explaining: Explaining) -> String {
         let mut system = SYSTEM.to_owned();
         if let Some(instructions) = &self.instructions {
             let _ = write!(system, "\n\nDomain rules:\n{}", instructions.as_str());
         }
-        if verdict {
+        if let Explaining::Verdict { .. } = explaining {
             let _ = write!(system, "\n\n{VERDICT_RULES}");
         }
         system
     }
 
-    /// `verdict` is the judge's yes or no, when it decided one.
     async fn explain(
         &self,
         question: &Question,
         sources: Reranked,
-        verdict: Option<bool>,
+        explaining: Explaining,
     ) -> Result<Scored<Explained, ExplainRecord>, StepError> {
-        let prompt_version = if verdict.is_some() {
-            BOOLEAN_PROMPT_VERSION
-        } else {
-            PROMPT_VERSION
+        let prompt_version = match explaining {
+            Explaining::Open => PROMPT_VERSION,
+            Explaining::Verdict { .. } => BOOLEAN_PROMPT_VERSION,
         };
-        let system = self.system(verdict.is_some());
+        let system = self.system(explaining);
         let mut user = prompt(question, &sources.0);
-        if let Some(yes) = verdict {
+        if let Explaining::Verdict { yes } = explaining {
             let _ = write!(
                 user,
                 "\n\n<verdict>{}</verdict>",
@@ -112,7 +110,7 @@ impl<TCategory> Explain<TCategory> {
             user,
             max_tokens: self.max_tokens.get(),
             temperature: 0.0,
-            json_schema: Some(schema(&sources, verdict.is_some())),
+            json_schema: Some(schema(&sources, explaining)),
         };
         let model = self.chat.model();
         let response =
@@ -124,18 +122,28 @@ impl<TCategory> Explain<TCategory> {
                 .with_record(record)
                 .with_model(model.clone(), prompt_version)
         };
-        let mut record = ExplainRecord {
-            raw: Some(response.text.clone()),
-            contradicts_verdict: false,
+        let parsed: Result<RawExplanation, _> = serde_json::from_str(&response.text);
+        let contradicts_verdict = parsed.as_ref().is_ok_and(|raw| raw.contradicts_verdict);
+        let record = match explaining {
+            Explaining::Open => ExplainRecord::Open {
+                raw: response.text.clone(),
+            },
+            Explaining::Verdict { .. } => ExplainRecord::Verdict {
+                raw: response.text.clone(),
+                contradicts_verdict,
+            },
         };
-        let raw: RawExplanation = serde_json::from_str(&response.text).map_err(|error| {
+        let raw = parsed.map_err(|error| {
             decline(
                 DeclineReason::InvalidModelOutput(error.to_string()),
                 record.clone(),
             )
         })?;
-        if verdict.is_some() && raw.contradicts_verdict {
-            record.contradicts_verdict = true;
+        if let ExplainRecord::Verdict {
+            contradicts_verdict: true,
+            ..
+        } = record
+        {
             return Err(decline(DeclineReason::ContradictsVerdict, record));
         }
         let explanation = convert(raw).map_err(|reason| decline(reason, record.clone()))?;
@@ -148,6 +156,13 @@ impl<TCategory> Explain<TCategory> {
         )
         .with_model(model, prompt_version))
     }
+}
+
+/// What `Explain` is asked to write: a whole answer, or the reason for the judge's yes or no.
+#[derive(Clone, Copy, Debug)]
+enum Explaining {
+    Open,
+    Verdict { yes: bool },
 }
 
 /// Output of `Explain`: the claims, not yet checked against the sources they cite.
@@ -263,7 +278,11 @@ impl Step for Explain<Open> {
         input: Reranked,
     ) -> Result<Scored<Explained, ExplainRecord>, StepError> {
         let (sources, access) = input.enforce(ask.access());
-        with_access(self.explain(ask.question(), sources, None).await, access)
+        with_access(
+            self.explain(ask.question(), sources, Explaining::Open)
+                .await,
+            access,
+        )
     }
 }
 
@@ -293,7 +312,8 @@ impl Step for Explain<Boolean> {
             prompt_version,
             access,
         } = with_access(
-            self.explain(ask.question(), sources, Some(yes)).await,
+            self.explain(ask.question(), sources, Explaining::Verdict { yes })
+                .await,
             access,
         )?;
         Ok(Scored {
@@ -370,8 +390,8 @@ fn escape(text: &str) -> String {
 }
 
 /// `chunk_ids` may only name this run's sources, so the model cannot cite a chunk id it misremembered.
-/// `verdict` adds the required `contradicts_verdict` flag.
-fn schema(sources: &Reranked, verdict: bool) -> serde_json::Value {
+/// Explaining a verdict adds the required `contradicts_verdict` flag.
+fn schema(sources: &Reranked, explaining: Explaining) -> serde_json::Value {
     let ids: Vec<&str> = sources
         .0
         .iter()
@@ -405,7 +425,7 @@ fn schema(sources: &Reranked, verdict: bool) -> serde_json::Value {
         "required": ["claims"],
         "additionalProperties": false
     });
-    if verdict {
+    if let Explaining::Verdict { .. } = explaining {
         schema["properties"]["contradicts_verdict"] = json!({
             "type": "boolean",
             "description": "True when the cited sources contradict the verdict."
@@ -460,10 +480,10 @@ mod tests {
             )),
             MaxTokens::DEFAULT,
         );
-        assert_eq!(explain.system(false), SYSTEM);
+        assert_eq!(explain.system(Explaining::Open), SYSTEM);
         let explain =
             explain.with_instructions(Some(Instructions::new("Cite tickets by key.").unwrap()));
-        let system = explain.system(true);
+        let system = explain.system(Explaining::Verdict { yes: true });
         let rules = system.find("Domain rules:\nCite tickets by key.").unwrap();
         assert!(system.find("Respond only with JSON").unwrap() < rules);
         assert!(rules < system.find(VERDICT_RULES).unwrap());

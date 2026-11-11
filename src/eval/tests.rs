@@ -107,9 +107,8 @@ fn classify(category: CategoryKind, score: f32) -> TraceEntry {
     entry(
         "classify",
         passed(Some(score)),
-        Some(TraceRecord::Classify(ClassifyRecord {
-            mode: crate::pipeline::trace::ClassifyMode::Judged,
-            raw: None,
+        Some(TraceRecord::Classify(ClassifyRecord::Judged {
+            raw: "{}".into(),
             category: Some(category),
             fallback_from: None,
         })),
@@ -132,8 +131,7 @@ fn rerank_with(outcome: StepOutcome, ids: &[&str]) -> TraceEntry {
         "rerank",
         outcome,
         Some(TraceRecord::Rerank(RerankRecord {
-            mode: crate::pipeline::trace::RerankMode::Judged,
-            raw: None,
+            order: crate::pipeline::trace::RerankOrder::Judged { raw: "{}".into() },
             chunks: ranked(ids),
         })),
     )

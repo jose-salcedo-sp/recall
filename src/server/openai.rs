@@ -8,7 +8,6 @@ use crate::{
         DeclineReason,
         report::{Citation, Outcome, RunReport, Verdict},
     },
-    store::runs::status,
 };
 
 use super::error::ApiError;
@@ -138,7 +137,7 @@ impl RunSummary {
         Self {
             run_id: report.id,
             category: report.category,
-            outcome: status(&report.outcome),
+            outcome: report.outcome.status(),
             halted_at,
             decline_reason,
             verdict,
