@@ -28,7 +28,7 @@ Guiding constraints:
 The `Source` port returns a full snapshot of documents; `ingest` versions, embeds and stores them. A connector names itself with a `SourceName` (one or more of `a-z`, `0-9`, `_`, `-`), which prefixes its document ids (`{source}:{external_id}`) and scopes its snapshot: a snapshot supersedes only documents stored under its own name, so one ingestion rejects two connectors of one name. Neither the core nor the schema lists the names, so a domain adds a connector without editing recall: it implements `Source`, passes it to `ingest::ingest` (or, from a binary that reuses recall's command line, `cli::ingest::run_with`), and runs the port's contract suite (`recall::source_contract!`, `testing` feature) against it. The shipped connector reads a directory of markdown files:
 
 - Each file is one document; each ATX heading section is one chunk. Optional `RECALL_DOCS_BASE_URL` turns paths into citation links.
-- Two layers, chosen by path under the root: `RECALL_DOCS_AUTHORITATIVE` (settled answers; default the whole root) and `RECALL_DOCS_EVIDENCE` (supporting material, ingested with `authoritative = false`). `RECALL_DOCS_SKIP` leaves paths out even inside a layer. The longest listed path containing a file decides its layer; files under no listed path are not ingested. This keeps answer keys, drafts and working notes out of the corpus.
+- Two layers, chosen by path under the root: `RECALL_DOCS_AUTHORITATIVE` (settled answers; default the whole root) and `RECALL_DOCS_EVIDENCE` (supporting material, ingested with standing `evidence`). `RECALL_DOCS_SKIP` leaves paths out even inside a layer. The longest listed path containing a file decides its layer; files under no listed path are not ingested. This keeps answer keys, drafts and working notes out of the corpus.
 
 Ingestion:
 
@@ -271,7 +271,7 @@ Each step contributes one entry:
 - Shared part: step name, parallel group, start time, duration, model id and version, prompt version, outcome, and one access decision per chunk the step checked.
 - Step record (`Step::Record`): raw model output, parsed output, chunk ids and versions, score, threshold.
 
-The trace is a flat list ordered by start time, serialized through the `TraceRecord` enum into a JSONB column in `pipeline_runs`. Answered, declined, and failed runs are all persisted. Chunk text is referenced by id and version, never copied.
+The trace is a flat list ordered by start time, serialized through the `TraceRecord` enum into a JSONB column in `pipeline_runs`. Answered, declined, and failed runs are all persisted; `pipeline_runs.status` is generated from the outcome's `status` tag, so the two cannot disagree. Each record type stores one shape per mode: a `classify` record has `raw` only when a judge chose, a `rerank` record only when a judge ordered, and an `explain` record has `contradicts_verdict` only on the verdict path. Chunk text is referenced by id and version, never copied.
 
 ### 5.8 Assembly
 

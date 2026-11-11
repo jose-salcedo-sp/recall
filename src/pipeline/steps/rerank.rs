@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    fmt,
     marker::PhantomData,
     sync::Arc,
 };
@@ -57,6 +58,30 @@ pub enum RerankBy {
         /// Applies to the best kept match's probability.
         threshold: Option<Probability>,
     },
+}
+
+impl<TCategory> fmt::Debug for Rerank<TCategory> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Rerank")
+            .field("top_k", &self.top_k)
+            .field("candidates", &self.candidates)
+            .field("evidence_rank_penalty", &self.evidence_rank_penalty)
+            .field("by", &self.by)
+            .finish()
+    }
+}
+
+impl fmt::Debug for RerankBy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Retrieval => f.write_str("Retrieval"),
+            Self::Judge { judge, threshold } => f
+                .debug_struct("Judge")
+                .field("judge", &judge.model())
+                .field("threshold", threshold)
+                .finish(),
+        }
+    }
 }
 
 impl<TCategory> Rerank<TCategory> {
