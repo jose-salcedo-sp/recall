@@ -32,7 +32,7 @@ fn fake() -> StaticSource {
                 heading: Some((*locator).into()),
                 url: format!("https://wiki.example.test/{external_id}#{locator}"),
                 text: format!("{locator} of {external_id}"),
-                authoritative: true,
+                standing: recall::domain::Standing::Authoritative,
             })
             .collect(),
     };

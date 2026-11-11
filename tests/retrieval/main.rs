@@ -473,7 +473,7 @@ async fn chunks_are_fully_populated(pool: PgPool) {
     assert_eq!(chunk.heading.as_deref(), Some("Naming"));
     assert_eq!(chunk.url, "https://example.test/markdown:50#naming");
     assert_eq!(chunk.labels.acl.to_strings(), [ACL_GROUP]);
-    assert!(!chunk.authoritative);
+    assert_eq!(chunk.standing, recall::domain::Standing::Evidence);
 }
 
 #[sqlx::test(migrator = "recall::store::MIGRATOR")]

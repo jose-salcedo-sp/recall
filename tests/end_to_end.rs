@@ -51,14 +51,14 @@ fn roles_page() -> Document {
                 heading: Some("Role assignments".into()),
                 url: "https://wiki.example.test/roles.md#roles".into(),
                 text: "ROLE_USERS stores which users are assigned to which roles.".into(),
-                authoritative: true,
+                standing: recall::domain::Standing::Authoritative,
             },
             ChunkDraft {
                 locator: "transport".into(),
                 heading: Some("Transports".into()),
                 url: "https://wiki.example.test/roles.md#transport".into(),
                 text: "Roles move between systems in transports.".into(),
-                authoritative: true,
+                standing: recall::domain::Standing::Authoritative,
             },
         ],
     }
@@ -213,7 +213,7 @@ fn pay_page() -> Document {
             heading: Some("Role pay bands".into()),
             url: "https://wiki.example.test/hr/pay.md#bands".into(),
             text: "ROLE_USERS role assignments set each user's pay band.".into(),
-            authoritative: true,
+            standing: recall::domain::Standing::Authoritative,
         }],
     }
 }

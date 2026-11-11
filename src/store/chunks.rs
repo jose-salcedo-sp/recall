@@ -269,7 +269,7 @@ impl ChunkStore for PgChunkStore {
             .bind(&draft.heading)
             .bind(&draft.url)
             .bind(&draft.text)
-            .bind(draft.authoritative)
+            .bind(draft.standing.is_authoritative())
             .bind(document.labels.acl.to_strings())
             .bind(document.labels.sensitivity.as_str())
             .bind(Vector::from(embedding))

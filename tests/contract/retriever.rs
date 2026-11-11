@@ -29,7 +29,7 @@ fn chunk(name: &str, text: &str) -> Chunk {
         heading: Some(name.into()),
         url: format!("https://wiki.example.test/{name}"),
         text: text.into(),
-        authoritative: true,
+        standing: recall::domain::Standing::Authoritative,
         labels: Labels {
             acl: Acl::anyone(),
             sensitivity: Sensitivity::Internal,
@@ -380,7 +380,7 @@ mod hybrid {
         .bind(&chunk.heading)
         .bind(&chunk.url)
         .bind(&chunk.text)
-        .bind(chunk.authoritative)
+        .bind(chunk.standing.is_authoritative())
         .bind(chunk.labels.acl.to_strings())
         .bind(chunk.labels.sensitivity.as_str())
         .bind(Vector::from(embedding))

@@ -378,7 +378,7 @@ impl ChunkVersion {
             heading: &draft.heading,
             url: &draft.url,
             text: &draft.text,
-            authoritative: draft.authoritative,
+            authoritative: draft.standing.is_authoritative(),
             labels: &document.labels,
             embedding_model,
         };
@@ -492,6 +492,33 @@ impl Document {
     }
 }
 
+/// Whether a chunk is a settled answer or supporting evidence; its connector decides. Evidence ranks below
+/// authoritative chunks. Stored as `chunks.authoritative`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Standing {
+    /// A settled answer.
+    Authoritative,
+    /// Supporting evidence, used for detail the authoritative chunks do not cover.
+    Evidence,
+}
+
+impl Standing {
+    /// As stored in `chunks.authoritative` and hashed into [`ChunkVersion`].
+    pub fn is_authoritative(self) -> bool {
+        matches!(self, Self::Authoritative)
+    }
+
+    /// From `chunks.authoritative`.
+    pub fn from_authoritative(authoritative: bool) -> Self {
+        if authoritative {
+            Self::Authoritative
+        } else {
+            Self::Evidence
+        }
+    }
+}
+
 /// One section of a [`Document`], before it is versioned, embedded and stored as a [`Chunk`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChunkDraft {
@@ -503,8 +530,8 @@ pub struct ChunkDraft {
     pub url: String,
     /// Section body, without its heading.
     pub text: String,
-    /// A settled answer, not supporting evidence; the connector decides which.
-    pub authoritative: bool,
+    /// A settled answer or supporting evidence; the connector decides which.
+    pub standing: Standing,
 }
 
 /// A current chunk version as read back from the store.
@@ -526,8 +553,8 @@ pub struct Chunk {
     pub url: String,
     /// Section body; delimit it as data in prompts.
     pub text: String,
-    /// In the authoritative layer; evidence chunks (`false`) rank below authoritative ones.
-    pub authoritative: bool,
+    /// See [`ChunkDraft::standing`].
+    pub standing: Standing,
     /// The document's labels.
     pub labels: Labels,
 }
@@ -803,7 +830,7 @@ mod tests {
             heading: None,
             url: document.url.clone(),
             text: "ROLE_USERS maps users to roles.".into(),
-            authoritative: true,
+            standing: Standing::Authoritative,
         };
         let titan = ModelRef::new("amazon.titan-embed-text-v2", "1");
         let cohere = ModelRef::new("cohere.embed-english-v3", "1");

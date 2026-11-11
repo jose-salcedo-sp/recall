@@ -176,7 +176,7 @@ impl ChunkStore for MemoryChunkStore {
                     heading: draft.heading.clone(),
                     url: draft.url.clone(),
                     text: draft.text.clone(),
-                    authoritative: draft.authoritative,
+                    standing: draft.standing,
                     labels: document.labels.clone(),
                 };
                 (chunk, ordinal)

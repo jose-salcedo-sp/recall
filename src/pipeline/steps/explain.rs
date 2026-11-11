@@ -346,7 +346,7 @@ fn prompt(question: &Question, sources: &[Retrieved]) -> String {
         let _ = writeln!(
             prompt,
             " authoritative=\"{}\">\n{}\n</source>",
-            chunk.authoritative,
+            chunk.standing.is_authoritative(),
             escape(&chunk.text)
         );
     }

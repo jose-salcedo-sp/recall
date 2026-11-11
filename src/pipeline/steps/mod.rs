@@ -129,7 +129,7 @@ pub(crate) mod fixtures {
             heading: Some(locator.into()),
             url: format!("https://example.test/docs/{title}#{locator}"),
             text: text.into(),
-            authoritative: false,
+            standing: crate::domain::Standing::Evidence,
             labels: Labels {
                 acl: crate::access::Acl::anyone(),
                 sensitivity: Sensitivity::Internal,

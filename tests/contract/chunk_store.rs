@@ -30,7 +30,7 @@ fn document(source: &SourceName, external_id: &str, drafts: &[(&str, &str)]) -> 
                 heading: Some((*locator).into()),
                 url: format!("https://example.test/{external_id}#{locator}"),
                 text: (*text).into(),
-                authoritative: true,
+                standing: recall::domain::Standing::Authoritative,
             })
             .collect(),
     }

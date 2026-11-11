@@ -29,7 +29,10 @@ use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::{
     access::{Acl, ChunkGrant, ChunkScope},
-    domain::{Chunk, ChunkId, ChunkRef, ChunkVersion, DocumentId, Labels, Sensitivity, SourceName},
+    domain::{
+        Chunk, ChunkId, ChunkRef, ChunkVersion, DocumentId, Labels, Sensitivity, SourceName,
+        Standing,
+    },
     llm::{EmbedPurpose, Embedder, ModelRef},
 };
 
@@ -693,7 +696,7 @@ impl TryFrom<ChunkRow> for Chunk {
             heading: row.heading,
             url: row.url,
             text: row.text,
-            authoritative: row.authoritative,
+            standing: Standing::from_authoritative(row.authoritative),
             labels: Labels { acl, sensitivity },
         })
     }

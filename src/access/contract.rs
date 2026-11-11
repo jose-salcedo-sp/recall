@@ -228,7 +228,7 @@ pub fn documents() -> Vec<Document> {
             heading: None,
             url: format!("https://docs.example.test/{path}#intro"),
             text: format!("About {path}."),
-            authoritative: true,
+            standing: crate::domain::Standing::Authoritative,
         }],
     };
     vec![

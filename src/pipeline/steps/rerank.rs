@@ -8,6 +8,7 @@ use futures::{StreamExt, TryStreamExt, stream};
 
 use crate::{
     config::{RerankConfig, RerankJudge},
+    domain::Standing,
     domain::{AtLeastOne, ChunkId, Probability, Question},
     llm::{
         ModelRef,
@@ -105,10 +106,9 @@ fn request(question: &Question, hit: &Retrieved) -> JudgeRequest {
 
 /// One list's reciprocal rank fusion term for a match at a 0-based `rank`.
 fn rrf(hit: &Retrieved, rank: usize, evidence_rank_penalty: usize) -> f32 {
-    let penalty = if hit.chunk.authoritative {
-        0
-    } else {
-        evidence_rank_penalty
+    let penalty = match hit.chunk.standing {
+        Standing::Authoritative => 0,
+        Standing::Evidence => evidence_rank_penalty,
     };
     1.0 / (RRF_K + (rank + penalty) as f32)
 }
@@ -389,7 +389,7 @@ mod tests {
     fn authoritative(hit: Retrieved) -> Retrieved {
         Retrieved {
             chunk: Chunk {
-                authoritative: true,
+                standing: crate::domain::Standing::Authoritative,
                 ..hit.chunk
             },
             ..hit
