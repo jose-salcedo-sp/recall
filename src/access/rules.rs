@@ -18,8 +18,7 @@ use sha2::{Digest, Sha256};
 use crate::domain::{Document, Labels, Sensitivity, SourceName, UserId};
 
 use super::{
-    Access, Acl, Authorizer, ChunkGrant, ChunkScope, Labeler, PolicyRef, Principal, Role,
-    RunAccess, TenantScope,
+    Access, Acl, Authorizer, ChunkGrant, ChunkScope, Labeler, PolicyRef, Principal, Role, RunAccess,
 };
 
 /// Where the shipped policy lives unless `RECALL_ACCESS` says otherwise.
@@ -31,9 +30,6 @@ pub const DEFAULT_PATH: &str = "config/access.json";
 pub struct RoleGrant {
     /// The most sensitive tier it reads.
     pub clearance: Sensitivity,
-    /// The tenants whose chunks it reads; untenanted chunks only when omitted.
-    #[serde(default)]
-    pub tenants: TenantScope,
     /// Whose persisted runs it reads; none when omitted.
     #[serde(default)]
     pub runs: RunGrant,
@@ -57,7 +53,7 @@ pub enum RunGrant {
 ///
 /// Written `{ "source": "markdown", "path": "hr/", "acl": ["role:hr"], "sensitivity": "confidential" }`. `path`
 /// matches whole segments of the external id (`hr` covers `hr/pay.md`, not `hrx/pay.md`) and covers the whole
-/// source when empty; `acl` and `tenant` default to no restriction and `sensitivity` to `public`, which changes
+/// source when empty; `acl` defaults to no restriction and `sensitivity` to `public`, which changes
 /// nothing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "RawLabelRule", into = "RawLabelRule")]
@@ -75,8 +71,6 @@ struct RawLabelRule {
     path: String,
     #[serde(default)]
     acl: Acl,
-    #[serde(default)]
-    tenant: Option<String>,
     #[serde(default = "least_sensitive")]
     sensitivity: Sensitivity,
 }
@@ -92,7 +86,6 @@ impl From<RawLabelRule> for LabelRule {
             path: raw.path.trim_end_matches('/').to_owned(),
             labels: Labels {
                 acl: raw.acl,
-                tenant: raw.tenant,
                 sensitivity: raw.sensitivity,
             },
         }
@@ -105,7 +98,6 @@ impl From<LabelRule> for RawLabelRule {
             source: rule.source,
             path: rule.path,
             acl: rule.labels.acl,
-            tenant: rule.labels.tenant,
             sensitivity: rule.labels.sensitivity,
         }
     }
@@ -285,9 +277,9 @@ impl Authorizer for RulePolicy {
             .iter()
             .filter_map(|role| self.config.roles.get_key_value(role))
             .collect();
-        let grants = defined.iter().map(|(role, grant)| {
-            ChunkGrant::new((*role).clone(), grant.clearance, grant.tenants.clone())
-        });
+        let grants = defined
+            .iter()
+            .map(|(role, grant)| ChunkGrant::new((*role).clone(), grant.clearance));
         let runs = defined
             .iter()
             .filter_map(|(role, grant)| {
@@ -373,10 +365,9 @@ mod tests {
         )
     }
 
-    fn labels(sensitivity: Sensitivity, tenant: Option<&str>, entries: &[&str]) -> Labels {
+    fn labels(sensitivity: Sensitivity, entries: &[&str]) -> Labels {
         Labels {
             acl: acl(entries),
-            tenant: tenant.map(str::to_owned),
             sensitivity,
         }
     }
@@ -388,11 +379,11 @@ mod tests {
     const POLICY: &str = r#"{
         "roles": {
             "reader": { "clearance": "internal", "runs": "own" },
-            "acme": { "clearance": "internal", "tenants": ["acme"] },
-            "maintainer": { "clearance": "confidential", "tenants": "any", "runs": "any" }
+            "auditor": { "clearance": "confidential" },
+            "maintainer": { "clearance": "confidential", "runs": "any" }
         },
         "everyone": ["reader"],
-        "members": { "jose": ["maintainer"], "ana": ["acme"] }
+        "members": { "jose": ["maintainer"], "ana": ["auditor"] }
     }"#;
 
     #[tokio::test]
@@ -407,29 +398,29 @@ mod tests {
     #[tokio::test]
     async fn roles_come_from_everyone_members_and_the_principal() {
         let policy = policy(POLICY);
-        let internal = labels(Sensitivity::Internal, None, &[]);
-        let confidential = labels(Sensitivity::Confidential, None, &[]);
-        let acme = labels(Sensitivity::Internal, Some("acme"), &[]);
+        let internal = labels(Sensitivity::Internal, &[]);
+        let confidential = labels(Sensitivity::Confidential, &[]);
 
         let reader = policy.access(&user("eve")).await.unwrap();
         assert!(reader.chunks().admits(&internal));
         assert!(!reader.chunks().admits(&confidential));
-        assert!(!reader.chunks().admits(&acme));
 
         let ana = policy.access(&user("ana")).await.unwrap();
         assert_eq!(
-            ana.chunks().decide(&acme),
+            ana.chunks().decide(&confidential),
             Decision::Allowed {
-                role: Role::new("acme").unwrap()
+                role: Role::new("auditor").unwrap()
+            }
+        );
+        assert_eq!(
+            ana.runs(),
+            &RunAccess::Own {
+                role: Role::new("reader").unwrap()
             }
         );
 
         let jose = policy.access(&user("jose")).await.unwrap();
         assert!(jose.chunks().admits(&confidential));
-        assert!(
-            jose.chunks()
-                .admits(&labels(Sensitivity::Public, Some("x"), &[]))
-        );
 
         let asserted = user("eve").with_roles([Role::new("maintainer").unwrap()]);
         let asserted = policy.access(&asserted).await.unwrap();
@@ -440,7 +431,7 @@ mod tests {
     async fn an_acl_needs_the_user_or_one_of_its_roles() {
         let policy = policy(POLICY);
         let jose = policy.access(&user("jose")).await.unwrap();
-        let public = |entries: &[&str]| labels(Sensitivity::Public, None, entries);
+        let public = |entries: &[&str]| labels(Sensitivity::Public, entries);
         assert!(!jose.chunks().admits(&public(&["role:hr"])));
         assert!(jose.chunks().admits(&public(&["role:hr", "user:jose"])));
         assert!(jose.chunks().admits(&public(&["role:maintainer"])));
@@ -453,12 +444,12 @@ mod tests {
     #[tokio::test]
     async fn a_user_whose_id_is_a_role_name_does_not_hold_the_role() {
         let policy = policy(POLICY);
-        let restricted = labels(Sensitivity::Public, None, &["role:maintainer"]);
+        let restricted = labels(Sensitivity::Public, &["role:maintainer"]);
         let named_maintainer = policy.access(&user("maintainer")).await.unwrap();
         assert!(
             named_maintainer
                 .chunks()
-                .admits(&labels(Sensitivity::Internal, None, &[]))
+                .admits(&labels(Sensitivity::Internal, &[]))
         );
         assert_eq!(
             named_maintainer.chunks().decide(&restricted),
@@ -474,11 +465,11 @@ mod tests {
                 .chunks()
                 .admits(&restricted)
         );
-        assert!(named_maintainer.chunks().admits(&labels(
-            Sensitivity::Public,
-            None,
-            &["user:maintainer"]
-        )));
+        assert!(
+            named_maintainer
+                .chunks()
+                .admits(&labels(Sensitivity::Public, &["user:maintainer"]))
+        );
     }
 
     #[tokio::test]
@@ -527,6 +518,8 @@ mod tests {
             r#"{ "roles": {}, "labels": [{ "documents": "markdown:hr/", "sensitivity": "public" }] }"#,
             r#"{ "roles": { "Reader": { "clearance": "public" } } }"#,
             r#"{ "roles": {}, "admins": [] }"#,
+            r#"{ "roles": { "reader": { "clearance": "public", "tenants": "any" } } }"#,
+            r#"{ "roles": {}, "labels": [{ "source": "markdown", "tenant": "acme" }] }"#,
             r#"{ "everyone": [] }"#,
         ] {
             assert!(AccessConfig::parse(bad).is_err(), "{bad}");
@@ -569,8 +562,8 @@ mod tests {
                 { "source": "markdown", "path": "hr/public", "sensitivity": "public" }
             ]"#,
         );
-        let internal = labels(Sensitivity::Internal, None, &[]);
-        let hr = labels(Sensitivity::Confidential, None, &["role:hr"]);
+        let internal = labels(Sensitivity::Internal, &[]);
+        let hr = labels(Sensitivity::Confidential, &["role:hr"]);
         let label = async |source, path| {
             rules
                 .label(&document(source, path, internal.clone()))
@@ -588,27 +581,20 @@ mod tests {
     #[tokio::test]
     async fn a_rule_never_drops_the_connector_acl_or_lowers_its_sensitivity() {
         let rules = rules(
-            r#"[{ "source": "wiki", "acl": ["role:hr", "role:finance"], "tenant": "acme", "sensitivity": "internal" }]"#,
+            r#"[{ "source": "wiki", "acl": ["role:hr", "role:finance"], "sensitivity": "internal" }]"#,
         );
-        let inherited = labels(Sensitivity::Confidential, None, &["role:hr", "user:ana"]);
+        let inherited = labels(Sensitivity::Confidential, &["role:hr", "user:ana"]);
         assert_eq!(
             rules
                 .label(&document("wiki", "pay", inherited))
                 .await
                 .unwrap(),
-            labels(Sensitivity::Confidential, Some("acme"), &["role:hr"])
+            labels(Sensitivity::Confidential, &["role:hr"])
         );
-        let disjoint = labels(Sensitivity::Public, None, &["user:ana"]);
+        let disjoint = labels(Sensitivity::Public, &["user:ana"]);
         assert!(
             rules
                 .label(&document("wiki", "pay", disjoint))
-                .await
-                .is_err()
-        );
-        let other_tenant = labels(Sensitivity::Public, Some("globex"), &[]);
-        assert!(
-            rules
-                .label(&document("wiki", "pay", other_tenant))
                 .await
                 .is_err()
         );

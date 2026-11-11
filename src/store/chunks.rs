@@ -259,9 +259,8 @@ impl ChunkStore for PgChunkStore {
         for ((id, version, ordinal, draft), embedding) in fresh.iter().zip(embeddings) {
             sqlx::query(
                 "INSERT INTO chunks (id, version, document_id, ordinal, heading, url, text, authoritative,
-                                     acl, tenant, sensitivity, embedding, embedding_model,
-                                     embedding_model_version)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+                                     acl, sensitivity, embedding, embedding_model, embedding_model_version)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
             )
             .bind(id)
             .bind(&version.0)
@@ -272,7 +271,6 @@ impl ChunkStore for PgChunkStore {
             .bind(&draft.text)
             .bind(draft.authoritative)
             .bind(document.labels.acl.to_strings())
-            .bind(&document.labels.tenant)
             .bind(document.labels.sensitivity.as_str())
             .bind(Vector::from(embedding))
             .bind(&model.id)

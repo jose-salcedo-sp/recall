@@ -15,37 +15,36 @@
 //! scans HNSW iteratively, so a filter that rejects most nearest neighbours still fills its candidate count. BM25's
 //! corpus statistics cover every current chunk; they shape scores, not which chunks come back.
 
-use std::{collections::HashMap, fmt, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashMap},
+    fmt,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use eros::{Context, error};
 use pgvector::Vector;
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Postgres, Transaction, types::Json};
+use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::{
-    access::{Acl, ChunkScope, TenantScope},
+    access::{Acl, ChunkGrant, ChunkScope},
     domain::{Chunk, ChunkId, ChunkRef, ChunkVersion, DocumentId, Labels, Sensitivity, SourceName},
     llm::{EmbedPurpose, Embedder, ModelRef},
 };
 
 use super::{Relevance, Retrieval, Retrieved, Retriever, glossary::Glossary};
 
-/// SQL for "chunk `c` is admitted by the scope bound at `$members` and `$grants`" ([`ScopeParams`]): the same rule
-/// as [`ChunkScope::decide`]. A macro, so each query stays one literal.
+/// SQL for "chunk `c` is admitted by the scope bound at `$members` and `$sensitivities`" ([`ScopeParams`]): the
+/// same rule as [`ChunkScope::decide`]. A macro, so each query stays one literal.
 macro_rules! in_scope {
-    ($members:literal, $grants:literal) => {
+    ($members:literal, $sensitivities:literal) => {
         concat!(
             "(cardinality(c.acl) = 0 OR c.acl && $",
             $members,
-            "::text[])
-             AND EXISTS (
-                 SELECT 1 FROM jsonb_to_recordset($",
-            $grants,
-            "::jsonb)
-                     AS g(sensitivities text[], any_tenant boolean, tenants text[])
-                 WHERE c.sensitivity = ANY(g.sensitivities)
-                   AND (c.tenant IS NULL OR g.any_tenant OR c.tenant = ANY(g.tenants)))"
+            "::text[]) AND c.sensitivity = ANY($",
+            $sensitivities,
+            "::text[])"
         )
     };
 }
@@ -271,7 +270,7 @@ impl HybridRetriever {
         let rows: Vec<(String, String, String)> = sqlx::query_as(query)
             .bind(&documents)
             .bind(&scope.members)
-            .bind(&scope.grants)
+            .bind(&scope.sensitivities)
             .fetch_all(&self.pool)
             .await?;
         Ok(Glossary::parse(rows.iter().map(|(id, version, text)| {
@@ -360,7 +359,7 @@ impl HybridRetriever {
             .bind(self.config.bm25.k1())
             .bind(self.config.bm25.b())
             .bind(&scope.members)
-            .bind(&scope.grants)
+            .bind(&scope.sensitivities)
             .fetch_all(&mut **tx)
             .await?;
         Ok(ids.into_iter().map(ChunkId).collect())
@@ -391,7 +390,7 @@ impl HybridRetriever {
             .bind(Vector::from(embedding))
             .bind(i64::try_from(self.config.vector_candidates)?)
             .bind(&scope.members)
-            .bind(&scope.grants)
+            .bind(&scope.sensitivities)
             .fetch_all(&mut **tx)
             .await?;
         Ok(ids.into_iter().map(ChunkId).collect())
@@ -424,7 +423,7 @@ impl HybridRetriever {
                  ) n
              )
              SELECT c.id, c.version, c.document_id, d.source, d.title, c.heading, c.url, c.text,
-                    c.authoritative, c.acl, c.tenant, c.sensitivity, c.ordinal
+                    c.authoritative, c.acl, c.sensitivity, c.ordinal
              FROM chunks c JOIN documents d ON d.id = c.document_id
              WHERE c.superseded_at IS NULL AND (c.id = ANY($1) OR c.id IN (SELECT id FROM neighbours))
                AND ",
@@ -434,7 +433,7 @@ impl HybridRetriever {
         Ok(sqlx::query_as(query)
             .bind(hits)
             .bind(&scope.members)
-            .bind(&scope.grants)
+            .bind(&scope.sensitivities)
             .fetch_all(&mut **tx)
             .await?)
     }
@@ -494,39 +493,22 @@ impl Retriever for HybridRetriever {
     }
 }
 
-/// A [`ChunkScope`] as query parameters: its ACL members, and one row per grant for [`in_scope`].
+/// A [`ChunkScope`] as query parameters for [`in_scope`]: its ACL members, and every sensitivity some grant clears.
 struct ScopeParams {
     members: Vec<String>,
-    grants: Json<Vec<GrantRow>>,
-}
-
-#[derive(Serialize)]
-struct GrantRow {
     sensitivities: Vec<&'static str>,
-    any_tenant: bool,
-    tenants: Vec<String>,
 }
 
 impl ScopeParams {
     fn new(scope: &ChunkScope) -> Self {
-        let grants = scope
+        let sensitivities: BTreeSet<Sensitivity> = scope
             .grants()
             .iter()
-            .map(|grant| {
-                let (any_tenant, tenants) = match grant.tenants() {
-                    TenantScope::Any => (true, Vec::new()),
-                    TenantScope::Only(tenants) => (false, tenants.iter().cloned().collect()),
-                };
-                GrantRow {
-                    sensitivities: grant.sensitivities().map(|s| s.as_str()).collect(),
-                    any_tenant,
-                    tenants,
-                }
-            })
+            .flat_map(ChunkGrant::sensitivities)
             .collect();
         Self {
             members: scope.members().iter().map(ToString::to_string).collect(),
-            grants: Json(grants),
+            sensitivities: sensitivities.iter().map(Sensitivity::as_str).collect(),
         }
     }
 }
@@ -687,7 +669,6 @@ struct ChunkRow {
     text: String,
     authoritative: bool,
     acl: Vec<String>,
-    tenant: Option<String>,
     sensitivity: String,
     ordinal: i32,
 }
@@ -710,11 +691,7 @@ impl TryFrom<ChunkRow> for Chunk {
             url: row.url,
             text: row.text,
             authoritative: row.authoritative,
-            labels: Labels {
-                acl,
-                tenant: row.tenant,
-                sensitivity,
-            },
+            labels: Labels { acl, sensitivity },
         })
     }
 }

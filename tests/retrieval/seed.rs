@@ -123,9 +123,8 @@ impl SeedChunk {
         };
         sqlx::query(
             "INSERT INTO chunks (id, version, document_id, ordinal, heading, url, text, authoritative, acl,
-                                 tenant, sensitivity, embedding, embedding_model, embedding_model_version,
-                                 superseded_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, false, ARRAY[$12], NULL, $13, $8, $9, $10,
+                                 sensitivity, embedding, embedding_model, embedding_model_version, superseded_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, false, ARRAY[$12], $13, $8, $9, $10,
                      CASE WHEN $11 THEN now() END)",
         )
         .bind(&id.0)

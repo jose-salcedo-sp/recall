@@ -10,7 +10,7 @@ mod seed;
 use std::sync::Arc;
 
 use recall::{
-    access::{ChunkGrant, ChunkScope, Role, TenantScope},
+    access::{ChunkGrant, ChunkScope, Role},
     domain::{ChunkId, Sensitivity, SourceName, UserId},
     ingest::markdown,
     llm::{Embedder, ModelRef, fakes::HashEmbedder},
@@ -27,11 +27,7 @@ fn scope(clearance: Sensitivity) -> ChunkScope {
     ChunkScope::new(
         UserId::new("eve").unwrap(),
         [Role::new("arm").unwrap()],
-        [ChunkGrant::new(
-            Role::new("reader").unwrap(),
-            clearance,
-            TenantScope::Any,
-        )],
+        [ChunkGrant::new(Role::new("reader").unwrap(), clearance)],
     )
 }
 

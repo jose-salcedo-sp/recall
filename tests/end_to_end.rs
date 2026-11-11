@@ -43,7 +43,6 @@ fn roles_page() -> Document {
         updated_at: Utc::now(),
         labels: Labels {
             acl: recall::access::Acl::anyone(),
-            tenant: None,
             sensitivity: Sensitivity::Internal,
         },
         chunks: vec![

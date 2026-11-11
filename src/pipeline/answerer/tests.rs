@@ -758,11 +758,10 @@ async fn the_plan_and_each_step_s_record_say_what_ran() {
 const POLICY: &str = r#"{
     "roles": {
         "reader": { "clearance": "internal", "runs": "own" },
-        "acme": { "clearance": "internal", "tenants": ["acme"] },
-        "maintainer": { "clearance": "confidential", "tenants": "any", "runs": "any" }
+        "maintainer": { "clearance": "confidential", "runs": "any" }
     },
     "everyone": ["reader"],
-    "members": { "jose": ["maintainer"], "ana": ["acme"] }
+    "members": { "jose": ["maintainer"] }
 }"#;
 
 fn policy() -> Arc<RulePolicy> {
@@ -783,19 +782,17 @@ fn secret() -> Chunk {
         "ROLE_USERS maps users to roles; the admin override is ROLE_ROOT.",
         Labels {
             acl: crate::access::Acl::anyone(),
-            tenant: None,
             sensitivity: Sensitivity::Confidential,
         },
     )
 }
 
-fn acme_only() -> Chunk {
+fn ana_only() -> Chunk {
     labelled(
-        "acme-roles",
-        "At acme, a table maps users to roles per plant.",
+        "ana-roles",
+        "Ana's notes: a table maps users to roles per plant.",
         Labels {
-            acl: crate::access::Acl::anyone(),
-            tenant: Some("acme".into()),
+            acl: crate::access::Acl::only(["user:ana".parse().unwrap()]),
             sensitivity: Sensitivity::Internal,
         },
     )
@@ -807,14 +804,13 @@ fn hr_only() -> Chunk {
         "HR maps users to roles in the payroll table.",
         Labels {
             acl: crate::access::Acl::only(["role:hr".parse().unwrap()]),
-            tenant: None,
             sensitivity: Sensitivity::Public,
         },
     )
 }
 
 fn labelled_corpus() -> Vec<Chunk> {
-    vec![role_users(), secret(), acme_only(), hr_only(), login02()]
+    vec![role_users(), secret(), ana_only(), hr_only(), login02()]
 }
 
 fn principal(id: &str) -> Principal {
@@ -937,7 +933,7 @@ async fn a_citation_of_a_denied_chunk_is_stripped_and_never_shown() {
         .filter(|check| !check.decision.is_allowed())
         .map(|check| &check.chunk.id)
         .collect();
-    assert_eq!(denied, [&secret().id, &acme_only().id, &hr_only().id]);
+    assert_eq!(denied, [&secret().id, &ana_only().id, &hr_only().id]);
     for step in ["rerank", "explain", "verify"] {
         let entry = report
             .trace
@@ -1022,7 +1018,7 @@ async fn a_boolean_verdict_is_judged_only_on_readable_sources() {
         .await;
 
     for request in judge.requests() {
-        for denied in [secret(), acme_only(), hr_only()] {
+        for denied in [secret(), ana_only(), hr_only()] {
             assert!(!request.text.contains(&denied.text), "{}", denied.id.0);
         }
     }

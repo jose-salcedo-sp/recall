@@ -37,7 +37,7 @@ fn policy() -> Arc<dyn Authorizer> {
             r#"{
                 "roles": {
                     "reader": { "clearance": "internal", "runs": "own" },
-                    "auditor": { "clearance": "confidential", "tenants": "any", "runs": "any" }
+                    "auditor": { "clearance": "confidential", "runs": "any" }
                 },
                 "everyone": ["reader"],
                 "members": { "audit": ["auditor"] }

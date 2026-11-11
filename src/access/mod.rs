@@ -247,79 +247,17 @@ impl Principal {
     }
 }
 
-/// Which tenants' chunks a grant admits. A chunk without a tenant passes every grant.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TenantScope {
-    /// Every tenant's chunks.
-    Any,
-    /// Only these tenants' chunks; empty admits untenanted chunks only.
-    Only(BTreeSet<String>),
-}
-
-impl Default for TenantScope {
-    fn default() -> Self {
-        Self::Only(BTreeSet::new())
-    }
-}
-
-impl TenantScope {
-    fn admits(&self, tenant: Option<&str>) -> bool {
-        match (tenant, self) {
-            (None, _) | (Some(_), Self::Any) => true,
-            (Some(tenant), Self::Only(tenants)) => tenants.contains(tenant),
-        }
-    }
-}
-
-/// `"any"` or a list of tenant names.
-#[derive(Serialize, Deserialize)]
-#[serde(untagged)]
-enum TenantScopeRepr {
-    Any(AnyTenant),
-    Only(BTreeSet<String>),
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum AnyTenant {
-    Any,
-}
-
-impl Serialize for TenantScope {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Self::Any => TenantScopeRepr::Any(AnyTenant::Any),
-            Self::Only(tenants) => TenantScopeRepr::Only(tenants.clone()),
-        }
-        .serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for TenantScope {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Ok(match TenantScopeRepr::deserialize(deserializer)? {
-            TenantScopeRepr::Any(AnyTenant::Any) => Self::Any,
-            TenantScopeRepr::Only(tenants) => Self::Only(tenants),
-        })
-    }
-}
-
-/// One role's permission to read chunks: up to `clearance`, of the tenants in `tenants`.
+/// One role's permission to read chunks: up to `clearance`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChunkGrant {
     role: Role,
     clearance: Sensitivity,
-    tenants: TenantScope,
 }
 
 impl ChunkGrant {
-    /// `role` may read chunks of sensitivity up to `clearance` whose tenant `tenants` admits.
-    pub fn new(role: Role, clearance: Sensitivity, tenants: TenantScope) -> Self {
-        Self {
-            role,
-            clearance,
-            tenants,
-        }
+    /// `role` may read chunks of sensitivity up to `clearance`.
+    pub fn new(role: Role, clearance: Sensitivity) -> Self {
+        Self { role, clearance }
     }
 
     /// The role the grant comes from; named by every decision it allows.
@@ -332,11 +270,6 @@ impl ChunkGrant {
         self.clearance
     }
 
-    /// The tenants it admits.
-    pub fn tenants(&self) -> &TenantScope {
-        &self.tenants
-    }
-
     /// Every sensitivity up to the clearance, as the store compares them.
     pub fn sensitivities(&self) -> impl Iterator<Item = Sensitivity> + '_ {
         Sensitivity::ALL
@@ -345,12 +278,12 @@ impl ChunkGrant {
     }
 
     fn admits(&self, labels: &Labels) -> bool {
-        labels.sensitivity <= self.clearance && self.tenants.admits(labels.tenant.as_deref())
+        labels.sensitivity <= self.clearance
     }
 }
 
 /// The chunks one principal may read, as a predicate over [`Labels`]. A chunk is readable when its ACL admits one of
-/// `members`, and some grant admits its sensitivity and tenant. No grant: nothing is readable.
+/// `members`, and some grant clears its sensitivity. No grant: nothing is readable.
 ///
 /// The members name one user, the principal, and its roles; never a second user. Retrievers push the scope into
 /// their queries, and every step rechecks with [`ChunkScope::decide`]; both compare the same tagged entries, so
@@ -553,7 +486,7 @@ impl Decision {
 pub enum DenyReason {
     /// The chunk's ACL names neither the principal's user nor any of its roles.
     NotInAcl,
-    /// No grant admits it: the principal has no role for its sensitivity, tenant, or for runs at all.
+    /// No grant admits it: the principal has no role for its sensitivity, or for runs at all.
     NoGrant,
     /// The run belongs to another principal, and the grant covers its own runs only.
     NotOwner,

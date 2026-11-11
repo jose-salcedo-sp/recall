@@ -217,3 +217,48 @@ async fn the_tagged_acl_migration_rewrites_stored_entries(pool: PgPool) -> sqlx:
     assert_eq!(trace[1]["step"], "retrieve");
     Ok(())
 }
+
+const SINGLE_TENANT_MIGRATION: i64 = 20261111010000;
+
+/// A document with one chunk of tenant `acme`, current or superseded.
+fn tenanted_chunk(superseded: bool) -> String {
+    format!(
+        "INSERT INTO documents (id, source, external_id, title, url, source_updated_at)
+         VALUES ('markdown:1', 'markdown', '1', 'Roles', 'https://example.test/1', now());
+         INSERT INTO chunks (id, version, document_id, ordinal, url, text, authoritative, acl, tenant, sensitivity,
+                             embedding, embedding_model, embedding_model_version, superseded_at)
+         VALUES ('markdown:1#a', 'v1', 'markdown:1', 0, 'u', 't', true, '{{}}', 'acme', 'internal',
+                 array_fill(0, ARRAY[{EMBEDDING_DIM}])::vector, 'fake', '1', {});",
+        if superseded { "now()" } else { "NULL" }
+    )
+}
+
+/// Dropping the tenant of a current chunk would widen who reads it, so the migration refuses.
+#[sqlx::test(migrations = false)]
+async fn the_single_tenant_migration_refuses_while_a_current_chunk_has_a_tenant(
+    pool: PgPool,
+) -> sqlx::Result<()> {
+    let error = migrate_around(&pool, SINGLE_TENANT_MIGRATION, tenanted_chunk(false))
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("current chunks carry a tenant"),
+        "{error}"
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrations = false)]
+async fn the_single_tenant_migration_drops_the_column(pool: PgPool) -> sqlx::Result<()> {
+    migrate_around(&pool, SINGLE_TENANT_MIGRATION, tenanted_chunk(true)).await?;
+    let columns: Vec<String> = sqlx::query_scalar(
+        "SELECT column_name::text FROM information_schema.columns WHERE table_name = 'chunks'",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert!(
+        !columns.iter().any(|column| column == "tenant"),
+        "{columns:?}"
+    );
+    Ok(())
+}

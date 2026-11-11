@@ -14,18 +14,15 @@ use chrono::{TimeZone, Utc};
 use super::{Acl, AclEntry, Authorizer, Labeler, Principal, Role};
 use crate::domain::{ChunkDraft, Document, Labels, Sensitivity, SourceName, UserId};
 
-/// Labels across every sensitivity and tenancy, under each ACL in `acls`.
+/// Labels across every sensitivity, under each ACL in `acls`.
 fn label_shapes(acls: &[Acl]) -> Vec<Labels> {
     let mut shapes = Vec::new();
     for sensitivity in Sensitivity::ALL {
-        for tenant in [None, Some("acme")] {
-            for acl in acls {
-                shapes.push(Labels {
-                    acl: acl.clone(),
-                    tenant: tenant.map(str::to_owned),
-                    sensitivity,
-                });
-            }
+        for acl in acls {
+            shapes.push(Labels {
+                acl: acl.clone(),
+                sensitivity,
+            });
         }
     }
     shapes
@@ -225,7 +222,6 @@ pub fn documents() -> Vec<Document> {
             .expect("a valid date"),
         labels: Labels {
             acl: Acl::anyone(),
-            tenant: None,
             sensitivity,
         },
         chunks: vec![ChunkDraft {

@@ -2,10 +2,10 @@
 //! Rerank decides which of them answer the question. It does judge access: only chunks the scope admits come back,
 //! as matches or as context.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 
 use recall::{
-    access::{Acl, AclEntry, ChunkGrant, ChunkScope, Role, TenantScope, fakes::unrestricted},
+    access::{Acl, AclEntry, ChunkGrant, ChunkScope, Role, fakes::unrestricted},
     domain::{Chunk, ChunkId, ChunkVersion, DocumentId, Labels, Sensitivity, UserId},
     ingest::markdown,
     retrieval::Retriever,
@@ -32,7 +32,6 @@ fn chunk(name: &str, text: &str) -> Chunk {
         authoritative: true,
         labels: Labels {
             acl: Acl::anyone(),
-            tenant: None,
             sensitivity: Sensitivity::Internal,
         },
     }
@@ -174,10 +173,9 @@ fn labelled(document: &str, locator: &str, text: &str, labels: Labels) -> Chunk 
     }
 }
 
-fn labels(sensitivity: Sensitivity, tenant: Option<&str>, acl: &[&str]) -> Labels {
+fn labels(sensitivity: Sensitivity, acl: &[&str]) -> Labels {
     Labels {
         acl: Acl::only(acl.iter().map(|entry| entry.parse::<AclEntry>().unwrap())),
-        tenant: tenant.map(str::to_owned),
         sensitivity,
     }
 }
@@ -187,79 +185,53 @@ fn labels(sensitivity: Sensitivity, tenant: Option<&str>, acl: &[&str]) -> Label
 fn labelled_corpus() -> Vec<Chunk> {
     let about = "ROLE_USERS maps users to roles.";
     vec![
-        labelled(
-            "roles",
-            "public",
-            about,
-            labels(Sensitivity::Internal, None, &[]),
-        ),
+        labelled("roles", "public", about, labels(Sensitivity::Internal, &[])),
         labelled(
             "roles",
             "secret",
             "ROLE_USERS overrides: ROLE_ROOT maps users to every role.",
-            labels(Sensitivity::Confidential, None, &[]),
+            labels(Sensitivity::Confidential, &[]),
         ),
         labelled(
-            "acme",
+            "ana",
             "plant",
             about,
-            labels(Sensitivity::Internal, Some("acme"), &[]),
+            labels(Sensitivity::Internal, &["user:ana"]),
         ),
         labelled(
             "hr",
             "pay",
             about,
-            labels(Sensitivity::Public, None, &["role:hr"]),
+            labels(Sensitivity::Public, &["role:hr"]),
         ),
         labelled(
             "eve",
             "notes",
             about,
-            labels(Sensitivity::Public, None, &["user:eve"]),
+            labels(Sensitivity::Public, &["user:eve"]),
         ),
-        labelled("faq", "open", about, labels(Sensitivity::Public, None, &[])),
+        labelled("faq", "open", about, labels(Sensitivity::Public, &[])),
     ]
 }
 
-fn scope(user: &str, roles: &[&str], clearance: Sensitivity, tenants: TenantScope) -> ChunkScope {
+fn scope(user: &str, roles: &[&str], clearance: Sensitivity) -> ChunkScope {
     ChunkScope::new(
         UserId::new(user).unwrap(),
         roles.iter().map(|role| Role::new(*role).unwrap()),
-        [ChunkGrant::new(
-            Role::new("reader").unwrap(),
-            clearance,
-            tenants,
-        )],
+        [ChunkGrant::new(Role::new("reader").unwrap(), clearance)],
     )
 }
 
 fn scopes() -> Vec<(&'static str, ChunkScope)> {
     vec![
         ("none", ChunkScope::none()),
-        (
-            "internal",
-            scope("eve", &[], Sensitivity::Internal, TenantScope::default()),
-        ),
-        (
-            "public",
-            scope("eve", &[], Sensitivity::Public, TenantScope::default()),
-        ),
-        (
-            "acme",
-            scope(
-                "ana",
-                &[],
-                Sensitivity::Internal,
-                TenantScope::Only(BTreeSet::from(["acme".to_owned()])),
-            ),
-        ),
-        (
-            "hr",
-            scope("ana", &["hr"], Sensitivity::Public, TenantScope::default()),
-        ),
+        ("internal", scope("eve", &[], Sensitivity::Internal)),
+        ("public", scope("eve", &[], Sensitivity::Public)),
+        ("ana", scope("ana", &[], Sensitivity::Internal)),
+        ("hr", scope("ana", &["hr"], Sensitivity::Public)),
         (
             "a user named hr",
-            scope("hr", &["eve"], Sensitivity::Public, TenantScope::default()),
+            scope("hr", &["eve"], Sensitivity::Public),
         ),
         ("everything", everything()),
     ]
@@ -299,7 +271,7 @@ pub async fn a_user_id_never_matches_a_role_entry(
     make: impl AsyncFnOnce(Vec<Chunk>) -> Box<dyn Retriever>,
 ) -> eros::Result<()> {
     let retriever = make(labelled_corpus()).await;
-    let clash = scope("hr", &["eve"], Sensitivity::Public, TenantScope::default());
+    let clash = scope("hr", &["eve"], Sensitivity::Public);
 
     let found: HashSet<String> = retriever
         .retrieve(QUESTION, &clash)
@@ -400,8 +372,8 @@ mod hybrid {
         let model = HashEmbedder.model();
         sqlx::query(
             "INSERT INTO chunks (id, version, document_id, ordinal, heading, url, text, authoritative, acl,
-                                 tenant, sensitivity, embedding, embedding_model, embedding_model_version)
-             VALUES ($1, $2, $3, $14, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                                 sensitivity, embedding, embedding_model, embedding_model_version)
+             VALUES ($1, $2, $3, $13, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
         )
         .bind(&chunk.id.0)
         .bind(&chunk.version.0)
@@ -411,7 +383,6 @@ mod hybrid {
         .bind(&chunk.text)
         .bind(chunk.authoritative)
         .bind(chunk.labels.acl.to_strings())
-        .bind(&chunk.labels.tenant)
         .bind(chunk.labels.sensitivity.as_str())
         .bind(Vector::from(embedding))
         .bind(&model.id)

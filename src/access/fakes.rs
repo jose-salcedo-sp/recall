@@ -6,7 +6,6 @@ use crate::domain::{Document, Labels, Sensitivity, UserId};
 
 use super::{
     Access, Authorizer, ChunkGrant, ChunkScope, Labeler, PolicyRef, Principal, Role, RunAccess,
-    TenantScope,
 };
 
 /// The principal tests ask as when access is not their subject.
@@ -14,7 +13,7 @@ pub fn tester() -> Principal {
     Principal::new(UserId::new("tester").expect("a valid user id"))
 }
 
-/// Every chunk of every tenant with an empty ACL or one naming [`tester`], and every run: for tests whose subject is
+/// Every chunk with an empty ACL or one naming [`tester`], and every run: for tests whose subject is
 /// not access.
 pub fn unrestricted() -> Access {
     let role = Role::new("tester").expect("a valid role name");
@@ -22,11 +21,7 @@ pub fn unrestricted() -> Access {
         ChunkScope::new(
             tester().id().clone(),
             [],
-            [ChunkGrant::new(
-                role.clone(),
-                Sensitivity::Confidential,
-                TenantScope::Any,
-            )],
+            [ChunkGrant::new(role.clone(), Sensitivity::Confidential)],
         ),
         RunAccess::Any { role },
     )

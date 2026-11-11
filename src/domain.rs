@@ -442,41 +442,20 @@ impl TryFrom<&str> for Sensitivity {
 pub struct Labels {
     /// The users and roles that may read, inherited from the source ACL.
     pub acl: Acl,
-    /// The tenant the content concerns, if any; `None` means visible to every tenant.
-    pub tenant: Option<String>,
     /// Visibility tier.
     pub sensitivity: Sensitivity,
 }
 
-/// Two sets of labels that no chunk can carry at once, found by [`Labels::tighten`].
-#[derive(Debug, PartialEq, Eq, thiserror::Error)]
-pub enum LabelConflict {
-    /// Both ACLs restrict, and no entry is in both.
-    #[error(transparent)]
-    Acl(#[from] DisjointAcls),
-    /// The labels name two different tenants.
-    #[error("the labels name two tenants, {0:?} and {1:?}")]
-    Tenant(String, String),
-}
-
 impl Labels {
-    /// Labels no wider than `self` or `other` on any field: the ACLs intersected ([`Acl::tighten`]), the one tenant
-    /// either names, and the higher sensitivity. Whoever may read the result may read under both.
+    /// Labels no wider than `self` or `other` on any field: the ACLs intersected ([`Acl::tighten`]) and the higher
+    /// sensitivity. Whoever may read the result may read under both.
     ///
     /// # Errors
     ///
-    /// [`LabelConflict`] when no chunk could be labelled with both.
-    pub fn tighten(&self, other: &Labels) -> Result<Labels, LabelConflict> {
-        let tenant = match (&self.tenant, &other.tenant) {
-            (Some(a), Some(b)) if a != b => {
-                return Err(LabelConflict::Tenant(a.clone(), b.clone()));
-            }
-            (Some(tenant), _) | (None, Some(tenant)) => Some(tenant.clone()),
-            (None, None) => None,
-        };
+    /// [`DisjointAcls`] when both ACLs restrict and share no entry, so no chunk could be labelled with both.
+    pub fn tighten(&self, other: &Labels) -> Result<Labels, DisjointAcls> {
         Ok(Labels {
             acl: self.acl.tighten(&other.acl)?,
-            tenant,
             sensitivity: self.sensitivity.max(other.sensitivity),
         })
     }
@@ -769,24 +748,20 @@ mod tests {
     #[test]
     fn tightened_labels_are_no_wider_than_either() {
         let entry = |text: &str| text.parse::<crate::access::AclEntry>().unwrap();
-        let labels = |acl: &[&str], tenant: Option<&str>, sensitivity| Labels {
+        let labels = |acl: &[&str], sensitivity| Labels {
             acl: Acl::only(acl.iter().map(|text| entry(text))),
-            tenant: tenant.map(str::to_owned),
             sensitivity,
         };
-        let connector = labels(&["role:hr", "user:ana"], None, Sensitivity::Confidential);
-        let rule = labels(&["role:hr"], Some("acme"), Sensitivity::Public);
-        let tight = labels(&["role:hr"], Some("acme"), Sensitivity::Confidential);
+        let connector = labels(&["role:hr", "user:ana"], Sensitivity::Confidential);
+        let rule = labels(&["role:hr"], Sensitivity::Public);
+        let tight = labels(&["role:hr"], Sensitivity::Confidential);
         assert_eq!(connector.tighten(&rule).unwrap(), tight);
         assert_eq!(rule.tighten(&connector).unwrap(), tight);
-        assert!(matches!(
-            connector.tighten(&labels(&["role:finance"], None, Sensitivity::Public)),
-            Err(LabelConflict::Acl(_))
-        ));
-        assert!(matches!(
-            rule.tighten(&labels(&[], Some("globex"), Sensitivity::Public)),
-            Err(LabelConflict::Tenant(..))
-        ));
+        assert!(
+            connector
+                .tighten(&labels(&["role:finance"], Sensitivity::Public))
+                .is_err()
+        );
     }
 
     #[test]
@@ -811,7 +786,6 @@ mod tests {
             updated_at: Utc::now(),
             labels: Labels {
                 acl: Acl::anyone(),
-                tenant: None,
                 sensitivity: Sensitivity::Internal,
             },
             chunks: vec![],

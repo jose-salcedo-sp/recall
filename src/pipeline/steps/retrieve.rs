@@ -92,11 +92,7 @@ mod tests {
             ChunkScope::new(
                 tester().id().clone(),
                 [],
-                [crate::access::ChunkGrant::new(
-                    role,
-                    Sensitivity::Internal,
-                    crate::access::TenantScope::Any,
-                )],
+                [crate::access::ChunkGrant::new(role, Sensitivity::Internal)],
             ),
             Default::default(),
         )

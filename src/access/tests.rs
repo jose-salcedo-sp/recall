@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use super::*;
 
 fn role(name: &str) -> Role {
@@ -18,10 +16,9 @@ fn acl(entries: &[&str]) -> Acl {
     )
 }
 
-fn labels(sensitivity: Sensitivity, tenant: Option<&str>, entries: &[&str]) -> Labels {
+fn labels(sensitivity: Sensitivity, entries: &[&str]) -> Labels {
     Labels {
         acl: acl(entries),
-        tenant: tenant.map(str::to_owned),
         sensitivity,
     }
 }
@@ -45,31 +42,23 @@ fn roles_are_validated() {
 fn no_scope_admits_nothing() {
     for sensitivity in Sensitivity::ALL {
         assert_eq!(
-            ChunkScope::none().decide(&labels(sensitivity, None, &[])),
+            ChunkScope::none().decide(&labels(sensitivity, &[])),
             denied(DenyReason::NoGrant)
         );
     }
 }
 
 #[test]
-fn a_grant_admits_up_to_its_clearance_and_its_tenants() {
+fn a_grant_admits_up_to_its_clearance() {
     let scope = ChunkScope::new(
         user("ana"),
         [],
-        [ChunkGrant::new(
-            role("reader"),
-            Sensitivity::Internal,
-            TenantScope::Only(BTreeSet::from(["acme".to_owned()])),
-        )],
+        [ChunkGrant::new(role("reader"), Sensitivity::Internal)],
     );
-    assert!(scope.admits(&labels(Sensitivity::Public, None, &[])));
-    assert!(scope.admits(&labels(Sensitivity::Internal, Some("acme"), &[])));
+    assert!(scope.admits(&labels(Sensitivity::Public, &[])));
+    assert!(scope.admits(&labels(Sensitivity::Internal, &[])));
     assert_eq!(
-        scope.decide(&labels(Sensitivity::Confidential, None, &[])),
-        denied(DenyReason::NoGrant)
-    );
-    assert_eq!(
-        scope.decide(&labels(Sensitivity::Internal, Some("globex"), &[])),
+        scope.decide(&labels(Sensitivity::Confidential, &[])),
         denied(DenyReason::NoGrant)
     );
 }
@@ -82,21 +71,16 @@ fn the_acl_is_checked_before_any_grant() {
         [ChunkGrant::new(
             role("maintainer"),
             Sensitivity::Confidential,
-            TenantScope::Any,
         )],
     );
     assert_eq!(
-        scope.decide(&labels(Sensitivity::Public, None, &["role:finance"])),
+        scope.decide(&labels(Sensitivity::Public, &["role:finance"])),
         denied(DenyReason::NotInAcl)
     );
-    assert!(scope.admits(&labels(
-        Sensitivity::Public,
-        None,
-        &["role:finance", "role:hr"]
-    )));
-    assert!(scope.admits(&labels(Sensitivity::Public, None, &["user:ana"])));
+    assert!(scope.admits(&labels(Sensitivity::Public, &["role:finance", "role:hr"])));
+    assert!(scope.admits(&labels(Sensitivity::Public, &["user:ana"])));
     assert_eq!(
-        scope.decide(&labels(Sensitivity::Public, None, &["user:hr", "role:ana"])),
+        scope.decide(&labels(Sensitivity::Public, &["user:hr", "role:ana"])),
         denied(DenyReason::NotInAcl)
     );
 }
@@ -154,39 +138,22 @@ fn the_first_admitting_grant_is_named() {
         user("ana"),
         [],
         [
-            ChunkGrant::new(role("reader"), Sensitivity::Public, TenantScope::default()),
-            ChunkGrant::new(role("staff"), Sensitivity::Internal, TenantScope::Any),
+            ChunkGrant::new(role("reader"), Sensitivity::Public),
+            ChunkGrant::new(role("staff"), Sensitivity::Internal),
         ],
     );
     assert_eq!(
-        scope.decide(&labels(Sensitivity::Public, None, &[])),
+        scope.decide(&labels(Sensitivity::Public, &[])),
         Decision::Allowed {
             role: role("reader")
         }
     );
     assert_eq!(
-        scope.decide(&labels(Sensitivity::Public, Some("acme"), &[])),
+        scope.decide(&labels(Sensitivity::Internal, &[])),
         Decision::Allowed {
             role: role("staff")
         }
     );
-}
-
-#[test]
-fn tenant_scope_is_any_or_a_list_in_json() {
-    assert_eq!(
-        serde_json::from_str::<TenantScope>("\"any\"").unwrap(),
-        TenantScope::Any
-    );
-    assert_eq!(
-        serde_json::from_str::<TenantScope>("[\"acme\"]").unwrap(),
-        TenantScope::Only(BTreeSet::from(["acme".to_owned()]))
-    );
-    assert!(serde_json::from_str::<TenantScope>("\"all\"").is_err());
-    for scope in [TenantScope::Any, TenantScope::default()] {
-        let json = serde_json::to_string(&scope).unwrap();
-        assert_eq!(serde_json::from_str::<TenantScope>(&json).unwrap(), scope);
-    }
 }
 
 #[test]
@@ -195,11 +162,7 @@ fn access_round_trips_through_json() {
         ChunkScope::new(
             user("ana"),
             [role("reader")],
-            [ChunkGrant::new(
-                role("reader"),
-                Sensitivity::Internal,
-                TenantScope::Any,
-            )],
+            [ChunkGrant::new(role("reader"), Sensitivity::Internal)],
         ),
         RunAccess::Own {
             role: role("reader"),
@@ -239,9 +202,7 @@ fn run_access_decides_by_owner() {
 
 mod static_authorizer {
     use crate::{
-        access::{
-            Access, ChunkGrant, ChunkScope, Principal, Role, TenantScope, fakes::StaticAuthorizer,
-        },
+        access::{Access, ChunkGrant, ChunkScope, Principal, Role, fakes::StaticAuthorizer},
         domain::{Sensitivity, UserId},
     };
 
@@ -256,11 +217,7 @@ mod static_authorizer {
         StaticAuthorizer::new(principals().into_iter().map(|principal| {
             let staff = Role::new("staff").unwrap();
             let roles = (principal.id().as_str() != staff.as_str()).then_some(staff);
-            let grant = ChunkGrant::new(
-                Role::new("reader").unwrap(),
-                Sensitivity::Internal,
-                TenantScope::Any,
-            );
+            let grant = ChunkGrant::new(Role::new("reader").unwrap(), Sensitivity::Internal);
             let access = Access::new(
                 ChunkScope::new(principal.id().clone(), roles, [grant]),
                 Default::default(),
@@ -298,7 +255,7 @@ mod rule_policy {
                 r#"{
                     "roles": {
                         "reader": { "clearance": "internal", "runs": "own" },
-                        "auditor": { "clearance": "confidential", "tenants": "any", "runs": "any" }
+                        "auditor": { "clearance": "confidential", "runs": "any" }
                     },
                     "members": { "ana": ["reader"], "jose": ["reader", "auditor"], "auditor": ["reader"] }
                 }"#,
@@ -341,4 +298,20 @@ async fn failing_adapters_fail() {
     assert!(FailingAuthorizer.access(&principal).await.is_err());
     let document = &contract::documents()[0];
     assert!(FailingLabeler.label(document).await.is_err());
+}
+
+#[test]
+fn a_stored_scope_from_before_single_tenancy_still_loads() {
+    let json = serde_json::json!({
+        "members": ["user:ana"],
+        "grants": [{ "role": "reader", "clearance": "internal", "tenants": "any" }]
+    });
+    assert_eq!(
+        serde_json::from_value::<ChunkScope>(json).unwrap(),
+        ChunkScope::new(
+            user("ana"),
+            [],
+            [ChunkGrant::new(role("reader"), Sensitivity::Internal)]
+        )
+    );
 }

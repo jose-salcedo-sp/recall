@@ -38,7 +38,6 @@ fn document(source: &SourceName, external_id: &str, chunks: &[(&str, &str)]) -> 
         updated_at: updated(1),
         labels: Labels {
             acl: Acl::only(["role:arm".parse().unwrap()]),
-            tenant: None,
             sensitivity: Sensitivity::Internal,
         },
         chunks: chunks

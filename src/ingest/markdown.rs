@@ -146,7 +146,6 @@ impl Connector {
             updated_at,
             labels: Labels {
                 acl: Acl::anyone(),
-                tenant: None,
                 sensitivity: Sensitivity::Internal,
             },
             chunks,

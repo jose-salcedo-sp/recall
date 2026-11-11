@@ -132,7 +132,6 @@ pub(crate) mod fixtures {
             authoritative: false,
             labels: Labels {
                 acl: crate::access::Acl::anyone(),
-                tenant: None,
                 sensitivity: Sensitivity::Internal,
             },
         }
