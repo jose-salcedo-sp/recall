@@ -8,7 +8,16 @@
 //!
 //! One binary serves four commands: `recall ingest` loads the corpus, `recall serve` runs the OpenAI-compatible HTTP
 //! API, `recall eval` measures each step against a golden set, and `recall models check` calls each model backend
-//! once.
+//! once. The binary is one caller of this library: its clap options and the adapters they select live in `cli`
+//! (the `cli` feature, on by default), and nothing else in the crate reads the command line or the environment.
+//!
+//! # Library interface
+//!
+//! A domain application builds [`Ports`] from its adapters and parses a [`PipelineConfig`], then
+//! [`PipelineAnswerer::assemble`] gives the [`pipeline::report::Answerer`] it asks through. Ingestion is
+//! [`ingest::ingest`] over a [`store::chunks::ChunkStore`], an [`llm::Embedder`], an [`access::Labeler`] and its
+//! [`ingest::Sources`]. Every run starts at [`pipeline::Run::authorize`], so every trace opens with the policy's
+//! decision; eval's runs too.
 //!
 //! # Pipeline
 //!
@@ -34,13 +43,13 @@
 //!
 //! | Port | Production adapter |
 //! |---|---|
-//! | [`ingest::Source`] | [`ingest::markdown::Connector`], the markdown directory; a domain passes its own connectors to [`ingest::run_with`] |
+//! | [`ingest::Source`] | [`ingest::markdown::Connector`], the markdown directory; a domain passes its own connectors to [`ingest::ingest`] |
 //! | [`access::Authorizer`] | [`access::rules::RulePolicy`], roles from `config/access.json`; asked once per run, enforced at every step |
-//! | [`access::Labeler`] | [`access::rules::LabelRules`], by document-id prefix; [`access::ConnectorLabels`] keeps the connector's |
-//! | [`llm::Embedder`] | Bedrock or an OpenAI-compatible server (Ollama, Workers AI), chosen by [`llm::embedder`] |
-//! | [`llm::ChatModel`] | Bedrock or an OpenAI-compatible server (Ollama, Workers AI), chosen by [`llm::explain_model`] |
-//! | [`llm::system_one::SystemOne`] | [`llm::system_one::HttpSystemOne`] (Kev, system-one.dev) or [`llm::workers_ai::WorkersAiSystemOne`], chosen by [`llm::system_one_client`] |
-//! | [`llm::judge::Judge`] | [`llm::judge::SystemOneJudge`], over whichever System One is configured, chosen by [`llm::judge()`]; every judged step asks through it |
+//! | [`access::Labeler`] | [`access::rules::LabelRules`], tightening by source and path prefix; [`access::ConnectorLabels`] keeps the connector's |
+//! | [`llm::Embedder`] | Bedrock or an OpenAI-compatible server (Ollama, Workers AI), chosen by `recall`'s `cli` options |
+//! | [`llm::ChatModel`] | Bedrock or an OpenAI-compatible server (Ollama, Workers AI), chosen by `recall`'s `cli` options |
+//! | [`llm::system_one::SystemOne`] | [`llm::system_one::HttpSystemOne`] (Kev, system-one.dev) or [`llm::workers_ai::WorkersAiSystemOne`], chosen by `recall`'s `cli` options |
+//! | [`llm::judge::Judge`] | [`llm::judge::SystemOneJudge`], over whichever System One is configured, every judged step asks through it |
 //! | [`retrieval::Retriever`] | [`retrieval::hybrid::HybridRetriever`], full-text and vector search in Postgres |
 //! | [`store::RunStore`] | [`store::runs::PgRunStore`] |
 //! | [`store::chunks::ChunkStore`] | [`store::chunks::PgChunkStore`]; [`ingest::ingest`] writes through it |
@@ -57,18 +66,23 @@
 //! - [`retrieval`], [`llm`] and [`pipeline`]: answering a question.
 //! - [`server`]: the OpenAI-compatible HTTP front end.
 //! - [`eval`]: golden-set metrics and threshold tuning.
+//! - `cli`: the `recall` command line, the environment, and the production adapters it selects.
 //!
 //! [`docs/design.md`]: https://github.com/jose-salcedo-sp/recall/blob/main/docs/design.md
 
 pub mod access;
+#[cfg(feature = "cli")]
+pub mod cli;
 pub mod clock;
 pub mod config;
 pub mod domain;
 pub mod eval;
 pub mod ingest;
 pub mod llm;
-pub mod models;
 pub mod pipeline;
 pub mod retrieval;
 pub mod server;
 pub mod store;
+
+pub use config::PipelineConfig;
+pub use pipeline::{answerer::PipelineAnswerer, assembly::Ports};

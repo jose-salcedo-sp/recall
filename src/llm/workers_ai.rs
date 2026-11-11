@@ -215,6 +215,7 @@ impl FromStr for WorkersAiEmbedModel {
 }
 
 /// The public Cloudflare API root.
+#[cfg(feature = "cli")]
 pub(crate) fn cloudflare_api() -> Url {
     CLOUDFLARE_API
         .parse()

@@ -64,7 +64,8 @@ async fn post(
 
 /// How much a reasoning model thinks before answering, sent as `reasoning_effort`. The levels are those of
 /// `@cf/qwen/qwen3.8-27b` on Workers AI, whose default is `xhigh`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum ReasoningEffort {
     /// Fastest. On Workers AI, `low` with a `json_schema` response format hangs until the 120 s gateway timeout
     /// (cloudflare/workers-sdk#16165), so `Explain`, which always sends a schema, should use `medium`.
@@ -87,7 +88,8 @@ impl ReasoningEffort {
 }
 
 /// How a request schema is written into `response_format.json_schema`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum SchemaFormat {
     /// OpenAI's `{"name": "respond", "strict": true, "schema": ...}`.
     #[default]

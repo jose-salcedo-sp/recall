@@ -18,31 +18,23 @@ use crate::{
     pipeline::report::RunReport,
 };
 
-/// Every migration in `migrations/`, embedded at compile time. [`connect`] runs it; database tests pass it to
-/// `#[sqlx::test]`.
-pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
-
-/// Database connection options.
-#[derive(Clone, Debug, clap::Args)]
-pub struct DbArgs {
-    /// Postgres connection URL.
-    #[arg(long, env = "DATABASE_URL")]
-    pub database_url: String,
-}
-
-/// Connects and applies pending migrations.
+/// Connects to the Postgres at `url` and applies pending migrations.
 ///
 /// # Errors
 ///
 /// When the database is unreachable or a migration fails.
-pub async fn connect(args: &DbArgs) -> eros::Result<PgPool> {
+pub async fn connect(url: &str) -> eros::Result<PgPool> {
     let pool = PgPoolOptions::new()
         .max_connections(10)
-        .connect(&args.database_url)
+        .connect(url)
         .await?;
     MIGRATOR.run(&pool).await?;
     Ok(pool)
 }
+
+/// Every migration in `migrations/`, embedded at compile time. [`connect`] runs it; database tests pass it to
+/// `#[sqlx::test]`.
+pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 /// A persisted run, as `GET /v1/runs/{id}` returns it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -5,7 +5,7 @@ use crate::{
     access::{
         Access,
         fakes::{FailingAuthorizer, StaticAuthorizer, tester},
-        rules::AccessConfig,
+        rules::{AccessConfig, RulePolicy},
     },
     clock::fakes::{FixedClock, SequentialIds},
     domain::{ChunkId, Labels, Sensitivity, UserId},
@@ -758,11 +758,10 @@ async fn the_plan_and_each_step_s_record_say_what_ran() {
 const POLICY: &str = r#"{
     "roles": {
         "reader": { "clearance": "internal", "runs": "own" },
-        "acme": { "clearance": "internal", "tenants": ["acme"] },
-        "maintainer": { "clearance": "confidential", "tenants": "any", "runs": "any" }
+        "maintainer": { "clearance": "confidential", "runs": "any" }
     },
     "everyone": ["reader"],
-    "members": { "jose": ["maintainer"], "ana": ["acme"] }
+    "members": { "jose": ["maintainer"] }
 }"#;
 
 fn policy() -> Arc<RulePolicy> {
@@ -782,20 +781,18 @@ fn secret() -> Chunk {
         "role-users-secret",
         "ROLE_USERS maps users to roles; the admin override is ROLE_ROOT.",
         Labels {
-            acl: vec![],
-            tenant: None,
+            acl: crate::access::Acl::anyone(),
             sensitivity: Sensitivity::Confidential,
         },
     )
 }
 
-fn acme_only() -> Chunk {
+fn ana_only() -> Chunk {
     labelled(
-        "acme-roles",
-        "At acme, a table maps users to roles per plant.",
+        "ana-roles",
+        "Ana's notes: a table maps users to roles per plant.",
         Labels {
-            acl: vec![],
-            tenant: Some("acme".into()),
+            acl: crate::access::Acl::only(["user:ana".parse().unwrap()]),
             sensitivity: Sensitivity::Internal,
         },
     )
@@ -806,19 +803,18 @@ fn hr_only() -> Chunk {
         "hr-roles",
         "HR maps users to roles in the payroll table.",
         Labels {
-            acl: vec!["hr".into()],
-            tenant: None,
+            acl: crate::access::Acl::only(["role:hr".parse().unwrap()]),
             sensitivity: Sensitivity::Public,
         },
     )
 }
 
 fn labelled_corpus() -> Vec<Chunk> {
-    vec![role_users(), secret(), acme_only(), hr_only(), login02()]
+    vec![role_users(), secret(), ana_only(), hr_only(), login02()]
 }
 
 fn principal(id: &str) -> Principal {
-    Principal::new(UserId(id.into()))
+    Principal::new(UserId::new(id).unwrap())
 }
 
 /// One claim per chunk of the corpus, each citing only that chunk, as a model would that tried to cite everything.
@@ -937,7 +933,7 @@ async fn a_citation_of_a_denied_chunk_is_stripped_and_never_shown() {
         .filter(|check| !check.decision.is_allowed())
         .map(|check| &check.chunk.id)
         .collect();
-    assert_eq!(denied, [&secret().id, &acme_only().id, &hr_only().id]);
+    assert_eq!(denied, [&secret().id, &ana_only().id, &hr_only().id]);
     for step in ["rerank", "explain", "verify"] {
         let entry = report
             .trace
@@ -1022,7 +1018,7 @@ async fn a_boolean_verdict_is_judged_only_on_readable_sources() {
         .await;
 
     for request in judge.requests() {
-        for denied in [secret(), acme_only(), hr_only()] {
+        for denied in [secret(), ana_only(), hr_only()] {
             assert!(!request.text.contains(&denied.text), "{}", denied.id.0);
         }
     }
@@ -1080,4 +1076,26 @@ async fn an_explain_model_that_cannot_answer_fails_the_run_at_explain() {
         &report.outcome,
         Outcome::Failed { at, error } if at == "explain" && error.contains("connection refused")
     ));
+}
+
+#[test]
+fn new_keeps_the_judge_it_is_given() {
+    let chat = Arc::new(ScriptedChat::replying(Vec::<String>::new()));
+    let without = ports(
+        Arc::new(KeywordRetriever { chunks: corpus() }),
+        chat,
+        Arc::new(StaticAuthorizer::tester()),
+    );
+    let with = Ports {
+        judge: Some(provenance_judge()),
+        ..without.clone()
+    };
+    assert_eq!(
+        PipelineAnswerer::new(without).plan().classify,
+        crate::pipeline::trace::ClassifyMode::AllOpen
+    );
+    assert_eq!(
+        PipelineAnswerer::new(with).plan().classify,
+        crate::pipeline::trace::ClassifyMode::Judged
+    );
 }

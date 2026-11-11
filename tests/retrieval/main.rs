@@ -10,8 +10,8 @@ mod seed;
 use std::sync::Arc;
 
 use recall::{
-    access::{ChunkGrant, ChunkScope, Role, TenantScope},
-    domain::{ChunkId, Sensitivity, SourceName},
+    access::{ChunkGrant, ChunkScope, Role},
+    domain::{ChunkId, Sensitivity, SourceName, UserId},
     ingest::markdown,
     llm::{Embedder, ModelRef, fakes::HashEmbedder},
     retrieval::{
@@ -25,12 +25,9 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 
 fn scope(clearance: Sensitivity) -> ChunkScope {
     ChunkScope::new(
-        [ACL_GROUP],
-        [ChunkGrant::new(
-            Role::new("reader").unwrap(),
-            clearance,
-            TenantScope::Any,
-        )],
+        UserId::new("eve").unwrap(),
+        [Role::new("arm").unwrap()],
+        [ChunkGrant::new(Role::new("reader").unwrap(), clearance)],
     )
 }
 
@@ -472,7 +469,7 @@ async fn chunks_are_fully_populated(pool: PgPool) {
     assert_eq!(chunk.title, "Role design");
     assert_eq!(chunk.heading.as_deref(), Some("Naming"));
     assert_eq!(chunk.url, "https://example.test/markdown:50#naming");
-    assert_eq!(chunk.labels.acl, ["group:arm"]);
+    assert_eq!(chunk.labels.acl.to_strings(), [ACL_GROUP]);
     assert!(!chunk.authoritative);
 }
 

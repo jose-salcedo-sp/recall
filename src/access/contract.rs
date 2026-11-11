@@ -11,29 +11,30 @@
 
 use chrono::{TimeZone, Utc};
 
-use super::{Authorizer, Labeler, Principal};
+use super::{Acl, AclEntry, Authorizer, Labeler, Principal, Role};
 use crate::domain::{ChunkDraft, Document, Labels, Sensitivity, SourceName, UserId};
 
-/// Labels across every sensitivity, tenancy and ACL shape a policy can be asked about.
-fn label_shapes() -> Vec<Labels> {
+/// Labels across every sensitivity, under each ACL in `acls`.
+fn label_shapes(acls: &[Acl]) -> Vec<Labels> {
     let mut shapes = Vec::new();
     for sensitivity in Sensitivity::ALL {
-        for tenant in [None, Some("acme")] {
-            for acl in [vec![], vec!["nobody-else"]] {
-                shapes.push(Labels {
-                    acl: acl.into_iter().map(str::to_owned).collect(),
-                    tenant: tenant.map(str::to_owned),
-                    sensitivity,
-                });
-            }
+        for acl in acls {
+            shapes.push(Labels {
+                acl: acl.clone(),
+                sensitivity,
+            });
         }
     }
     shapes
 }
 
+fn user(id: &str) -> UserId {
+    UserId::new(id).expect("contract fixtures use valid user ids")
+}
+
 /// A principal no policy has heard of; one id per call, so it cannot collide with configured principals.
 fn stranger() -> Principal {
-    Principal::new(UserId(format!("stranger-{}", uuid::Uuid::now_v7())))
+    Principal::new(user(&format!("stranger-{}", uuid::Uuid::now_v7())))
 }
 
 /// Deny by default: a principal the policy does not know reads no chunk and no run, its own included.
@@ -44,7 +45,8 @@ fn stranger() -> Principal {
 pub async fn an_unknown_principal_reads_nothing(authorizer: &dyn Authorizer) -> eros::Result<()> {
     let principal = stranger();
     let access = authorizer.access(&principal).await?;
-    for labels in label_shapes() {
+    let nobody_else = Acl::only([AclEntry::User(user("nobody-else"))]);
+    for labels in label_shapes(&[Acl::anyone(), nobody_else]) {
         assert!(!access.chunks().admits(&labels), "{labels:?}");
     }
     assert!(
@@ -56,7 +58,7 @@ pub async fn an_unknown_principal_reads_nothing(authorizer: &dyn Authorizer) -> 
     assert!(
         !access
             .runs()
-            .decide(&principal, &UserId("someone".into()))
+            .decide(&principal, &user("someone"))
             .is_allowed()
     );
     Ok(())
@@ -100,8 +102,58 @@ pub async fn acl_members_never_name_another_principal(
             .filter(|other| other.id() != principal.id())
         {
             assert!(
-                !access.chunks().members().contains(&other.id().0),
+                !access
+                    .chunks()
+                    .members()
+                    .contains(&AclEntry::User(other.id().clone())),
                 "{principal:?} is a member as {other:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A user id never matches a role entry: a principal whose id is the name of a role another principal holds reads
+/// nothing ACL'd to that role. The fixture's `principals` should include such a principal, and the policy must not
+/// give it that role.
+///
+/// # Errors
+///
+/// When the authorizer fails.
+pub async fn a_user_id_never_reads_as_a_role(
+    authorizer: &dyn Authorizer,
+    principals: &[Principal],
+) -> eros::Result<()> {
+    let mut held = Vec::new();
+    for principal in principals {
+        let access = authorizer.access(principal).await?;
+        held.extend(
+            access
+                .chunks()
+                .members()
+                .iter()
+                .filter_map(|entry| match entry {
+                    AclEntry::Role(role) => Some((principal.id().clone(), role.clone())),
+                    AclEntry::User(_) => None,
+                }),
+        );
+    }
+    for principal in principals {
+        let Ok(namesake) = Role::new(principal.id().as_str()) else {
+            continue;
+        };
+        if !held
+            .iter()
+            .any(|(holder, role)| holder != principal.id() && *role == namesake)
+        {
+            continue;
+        }
+        let access = authorizer.access(principal).await?;
+        let role_entry = AclEntry::Role(namesake);
+        for labels in label_shapes(&[Acl::only([role_entry.clone()])]) {
+            assert!(
+                !access.chunks().admits(&labels),
+                "{principal:?} reads as {role_entry} without holding it: {labels:?}"
             );
         }
     }
@@ -144,6 +196,11 @@ macro_rules! authorizer_contract {
         }
 
         #[$attr]
+        async fn a_user_id_never_reads_as_a_role($($arg: $ty),*) -> eros::Result<()> {
+            $crate::access::contract::a_user_id_never_reads_as_a_role(&$make, &$principals).await
+        }
+
+        #[$attr]
         async fn the_policy_ref_is_stable($($arg: $ty),*) -> eros::Result<()> {
             $crate::access::contract::the_policy_ref_is_stable(&$make).await
         }
@@ -164,8 +221,7 @@ pub fn documents() -> Vec<Document> {
             .single()
             .expect("a valid date"),
         labels: Labels {
-            acl: vec![],
-            tenant: None,
+            acl: Acl::anyone(),
             sensitivity,
         },
         chunks: vec![ChunkDraft {

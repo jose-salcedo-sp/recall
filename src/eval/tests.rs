@@ -65,14 +65,13 @@ fn eval_ports() -> (EvalPorts, Arc<MemoryFiles>) {
     let ports = EvalPorts {
         files: Arc::<MemoryFiles>::clone(&files),
         clock: Arc::new(FixedClock::default()),
+        ids: Arc::new(crate::clock::fakes::SequentialIds::default()),
     };
     (ports, files)
 }
 
-fn tester_args() -> AsArgs {
-    AsArgs {
-        user: tester().id().0.clone(),
-    }
+fn concurrency(n: usize) -> std::num::NonZeroUsize {
+    std::num::NonZeroUsize::new(n).unwrap()
 }
 
 fn entry(step: &str, outcome: StepOutcome, record: Option<TraceRecord>) -> TraceEntry {
@@ -778,13 +777,13 @@ async fn run_command_writes_results_and_gates_on_the_baseline_file() {
         .map(|(golden, _)| serde_json::to_string(golden).unwrap())
         .collect();
     files.write(&golden_path, &golden_text.join("\n")).unwrap();
-    let args = |out: &str, baseline: Option<PathBuf>| RunArgs {
+    let args = |out: &str, baseline: Option<PathBuf>| RunOptions {
         golden: golden_path.clone(),
         out: dir.join(out),
         baseline,
-        concurrency: 2,
+        concurrency: concurrency(2),
         questions: vec![],
-        asking: tester_args(),
+        principal: tester(),
     };
 
     run_golden(
@@ -861,13 +860,13 @@ async fn one_question_runs_alone_and_is_gated_against_the_same_question() {
         .map(|(golden, _)| serde_json::to_string(golden).unwrap())
         .collect();
     files.write(&golden_path, &golden_text.join("\n")).unwrap();
-    let args = |out: &str, baseline: Option<PathBuf>, questions: &[&str]| RunArgs {
+    let args = |out: &str, baseline: Option<PathBuf>, questions: &[&str]| RunOptions {
         golden: golden_path.clone(),
         out: dir.join(out),
         baseline,
-        concurrency: 2,
+        concurrency: concurrency(2),
         questions: questions.iter().map(|id| (*id).to_owned()).collect(),
-        asking: tester_args(),
+        principal: tester(),
     };
     run_golden(
         Arc::new(Scripted::new(&runs)),
@@ -935,13 +934,13 @@ async fn golden_parse_errors_surface_through_the_run_command() {
             },
         }),
         &ports,
-        RunArgs {
+        RunOptions {
             golden: golden_path,
             out: dir.join("out.json"),
             baseline: None,
-            concurrency: 1,
+            concurrency: concurrency(1),
             questions: vec![],
-            asking: tester_args(),
+            principal: tester(),
         },
         None,
     )
@@ -1186,7 +1185,7 @@ fn retrieval_golden(id: &str, question: &str, relevant: &crate::domain::Chunk) -
 #[tokio::test]
 async fn retrieval_command_scores_matches_and_diffs_each_question_against_a_baseline() {
     use crate::retrieval::fakes::KeywordRetriever;
-    use retrieval::{Change, RetrievalArgs, RetrievalResults, run_retrieval};
+    use retrieval::{Change, RetrievalOptions, RetrievalResults, run_retrieval};
 
     let chunks = corpus();
     let golden = [
@@ -1201,13 +1200,13 @@ async fn retrieval_command_scores_matches_and_diffs_each_question_against_a_base
         .map(|g| serde_json::to_string(g).unwrap())
         .collect();
     files.write(&golden_path, &lines.join("\n")).unwrap();
-    let args = |out: &str, baseline: Option<PathBuf>| RetrievalArgs {
+    let args = |out: &str, baseline: Option<PathBuf>| RetrievalOptions {
         golden: golden_path.clone(),
         out: Some(dir.join(out)),
         baseline,
-        concurrency: 2,
+        concurrency: concurrency(2),
         questions: vec![],
-        asking: tester_args(),
+        principal: tester(),
     };
     let retriever = |chunks: Vec<crate::domain::Chunk>| Arc::new(KeywordRetriever { chunks });
 
@@ -1277,7 +1276,7 @@ async fn retrieval_command_scores_matches_and_diffs_each_question_against_a_base
         retriever(chunks),
         &StaticAuthorizer::tester(),
         &ports,
-        RetrievalArgs {
+        RetrievalOptions {
             questions: vec!["sheet".into()],
             ..args("third.json", Some(dir.join("first.json")))
         },
@@ -1287,6 +1286,47 @@ async fn retrieval_command_scores_matches_and_diffs_each_question_against_a_base
     .unwrap();
     let third: RetrievalResults = read_json(files.as_ref(), &dir.join("third.json")).unwrap();
     assert_eq!(third.runs.len(), 1);
+}
+
+/// Every retrieval eval run is authorized like a production run, so a policy that cannot answer retrieves nothing.
+#[tokio::test]
+async fn retrieval_eval_authorizes_every_run() {
+    use crate::{access::fakes::FailingAuthorizer, retrieval::fakes::KeywordRetriever};
+    use retrieval::{RetrievalOptions, RetrievalOutcome, RetrievalResults, run_retrieval};
+
+    let chunks = corpus();
+    let dir = PathBuf::from("/eval");
+    let (ports, files) = eval_ports();
+    let golden = retrieval_golden("roles", "which role grants ROLE_USERS", &chunks[0]);
+    files
+        .write(
+            &dir.join("golden.jsonl"),
+            &serde_json::to_string(&golden).unwrap(),
+        )
+        .unwrap();
+
+    run_retrieval(
+        Arc::new(KeywordRetriever { chunks }),
+        &FailingAuthorizer,
+        &ports,
+        RetrievalOptions {
+            golden: dir.join("golden.jsonl"),
+            out: Some(dir.join("out.json")),
+            baseline: None,
+            concurrency: concurrency(1),
+            questions: vec![],
+            principal: tester(),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+
+    let results: RetrievalResults = read_json(files.as_ref(), &dir.join("out.json")).unwrap();
+    let RetrievalOutcome::Failed { error } = &results.runs[0].outcome else {
+        panic!("{:?}", results.runs[0].outcome);
+    };
+    assert!(error.contains("policy service"), "{error}");
 }
 
 #[test]
@@ -1301,7 +1341,7 @@ fn tune_command_reads_results_and_candidate_files() {
     .unwrap();
     run_tune(
         files.as_ref(),
-        &TuneArgs {
+        &TuneOptions {
             results: dir.join("results.json"),
             candidates: dir.join("candidates.json"),
             out: Some(dir.join("tune.json")),

@@ -5,6 +5,7 @@ use std::{
     cmp::Ordering,
     collections::HashMap,
     fmt,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::Arc,
     time::Instant,
@@ -15,14 +16,14 @@ use futures::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    access::{Access, Authorizer, Principal},
+    access::{Authorizer, Principal},
     domain::CategoryKind,
     llm::ModelRef,
     pipeline::{
-        Ask, Asked, Step, StepErrorKind,
+        Halt, Run,
         report::RunReport,
         steps::Retrieve,
-        trace::{RetrieveRecord, TraceRecord},
+        trace::{RetrieveRecord, Trace, TraceRecord},
     },
     retrieval::{Retriever, hybrid::HybridConfig},
 };
@@ -35,28 +36,22 @@ use super::{
 /// Retrieved matches that count for recall@10.
 pub const SHORT_RECALL_K: usize = 10;
 
-/// What `recall eval retrieval` reads and writes, independent of the retriever it runs.
-#[derive(Debug, clap::Args)]
-pub struct RetrievalArgs {
+/// What [`run_retrieval`] reads and writes, independent of the retriever it runs.
+#[derive(Clone, Debug)]
+pub struct RetrievalOptions {
     /// Golden set, JSONL.
-    #[arg(long)]
     pub golden: PathBuf,
     /// Where to write the results JSON.
-    #[arg(long)]
     pub out: Option<PathBuf>,
     /// A `recall eval run` or `recall eval retrieval` results file to compare each question with; any question that
-    /// loses recall exits non-zero.
-    #[arg(long)]
+    /// loses recall fails the run.
     pub baseline: Option<PathBuf>,
     /// Questions retrieved at once.
-    #[arg(long, default_value_t = 4)]
-    pub concurrency: usize,
-    /// Run only these golden question ids (repeatable, or comma-separated).
-    #[arg(long = "question", value_name = "ID", value_delimiter = ',')]
+    pub concurrency: NonZeroUsize,
+    /// Run only these golden question ids; every question when empty.
     pub questions: Vec<String>,
-    /// Who the questions are asked as.
-    #[command(flatten)]
-    pub asking: super::AsArgs,
+    /// Who every question is asked as; each run is authorized for it, as in production.
+    pub principal: Principal,
 }
 
 /// The `recall eval retrieval` output file.
@@ -111,7 +106,7 @@ pub struct RetrievalRun {
 pub enum RetrievalOutcome {
     /// `Retrieve`'s record; empty when it found nothing.
     Retrieved(RetrieveRecord),
-    /// The retriever errored.
+    /// The authorizer or the retriever errored before retrieval recorded a result.
     Failed {
         /// The error rendered with `{:#?}`.
         error: String,
@@ -271,47 +266,79 @@ impl Comparison {
     }
 }
 
-/// Runs `Retrieve` on every golden question, at most `concurrency` at a time, and scores the results.
-pub async fn evaluate(
-    retriever: Arc<dyn Retriever>,
-    principal: &Principal,
-    access: &Access,
+/// Authorizes and runs `Retrieve` for every golden question, at most `concurrency` at a time, and scores the
+/// results.
+async fn evaluate(
+    retrieve: &Retrieve,
+    asker: &Asker<'_>,
     golden: Vec<GoldenQuestion>,
-    concurrency: usize,
+    concurrency: NonZeroUsize,
 ) -> Vec<RetrievalRun> {
-    let retrieve = Retrieve::new(retriever);
-    let retrieve = &retrieve;
     let mut runs: Vec<(usize, RetrievalRun)> = stream::iter(golden.into_iter().enumerate())
-        .map(|(index, golden)| async move {
-            let ask = Ask::new(golden.question.clone(), principal.clone(), access.clone());
-            (index, retrieve_one(retrieve, &ask, golden).await)
-        })
-        .buffer_unordered(concurrency.max(1))
+        .map(|(index, golden)| async move { (index, retrieve_one(retrieve, asker, golden).await) })
+        .buffer_unordered(concurrency.get())
         .collect()
         .await;
     runs.sort_by_key(|(index, _)| *index);
     runs.into_iter().map(|(_, run)| run).collect()
 }
 
-async fn retrieve_one(retrieve: &Retrieve, ask: &Ask, golden: GoldenQuestion) -> RetrievalRun {
+/// Who asks every question, and what authorizes, names and stamps each run.
+struct Asker<'a> {
+    principal: &'a Principal,
+    authorizer: &'a dyn Authorizer,
+    ports: &'a super::EvalPorts,
+}
+
+async fn retrieve_one(
+    retrieve: &Retrieve,
+    asker: &Asker<'_>,
+    golden: GoldenQuestion,
+) -> RetrievalRun {
     let start = Instant::now();
-    let outcome = match retrieve.run(ask, Asked).await {
-        Ok(scored) => RetrievalOutcome::Retrieved(scored.record),
-        Err(error) => match (error.kind, error.record) {
-            (_, Some(TraceRecord::Retrieve(record))) => RetrievalOutcome::Retrieved(record),
-            (StepErrorKind::Failed(error), _) => RetrievalOutcome::Failed {
-                error: format!("{error:#?}"),
-            },
-            (StepErrorKind::Decline(reason), _) => RetrievalOutcome::Failed {
-                error: format!("declined without a record: {reason:?}"),
-            },
+    let run = Run::authorize(
+        asker.ports.ids.next(),
+        golden.question.clone(),
+        asker.principal.clone(),
+        asker.authorizer,
+        Arc::clone(&asker.ports.clock),
+    )
+    .await;
+    let outcome = match run {
+        Ok(run) => match run.then(retrieve).await {
+            Ok(run) => retrieved(&run.into_parts().3)
+                .expect("a passed retrieve step always records its result"),
+            Err(halted) => retrieved(&halted.trace).unwrap_or_else(|| failed(halted.halt)),
         },
+        Err(halted) => failed(halted.halt),
     };
     RetrievalRun {
         scores: RecallScores::of(&golden, outcome.record()),
         golden,
         duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
         outcome,
+    }
+}
+
+/// The retrieve entry's record, when the step got far enough to write one.
+fn retrieved(trace: &Trace) -> Option<RetrievalOutcome> {
+    trace
+        .entries()
+        .iter()
+        .find_map(|entry| match &entry.record {
+            Some(TraceRecord::Retrieve(record)) => {
+                Some(RetrievalOutcome::Retrieved(record.clone()))
+            }
+            _ => None,
+        })
+}
+
+fn failed(halt: Halt) -> RetrievalOutcome {
+    RetrievalOutcome::Failed {
+        error: match halt {
+            Halt::Failed { error } => error,
+            Halt::Declined { reason, .. } => format!("declined without a record: {reason:?}"),
+        },
     }
 }
 
@@ -429,12 +456,10 @@ pub async fn run_retrieval(
     retriever: Arc<dyn Retriever>,
     authorizer: &dyn Authorizer,
     ports: &super::EvalPorts,
-    args: RetrievalArgs,
+    args: RetrievalOptions,
     setup: Option<RetrievalSetup>,
 ) -> eros::Result<()> {
     let files = ports.files.as_ref();
-    let principal = args.asking.principal();
-    let access = authorizer.access(&principal).await?;
     let golden = super::select(super::read_golden(files, &args.golden)?, &args.questions)?;
     let baseline = match args.baseline.as_deref() {
         Some(path) => Some((path, read_baseline(files, path)?)),
@@ -450,7 +475,12 @@ pub async fn run_retrieval(
         }));
     }
     let start = Instant::now();
-    let runs = evaluate(retriever, &principal, &access, golden, args.concurrency).await;
+    let asker = Asker {
+        principal: &args.principal,
+        authorizer,
+        ports,
+    };
+    let runs = evaluate(&Retrieve::new(retriever), &asker, golden, args.concurrency).await;
     let elapsed = start.elapsed();
     let comparison = baseline
         .map(|(path, records)| compare(&runs, &records, &path.display().to_string()))

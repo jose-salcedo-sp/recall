@@ -39,7 +39,7 @@ aws-sdk-bedrockruntime = { version = "1.148.0", default-features = false, featur
 aws-smithy-types = "1.8.1"
 axum = "0.8.9"
 chrono = { version = "0.4.45", features = ["serde"] }
-clap = { version = "4.6.7", features = ["derive", "env"] }
+clap = { version = "4.6.7", features = ["derive", "env"], optional = true }
 futures = "0.3.34"
 hex = "0.4.3"
 pgvector = { version = "0.4.2", features = ["sqlx"] }
@@ -58,8 +58,17 @@ console = "0.16.6"
 eros = "0.8.1"
 
 [features]
+default = ["cli"]
+# The `recall` command line (`recall::cli`) and its clap options. A domain library that builds `Ports` itself turns
+# default features off.
+cli = ["dep:clap"]
 # The fakes in `*/fakes.rs`, for integration tests; release builds leave them out.
 testing = []
+
+[[bin]]
+name = "recall"
+path = "src/main.rs"
+required-features = ["cli"]
 
 [dev-dependencies]
 recall = { path = ".", features = ["testing"] }

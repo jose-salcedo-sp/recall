@@ -249,7 +249,7 @@ async fn an_unknown_principal_runs_with_no_access() {
     let run = Run::authorize(
         RunId::new(),
         Question::new("q"),
-        Principal::new(crate::domain::UserId("stranger".into())),
+        Principal::new(crate::domain::UserId::new("stranger").unwrap()),
         &StaticAuthorizer::tester(),
         clock(),
     )

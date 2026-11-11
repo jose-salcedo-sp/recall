@@ -2,11 +2,11 @@
 //! Rerank decides which of them answer the question. It does judge access: only chunks the scope admits come back,
 //! as matches or as context.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 
 use recall::{
-    access::{ChunkGrant, ChunkScope, Role, TenantScope, fakes::unrestricted},
-    domain::{Chunk, ChunkId, ChunkVersion, DocumentId, Labels, Sensitivity},
+    access::{Acl, AclEntry, ChunkGrant, ChunkScope, Role, fakes::unrestricted},
+    domain::{Chunk, ChunkId, ChunkVersion, DocumentId, Labels, Sensitivity, UserId},
     ingest::markdown,
     retrieval::Retriever,
 };
@@ -31,8 +31,7 @@ fn chunk(name: &str, text: &str) -> Chunk {
         text: text.into(),
         authoritative: true,
         labels: Labels {
-            acl: Vec::new(),
-            tenant: None,
+            acl: Acl::anyone(),
             sensitivity: Sensitivity::Internal,
         },
     }
@@ -174,10 +173,9 @@ fn labelled(document: &str, locator: &str, text: &str, labels: Labels) -> Chunk 
     }
 }
 
-fn labels(sensitivity: Sensitivity, tenant: Option<&str>, acl: &[&str]) -> Labels {
+fn labels(sensitivity: Sensitivity, acl: &[&str]) -> Labels {
     Labels {
-        acl: acl.iter().map(|entry| (*entry).to_owned()).collect(),
-        tenant: tenant.map(str::to_owned),
+        acl: Acl::only(acl.iter().map(|entry| entry.parse::<AclEntry>().unwrap())),
         sensitivity,
     }
 }
@@ -187,67 +185,53 @@ fn labels(sensitivity: Sensitivity, tenant: Option<&str>, acl: &[&str]) -> Label
 fn labelled_corpus() -> Vec<Chunk> {
     let about = "ROLE_USERS maps users to roles.";
     vec![
-        labelled(
-            "roles",
-            "public",
-            about,
-            labels(Sensitivity::Internal, None, &[]),
-        ),
+        labelled("roles", "public", about, labels(Sensitivity::Internal, &[])),
         labelled(
             "roles",
             "secret",
             "ROLE_USERS overrides: ROLE_ROOT maps users to every role.",
-            labels(Sensitivity::Confidential, None, &[]),
+            labels(Sensitivity::Confidential, &[]),
         ),
         labelled(
-            "acme",
+            "ana",
             "plant",
             about,
-            labels(Sensitivity::Internal, Some("acme"), &[]),
+            labels(Sensitivity::Internal, &["user:ana"]),
         ),
         labelled(
             "hr",
             "pay",
             about,
-            labels(Sensitivity::Public, None, &["hr"]),
+            labels(Sensitivity::Public, &["role:hr"]),
         ),
-        labelled("faq", "open", about, labels(Sensitivity::Public, None, &[])),
+        labelled(
+            "eve",
+            "notes",
+            about,
+            labels(Sensitivity::Public, &["user:eve"]),
+        ),
+        labelled("faq", "open", about, labels(Sensitivity::Public, &[])),
     ]
 }
 
-fn scope(members: &[&str], clearance: Sensitivity, tenants: TenantScope) -> ChunkScope {
+fn scope(user: &str, roles: &[&str], clearance: Sensitivity) -> ChunkScope {
     ChunkScope::new(
-        members.iter().copied(),
-        [ChunkGrant::new(
-            Role::new("reader").unwrap(),
-            clearance,
-            tenants,
-        )],
+        UserId::new(user).unwrap(),
+        roles.iter().map(|role| Role::new(*role).unwrap()),
+        [ChunkGrant::new(Role::new("reader").unwrap(), clearance)],
     )
 }
 
 fn scopes() -> Vec<(&'static str, ChunkScope)> {
     vec![
         ("none", ChunkScope::none()),
+        ("internal", scope("eve", &[], Sensitivity::Internal)),
+        ("public", scope("eve", &[], Sensitivity::Public)),
+        ("ana", scope("ana", &[], Sensitivity::Internal)),
+        ("hr", scope("ana", &["hr"], Sensitivity::Public)),
         (
-            "internal",
-            scope(&["eve"], Sensitivity::Internal, TenantScope::default()),
-        ),
-        (
-            "public",
-            scope(&["eve"], Sensitivity::Public, TenantScope::default()),
-        ),
-        (
-            "acme",
-            scope(
-                &["ana"],
-                Sensitivity::Internal,
-                TenantScope::Only(BTreeSet::from(["acme".to_owned()])),
-            ),
-        ),
-        (
-            "hr",
-            scope(&["eve", "hr"], Sensitivity::Public, TenantScope::default()),
+            "a user named hr",
+            scope("hr", &["eve"], Sensitivity::Public),
         ),
         ("everything", everything()),
     ]
@@ -281,6 +265,27 @@ pub async fn only_chunks_the_scope_admits_come_back(
     Ok(())
 }
 
+/// A user entry matches only that user and a role entry only a holder of the role: a principal whose id is `hr`
+/// does not read a chunk ACL'd to the role `hr`, and its role `eve` does not read a chunk ACL'd to the user `eve`.
+pub async fn a_user_id_never_matches_a_role_entry(
+    make: impl AsyncFnOnce(Vec<Chunk>) -> Box<dyn Retriever>,
+) -> eros::Result<()> {
+    let retriever = make(labelled_corpus()).await;
+    let clash = scope("hr", &["eve"], Sensitivity::Public);
+
+    let found: HashSet<String> = retriever
+        .retrieve(QUESTION, &clash)
+        .await?
+        .into_iter()
+        .map(|hit| hit.chunk.id.0)
+        .collect();
+
+    assert!(found.contains("markdown:faq.md#open"), "{found:?}");
+    assert!(!found.contains("markdown:hr.md#pay"), "{found:?}");
+    assert!(!found.contains("markdown:eve.md#notes"), "{found:?}");
+    Ok(())
+}
+
 macro_rules! retriever_contract {
     (#[$attr:meta] $args:tt => $make:expr) => {
         retriever_contract!(@cases #[$attr] $args => $make;
@@ -292,6 +297,7 @@ macro_rules! retriever_contract {
             equal_matches_rank_by_chunk_id,
             chunks_come_back_as_stored,
             only_chunks_the_scope_admits_come_back,
+            a_user_id_never_matches_a_role_entry,
         );
     };
     (@cases #[$attr:meta] $args:tt => $make:expr; $($case:ident,)*) => {
@@ -366,8 +372,8 @@ mod hybrid {
         let model = HashEmbedder.model();
         sqlx::query(
             "INSERT INTO chunks (id, version, document_id, ordinal, heading, url, text, authoritative, acl,
-                                 tenant, sensitivity, embedding, embedding_model, embedding_model_version)
-             VALUES ($1, $2, $3, $14, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                                 sensitivity, embedding, embedding_model, embedding_model_version)
+             VALUES ($1, $2, $3, $13, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
         )
         .bind(&chunk.id.0)
         .bind(&chunk.version.0)
@@ -376,8 +382,7 @@ mod hybrid {
         .bind(&chunk.url)
         .bind(&chunk.text)
         .bind(chunk.authoritative)
-        .bind(&chunk.labels.acl)
-        .bind(&chunk.labels.tenant)
+        .bind(chunk.labels.acl.to_strings())
         .bind(chunk.labels.sensitivity.as_str())
         .bind(Vector::from(embedding))
         .bind(&model.id)

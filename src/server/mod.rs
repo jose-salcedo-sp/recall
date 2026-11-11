@@ -6,9 +6,9 @@
 //! responding, and lets the [`Authorizer`] decide who reads a persisted run.
 
 pub mod auth;
-pub mod error;
-pub mod openai;
-pub mod render;
+pub(crate) mod error;
+pub(crate) mod openai;
+pub(crate) mod render;
 
 #[cfg(test)]
 mod fixtures;
@@ -27,19 +27,15 @@ use axum::{
     routing::{get, post},
 };
 use chrono::{DateTime, Utc};
-use eros::Context;
 use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{
     access::{Authorizer, RunAccess},
-    clock::{Clock, SystemClock},
+    clock::Clock,
     domain::{RunId, UserId},
-    pipeline::{
-        answerer::{PipelineAnswerer, PipelineArgs},
-        report::{Answerer, Outcome, RunReport},
-    },
-    store::{self, DbArgs, RunStore, StoredRun, runs::PgRunStore},
+    pipeline::report::{Answerer, Outcome, RunReport},
+    store::{RunStore, StoredRun},
 };
 
 use self::{
@@ -47,23 +43,6 @@ use self::{
     error::ApiError,
     openai::{ChatRequest, Chunk, Completion, ModelList, RunSummary},
 };
-
-/// `recall serve` options.
-#[derive(Debug, clap::Args)]
-pub struct Args {
-    /// Database connection.
-    #[command(flatten)]
-    pub db: DbArgs,
-    /// Socket address to listen on.
-    #[arg(long, env = "RECALL_BIND", default_value = "0.0.0.0:8080")]
-    pub bind: String,
-    /// Per-user bearer keys: `key:user_id` pairs, comma-separated.
-    #[arg(long, env = "RECALL_API_KEYS", hide_env_values = true)]
-    pub api_keys: ApiKeys,
-    /// Models, tunables and the access policy, which also decides who reads persisted runs.
-    #[command(flatten)]
-    pub pipeline: PipelineArgs,
-}
 
 /// What every handler shares.
 #[derive(Clone)]
@@ -88,58 +67,6 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/runs/{id}", get(get_run))
         .fallback(unknown_endpoint)
         .with_state(state)
-}
-
-/// Runs `recall serve` until SIGINT or SIGTERM, then shuts the HTTP server down gracefully.
-///
-/// # Errors
-///
-/// When the database or pipeline cannot be set up, the address cannot be bound, or the server fails.
-pub async fn run(args: Args) -> eros::Result<()> {
-    let pool = store::connect(&args.db).await?;
-    let answerer = PipelineAnswerer::from_args(pool.clone(), &args.pipeline).await?;
-    tracing::info!(plan = ?answerer.plan(), "pipeline assembled");
-    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    let state = AppState {
-        authorizer: answerer.authorizer(),
-        answerer: Arc::new(answerer),
-        runs: Arc::new(PgRunStore::new(pool.clone(), Arc::clone(&clock))),
-        keys: Arc::new(args.api_keys),
-        clock,
-    };
-    let listener = tokio::net::TcpListener::bind(&args.bind)
-        .await
-        .with_context(|| format!("binding {}", args.bind))?;
-    tracing::info!(addr = %listener.local_addr()?, "recall serve listening");
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
-    Ok(())
-}
-
-/// As PID 1 in a container the process gets no default SIGTERM handler, so it has to exit on SIGTERM itself.
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
-    #[cfg(unix)]
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut signal) => {
-                signal.recv().await;
-            }
-            Err(error) => {
-                tracing::warn!(%error, "no SIGTERM handler");
-                std::future::pending::<()>().await;
-            }
-        }
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-    tokio::select! {
-        () = ctrl_c => {}
-        () = terminate => {}
-    }
 }
 
 async fn models(_: Caller) -> Json<ModelList> {
@@ -167,7 +94,7 @@ async fn chat_completions(
     }
 
     let summary = RunSummary::new(&report);
-    tracing::info!(%run_id, user = user.0, outcome = summary.outcome, "run finished");
+    tracing::info!(%run_id, user = user.as_str(), outcome = summary.outcome, "run finished");
     let content = match &report.outcome {
         Outcome::Answered(answer) => render::answer(answer),
         Outcome::Declined { sources, .. } => render::declined(sources),
@@ -210,7 +137,7 @@ struct RunView {
 impl From<StoredRun> for RunView {
     fn from(run: StoredRun) -> Self {
         Self {
-            status: store::runs::status(&run.report.outcome),
+            status: crate::store::runs::status(&run.report.outcome),
             report: run.report,
             user: run.user,
             created_at: run.created_at,
@@ -243,7 +170,7 @@ async fn get_run(
     let decision = access.runs().decide(&principal, &run.user);
     tracing::info!(
         %run_id,
-        reader = principal.id().0,
+        reader = principal.id().as_str(),
         policy = ?state.authorizer.policy(),
         ?decision,
         "run read"

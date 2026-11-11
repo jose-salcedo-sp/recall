@@ -9,7 +9,7 @@ use recall::{
     ingest::{
         Source,
         fakes::StaticSource,
-        markdown::{Connector, MarkdownArgs},
+        markdown::{Connector, MarkdownConfig},
     },
 };
 
@@ -22,8 +22,7 @@ fn fake() -> StaticSource {
         url: format!("https://wiki.example.test/{external_id}"),
         updated_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
         labels: Labels {
-            acl: vec![],
-            tenant: None,
+            acl: recall::access::Acl::anyone(),
             sensitivity: Sensitivity::Internal,
         },
         chunks: locators
@@ -67,14 +66,11 @@ impl MarkdownDocs {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, text).unwrap();
         }
-        let connector = Connector::from_args(&MarkdownArgs {
-            docs: Some(root.clone()),
-            docs_base_url: Some("https://docs.example.test/blob/main".into()),
-            authoritative: vec![],
-            evidence: vec![],
-            skip: vec![],
+        let connector = Connector::new(&MarkdownConfig {
+            docs: root.clone(),
+            base_url: Some("https://docs.example.test/blob/main".into()),
+            ..MarkdownConfig::default()
         })
-        .unwrap()
         .unwrap();
         Self { root, connector }
     }

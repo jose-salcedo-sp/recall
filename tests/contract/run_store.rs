@@ -7,7 +7,7 @@ use recall::{
 use crate::runs::reports;
 
 pub async fn every_outcome_round_trips(store: &dyn RunStore) -> eros::Result<()> {
-    let user = UserId("ana".into());
+    let user = UserId::new("ana").unwrap();
     for (report, _) in reports() {
         store.save(&user, &report).await?;
 
@@ -20,7 +20,7 @@ pub async fn every_outcome_round_trips(store: &dyn RunStore) -> eros::Result<()>
 
 pub async fn an_unknown_id_is_none(store: &dyn RunStore) -> eros::Result<()> {
     let (report, _) = reports().remove(0);
-    store.save(&UserId("ana".into()), &report).await?;
+    store.save(&UserId::new("ana").unwrap(), &report).await?;
 
     assert!(store.get(RunId::new()).await?.is_none());
     Ok(())
@@ -33,20 +33,20 @@ pub async fn a_duplicate_id_is_rejected_and_the_first_run_kept(
     let (first, _) = runs.remove(0);
     let (mut second, _) = runs.remove(0);
     second.id = first.id;
-    store.save(&UserId("ana".into()), &first).await?;
+    store.save(&UserId::new("ana").unwrap(), &first).await?;
 
-    let duplicate = store.save(&UserId("jose".into()), &second).await;
+    let duplicate = store.save(&UserId::new("jose").unwrap(), &second).await;
 
     assert!(duplicate.is_err());
     let stored = store.get(first.id).await?.expect("the first run was saved");
-    assert_eq!(stored.user, UserId("ana".into()));
+    assert_eq!(stored.user, UserId::new("ana").unwrap());
     assert_eq!(stored.report, first);
     Ok(())
 }
 
 pub async fn the_store_s_clock_stamps_each_run(store: &dyn RunStore) -> eros::Result<()> {
     let (report, _) = reports().remove(0);
-    store.save(&UserId("ana".into()), &report).await?;
+    store.save(&UserId::new("ana").unwrap(), &report).await?;
 
     let stored = store.get(report.id).await?.expect("the run was saved");
     assert_eq!(stored.created_at, FixedClock::default().now());

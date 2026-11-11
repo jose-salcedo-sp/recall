@@ -9,7 +9,7 @@ The core is domain-free. Corpora, answering rules, golden sets and front ends be
 
 ## What it does
 
-- **Ingest**: a `Source` port returns document snapshots; chunks are content-addressed (`ChunkRef {id, version}`), so a trace stays reproducible after the corpus changes. A markdown-directory connector ships; any other connector names itself and plugs in through `ingest::run_with` without a core or schema change.
+- **Ingest**: a `Source` port returns document snapshots; chunks are content-addressed (`ChunkRef {id, version}`), so a trace stays reproducible after the corpus changes. A markdown-directory connector ships; any other connector names itself and plugs in through `ingest::ingest` without a core or schema change.
 - **Retrieve**: hybrid full-text (BM25 over prose, exact identifier tokens) and vector search in Postgres with pgvector, fused by reciprocal rank, with neighbouring sections as context and optional glossary expansion.
 - **Decide and explain**: a judge (System One by default) classifies the question and answers yes/no questions with calibrated probabilities; an LLM writes the answer as claims whose citations are constrained to this run's chunks.
 - **Provenance checks**: a vendor-neutral `Judge` port screens sources before they reach the LLM (injection, relevance, contradiction, evidence) and checks each claim against the chunks it cites (quoted spans, then supports / contradicts / says nothing). Failed claims decline the run or are stripped.
@@ -193,7 +193,7 @@ A check that names a judge never runs as a quieter one: with `RECALL_SYSTEM_ONE_
 
 ### Access control
 
-[`config/access.json`](config/access.json), or the file `RECALL_ACCESS` names, is required by `serve`, `ingest` and `eval`. It defines roles (a sensitivity `clearance`, the `tenants` they read, and whose `runs`), the roles `everyone` holds, `members` per user id, and `labels` rules that relabel documents at ingestion by document-id prefix. A chunk is readable when its ACL is empty or names the user or one of its roles, and one of its roles clears its sensitivity and tenant; anything else, including a user the policy does not know, is denied. `recall eval run` and `recall eval retrieval` ask as `--as` (`RECALL_EVAL_AS`). The model is in [the design](docs/design.md#8-access-control).
+[`config/access.json`](config/access.json), or the file `RECALL_ACCESS` names, is required by `serve`, `ingest` and `eval`. It defines roles (a sensitivity `clearance` and whose `runs`), the roles `everyone` holds (a baseline grant to every authenticated caller; empty in the shipped file), `members` per user id, and `labels` rules that tighten documents' labels at ingestion by `source` and `path` prefix, e.g. `{ "source": "markdown", "path": "hr/", "acl": ["role:hr"], "sensitivity": "confidential" }`. ACL entries are `user:<id>` or `role:<name>`. A chunk is readable when its ACL is empty or names the user or one of its roles, and one of its roles clears its sensitivity; anything else, including a user the policy does not know, is denied. `recall eval run` and `recall eval retrieval` ask as `--as` (`RECALL_EVAL_AS`). The model is in [the design](docs/design.md#8-access-control).
 
 See `.env.example`. Key variables: `DATABASE_URL`, `RECALL_API_KEYS`, `RECALL_ACCESS`, `RECALL_DOCS_DIR`, `RECALL_DOCS_BASE_URL`, `RECALL_DOCS_AUTHORITATIVE` / `RECALL_DOCS_EVIDENCE` / `RECALL_DOCS_SKIP` (which paths are authoritative, which are supporting evidence, and which are left out), and the model backends below.
 

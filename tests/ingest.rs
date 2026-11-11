@@ -7,11 +7,7 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 use recall::{
-    access::{
-        ConnectorLabels,
-        fakes::FailingLabeler,
-        rules::{AccessConfig, LabelRules},
-    },
+    access::{Acl, ConnectorLabels, fakes::FailingLabeler, rules::AccessConfig},
     domain::{ChunkDraft, Document, Labels, Sensitivity, SourceName},
     ingest::{
         EmbeddingModelMismatch, Source, Sources,
@@ -41,8 +37,7 @@ fn document(source: &SourceName, external_id: &str, chunks: &[(&str, &str)]) -> 
         url: format!("https://example.test/{external_id}"),
         updated_at: updated(1),
         labels: Labels {
-            acl: vec!["group:arm".into()],
-            tenant: None,
+            acl: Acl::only(["role:arm".parse().unwrap()]),
             sensitivity: Sensitivity::Internal,
         },
         chunks: chunks
@@ -554,15 +549,14 @@ async fn label_rules_set_the_stored_labels_and_relabelling_makes_a_new_version(p
             document(&markdown::NAME, "eng/roles.md", &[("intro", "Roles.")]),
         ])
     };
-    let rules = LabelRules::new(
-        AccessConfig::parse(
-            r#"{ "roles": {}, "labels": [
-                { "documents": "markdown:hr/", "acl": ["hr"], "sensitivity": "confidential" }
-            ] }"#,
-        )
-        .unwrap()
-        .labels(),
-    );
+    let rules = AccessConfig::parse(
+        r#"{ "roles": {}, "labels": [
+            { "source": "markdown", "path": "hr/", "acl": ["role:arm"], "sensitivity": "confidential" }
+        ] }"#,
+    )
+    .unwrap()
+    .labels()
+    .clone();
     ingest(
         &PgChunkStore::new(pool.clone()),
         &HashEmbedder,
@@ -589,12 +583,12 @@ async fn label_rules_set_the_stored_labels_and_relabelling_makes_a_new_version(p
         [
             (
                 "markdown:eng/roles.md#intro".into(),
-                vec!["group:arm".into()],
+                vec!["role:arm".into()],
                 "internal".into()
             ),
             (
                 "markdown:hr/pay.md#bands".into(),
-                vec!["hr".into()],
+                vec!["role:arm".into()],
                 "confidential".into()
             ),
         ]
@@ -671,7 +665,7 @@ async fn ingestion_into_memory_is_readable_by_a_retriever() {
         ("roles", "ROLE_USERS maps users to roles."),
         ("lunch", "Lunch is at noon."),
     ]);
-    roles.labels.acl.clear();
+    roles.labels.acl = Acl::anyone();
     let sources = sources(vec![static_source(vec![roles])]);
     ingest(&store, &HashEmbedder, &ConnectorLabels, &sources, false)
         .await

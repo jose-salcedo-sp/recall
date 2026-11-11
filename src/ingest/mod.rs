@@ -3,8 +3,8 @@
 //! supersedes what the snapshot no longer contains. Ingestion never reads or writes pipeline runs.
 //!
 //! A connector is any [`Source`]: it names itself with a [`SourceName`], and nothing in the core or the schema lists
-//! the names. [`markdown`] is the shipped connector; a domain application passes its own to [`run_with`] or
-//! [`ingest`], and checks it with the port's contract suite, `ingest::contract` and `recall::source_contract!` (both
+//! the names. [`markdown`] is the shipped connector; a domain application passes its own to [`ingest`], with its
+//! own [`ChunkStore`], [`Embedder`] and [`Labeler`], and checks it with the port's contract suite, `ingest::contract` and `recall::source_contract!` (both
 //! behind the `testing` feature).
 
 #[cfg(any(test, feature = "testing"))]
@@ -17,16 +17,10 @@ use async_trait::async_trait;
 use eros::{Context, IntoUnion, ReshapeUnion};
 
 use crate::{
-    access::{
-        Labeler,
-        rules::{AccessArgs, LabelRules},
-    },
+    access::Labeler,
     domain::{Document, SourceName},
-    llm::{self, Embedder, ModelRef, backend::EmbedArgs},
-    store::{
-        self, DbArgs,
-        chunks::{ChunkStore, ChunkStoreFailed, PgChunkStore, Stored},
-    },
+    llm::{Embedder, ModelRef},
+    store::chunks::{ChunkStore, ChunkStoreFailed, Stored},
 };
 
 /// A connector that lists every document it currently holds. Each call is a full snapshot: a document missing from
@@ -85,75 +79,6 @@ impl fmt::Debug for Sources {
             .entries(self.iter().map(Source::name))
             .finish()
     }
-}
-
-/// What every ingestion needs, whichever connectors it runs. A domain binary flattens this beside its own
-/// connector's options and calls [`run_with`].
-#[derive(Debug, clap::Args)]
-pub struct IngestArgs {
-    /// Database connection.
-    #[command(flatten)]
-    pub db: DbArgs,
-    /// Embedding backend; its model is recorded on every chunk.
-    #[command(flatten)]
-    pub embed: EmbedArgs,
-    /// Re-ingest every source unit from scratch with the configured embedding model, replacing chunks embedded with any other model.
-    #[arg(long)]
-    pub reembed: bool,
-    /// The access policy, whose label rules set each document's labels.
-    #[command(flatten)]
-    pub access: AccessArgs,
-}
-
-/// `recall ingest` options.
-#[derive(Debug, clap::Args)]
-pub struct Args {
-    /// Database, embedder and `--reembed`.
-    #[command(flatten)]
-    pub ingest: IngestArgs,
-    /// The markdown corpus.
-    #[command(flatten)]
-    pub markdown: markdown::MarkdownArgs,
-}
-
-/// Runs `recall ingest` with the shipped markdown connector; see [`run_with`].
-///
-/// # Errors
-///
-/// When the markdown options are invalid, `RECALL_DOCS_DIR` is unset, or [`run_with`] fails.
-pub async fn run(args: Args) -> eros::Result<()> {
-    let Some(markdown) = markdown::Connector::from_args(&args.markdown)? else {
-        eros::bail!("no sources are configured (set RECALL_DOCS_DIR)");
-    };
-    let sources = Sources::new(vec![Box::new(markdown)])?;
-    run_with(&args.ingest, &sources).await
-}
-
-/// Connects, ingests `sources`, and fails if any source failed.
-///
-/// # Errors
-///
-/// When `sources` is empty, the access policy does not load, the database or embedder cannot be set up, [`ingest`]
-/// fails, or any source's report carries an error.
-#[eros::context("ingesting sources {:?}", sources)]
-pub async fn run_with(args: &IngestArgs, sources: &Sources) -> eros::Result<()> {
-    eros::ensure!(!sources.is_empty(), "no sources are configured");
-    let labeler = LabelRules::new(args.access.load()?.labels());
-    let store = PgChunkStore::new(store::connect(&args.db).await?);
-    let embedder = llm::embedder(&args.embed).await?;
-
-    let reports = ingest(&store, embedder.as_ref(), &labeler, sources, args.reembed).await?;
-    let failed: Vec<&str> = reports
-        .iter()
-        .filter(|r| r.error.is_some())
-        .map(|r| r.source.as_str())
-        .collect();
-    eros::ensure!(
-        failed.is_empty(),
-        "ingest failed for: {}",
-        failed.join(", ")
-    );
-    Ok(())
 }
 
 /// Current chunks use a different embedding model than the configured one, and `--reembed` is off.

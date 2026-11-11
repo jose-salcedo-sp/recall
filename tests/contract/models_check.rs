@@ -1,19 +1,18 @@
-//! `recall models check` against wiremock backends: Workers AI's OpenAI-compatible routes for embeddings and Explain,
+//! `recall models check` (`recall::cli`) against wiremock backends: Workers AI's OpenAI-compatible routes for embeddings and Explain,
 //! and Kev's `/v1/systemone` for System One, since `workers-ai` takes no URL. One call per port, each reported with
 //! its model, endpoint and outcome, and the key never printed.
 
 use recall::{
-    config::ConfigArgs,
-    llm::{
-        EMBEDDING_DIM,
+    cli::{
+        args::{AccessArgs, ConfigArgs},
         backend::{
             ChatArgs, ChatBackendKind, EmbedArgs, EmbedBackendKind, SystemOneArgs,
             SystemOneBackendKind,
         },
-        openai::ReasoningEffort,
+        models::{Outcome, Port, check},
+        pipeline::PipelineArgs,
     },
-    models::{Outcome, Port, check},
-    pipeline::answerer::PipelineArgs,
+    llm::{EMBEDDING_DIM, openai::ReasoningEffort},
 };
 use serde_json::json;
 use wiremock::{
@@ -83,7 +82,7 @@ fn args(server: &MockServer, system_one: SystemOneBackendKind) -> PipelineArgs {
             system_one_account_id: None,
             system_one_key: kev.then(|| TOKEN.parse().unwrap()),
         },
-        access: recall::access::rules::AccessArgs {
+        access: AccessArgs {
             path: recall::access::rules::DEFAULT_PATH.into(),
         },
     }

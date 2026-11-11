@@ -131,8 +131,7 @@ pub(crate) mod fixtures {
             text: text.into(),
             authoritative: false,
             labels: Labels {
-                acl: vec![],
-                tenant: None,
+                acl: crate::access::Acl::anyone(),
                 sensitivity: Sensitivity::Internal,
             },
         }

@@ -3,10 +3,9 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use aws_config::{BehaviorVersion, SdkConfig, timeout::TimeoutConfig};
+use aws_config::{BehaviorVersion, timeout::TimeoutConfig};
 use aws_sdk_bedrockruntime::{
     Client,
-    config::{Credentials, ProvideCredentials},
     error::DisplayErrorContext,
     operation::converse::ConverseOutput,
     types::{
@@ -17,18 +16,15 @@ use aws_sdk_bedrockruntime::{
 };
 use aws_smithy_types::{Document, Number};
 use eros::Context;
-use reqwest::Url;
 use serde_json::Value;
 
-use super::{ChatModel, ChatRequest, ChatResponse, ModelRef, backend::Endpoint};
+use super::{ChatModel, ChatRequest, ChatResponse, ModelRef};
 
 /// The tool the model is forced to call when a request has a `json_schema`; its input is the response.
 const RESPOND_TOOL: &str = "respond";
 /// A long structured answer can take minutes to generate; this bounds the call including its retries.
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(300);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Resolving credentials may query instance metadata.
-const CREDENTIALS_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// [`ChatModel`] over the Converse API. A request with a `json_schema` forces a tool call whose input is the reply.
 pub struct BedrockChat {
@@ -57,61 +53,6 @@ impl BedrockChat {
             .await;
         Self::new(Client::new(&config), model_id)
     }
-}
-
-/// The AWS region and the provider that resolves credentials, as both Bedrock adapters load them.
-pub(crate) async fn aws_environment() -> String {
-    let config = ambient_config().await;
-    let region = config
-        .region()
-        .map_or_else(|| "unset".to_owned(), ToString::to_string);
-    let credentials = match config.credentials_provider() {
-        None => "none configured".to_owned(),
-        Some(provider) => {
-            match tokio::time::timeout(CREDENTIALS_TIMEOUT, provider.provide_credentials()).await {
-                Ok(Ok(credentials)) => format!("from {}", provider_name(&credentials)),
-                Ok(Err(error)) => format!("none resolved: {}", DisplayErrorContext(error)),
-                Err(_) => format!("none resolved within {CREDENTIALS_TIMEOUT:?}"),
-            }
-        }
-    };
-    format!("AWS region {region}, credentials {credentials}")
-}
-
-/// Where Bedrock Runtime sends a request for `path`, as both Bedrock adapters load it: `AWS_ENDPOINT_URL` when set,
-/// otherwise the region's endpoint. `None` with no region, or an endpoint URL that does not parse.
-pub(crate) async fn bedrock_endpoint(path: &str) -> Option<Endpoint> {
-    let config = ambient_config().await;
-    let base: Url = match config.endpoint_url() {
-        Some(url) => url.parse().ok()?,
-        None => format!("https://bedrock-runtime.{}.amazonaws.com", config.region()?)
-            .parse()
-            .ok()?,
-    };
-    Some(Endpoint::new(&base, path))
-}
-
-async fn ambient_config() -> SdkConfig {
-    aws_config::defaults(BehaviorVersion::latest())
-        .timeout_config(
-            TimeoutConfig::builder()
-                .connect_timeout(CONNECT_TIMEOUT)
-                .build(),
-        )
-        .load()
-        .await
-}
-
-fn provider_name(credentials: &Credentials) -> String {
-    // `Credentials` names its provider only in `Debug`, which redacts the secret; nothing else from it is used.
-    let debug = format!("{credentials:?}");
-    debug
-        .split_once("provider_name: \"")
-        .and_then(|(_, rest)| rest.split_once('"'))
-        .map_or_else(
-            || "an unnamed provider".to_owned(),
-            |(name, _)| format!("the {name} provider"),
-        )
 }
 
 #[async_trait]

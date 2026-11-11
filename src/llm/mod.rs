@@ -5,7 +5,6 @@
 //! This module owns wire formats, timeouts and backend selection; prompts belong to the pipeline steps that send
 //! them.
 
-pub mod backend;
 pub mod bedrock_chat;
 pub mod bedrock_embed;
 #[cfg(any(test, feature = "testing"))]
@@ -20,7 +19,33 @@ use std::{fmt, str::FromStr};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-pub use self::backend::{embedder, explain_model, judge, system_one_client};
+/// Where a backend sends its requests: scheme, host, port and path. Credentials, query and fragment are dropped, so
+/// it is safe to print.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Endpoint(String);
+
+impl Endpoint {
+    /// `path` under `base`, as the adapters build their routes.
+    #[cfg(feature = "cli")]
+    pub(crate) fn new(base: &reqwest::Url, path: &str) -> Self {
+        let port = base
+            .port()
+            .map(|port| format!(":{port}"))
+            .unwrap_or_default();
+        Self(format!(
+            "{}://{}{port}{}/{path}",
+            base.scheme(),
+            base.host_str().unwrap_or_default(),
+            base.path().trim_end_matches('/'),
+        ))
+    }
+}
+
+impl fmt::Display for Endpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 /// A non-empty bearer token. `Debug` and `Display` hide it, so formatting a config, a client or an error cannot
 /// print it.

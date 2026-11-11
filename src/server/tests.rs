@@ -37,7 +37,7 @@ fn policy() -> Arc<dyn Authorizer> {
             r#"{
                 "roles": {
                     "reader": { "clearance": "internal", "runs": "own" },
-                    "auditor": { "clearance": "confidential", "tenants": "any", "runs": "any" }
+                    "auditor": { "clearance": "confidential", "runs": "any" }
                 },
                 "everyone": ["reader"],
                 "members": { "audit": ["auditor"] }
@@ -357,7 +357,7 @@ async fn every_outcome_is_persisted_for_the_caller() {
         let reply = send(&app.router, chat(Some(ANA_KEY), &ask("Is it?"))).await;
         let id = run_id(&reply.json());
         let stored = app.runs.get(id).await.unwrap().expect("run persisted");
-        assert_eq!(stored.user, UserId("ana".into()));
+        assert_eq!(stored.user, UserId::new("ana").unwrap());
         assert_eq!(stored.report.question, Question::new("Is it?"));
         assert_eq!(stored.report.outcome, outcome);
         assert_eq!(crate::store::runs::status(&stored.report.outcome), status);
@@ -519,7 +519,7 @@ async fn the_answerer_is_asked_on_behalf_of_the_authenticated_user() {
     send(&app.router, chat(Some(ANA_KEY), &ask("Is it?"))).await;
 
     let principals = recording.principals.lock().unwrap().clone();
-    assert_eq!(principals, [Principal::new(UserId("ana".into()))]);
+    assert_eq!(principals, [Principal::new(UserId::new("ana").unwrap())]);
 }
 
 /// A run whose retrieve entry denied one chunk.
@@ -543,7 +543,9 @@ async fn run_with_a_denial(runs: &MemoryRunStore) -> RunId {
     };
     json[1]["access"] = json!([denied]);
     report.trace = serde_json::from_value(json).unwrap();
-    runs.save(&UserId("ana".into()), &report).await.unwrap();
+    runs.save(&UserId::new("ana").unwrap(), &report)
+        .await
+        .unwrap();
     report.id
 }
 

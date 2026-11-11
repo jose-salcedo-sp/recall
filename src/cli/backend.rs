@@ -15,9 +15,10 @@ use std::{error::Error, num::NonZeroUsize, str::FromStr, sync::Arc};
 
 use reqwest::Url;
 
-use super::{
-    ApiKey, ChatModel, Embedder,
-    bedrock_chat::{BedrockChat, aws_environment, bedrock_endpoint},
+use super::aws::{aws_environment, bedrock_endpoint};
+use crate::llm::{
+    ApiKey, ChatModel, Embedder, Endpoint,
+    bedrock_chat::BedrockChat,
     bedrock_embed::BedrockEmbedder,
     judge::{Judge, SystemOneJudge},
     openai::{
@@ -154,33 +155,6 @@ pub(crate) enum InvalidBackend {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-}
-
-/// Where a backend sends its requests: scheme, host, port and path. Credentials, query and fragment are dropped, so
-/// it is safe to print.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Endpoint(String);
-
-impl Endpoint {
-    /// `path` under `base`, as the adapters build their routes.
-    pub(crate) fn new(base: &Url, path: &str) -> Self {
-        let port = base
-            .port()
-            .map(|port| format!(":{port}"))
-            .unwrap_or_default();
-        Self(format!(
-            "{}://{}{port}{}/{path}",
-            base.scheme(),
-            base.host_str().unwrap_or_default(),
-            base.path().trim_end_matches('/'),
-        ))
-    }
-}
-
-impl std::fmt::Display for Endpoint {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
 }
 
 /// The backend selection that settings are checked against.

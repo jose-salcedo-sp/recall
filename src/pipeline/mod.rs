@@ -16,6 +16,24 @@
 //! }
 //! ```
 //!
+//! A run starts only at [`Run::authorize`], so every trace opens with the policy's decision. Neither a run nor its
+//! [`Ask`] can be built with an access no authorizer gave:
+//!
+//! ```compile_fail,E0624
+//! use std::sync::Arc;
+//! use recall::{clock::SystemClock, domain::RunId, pipeline::{Ask, Run}};
+//!
+//! fn forge(ask: Ask) { let _ = Run::new(RunId::new(), ask, Arc::new(SystemClock)); }
+//! ```
+//!
+//! ```compile_fail,E0624
+//! use recall::{access::{Access, Principal}, domain::Question, pipeline::Ask};
+//!
+//! fn forge(question: Question, principal: Principal, access: Access) -> Ask {
+//!     Ask::new(question, principal, access)
+//! }
+//! ```
+//!
 //! Only the classification join can change a run's category:
 //!
 //! ```compile_fail,E0624
@@ -154,8 +172,9 @@ pub struct Ask {
 }
 
 impl Ask {
-    /// `access` is what the policy gave `principal`.
-    pub fn new(question: Question, principal: Principal, access: Access) -> Self {
+    /// `access` is what the policy gave `principal`. Private, so an `Ask` outside this module comes from
+    /// [`Run::authorize`].
+    fn new(question: Question, principal: Principal, access: Access) -> Self {
         Self {
             question,
             principal,
@@ -180,8 +199,8 @@ impl Ask {
 
     /// `question` asked by [`crate::access::fakes::tester`] with unrestricted access, for tests whose subject is
     /// not access.
-    #[cfg(any(test, feature = "testing"))]
-    pub fn unrestricted(question: impl Into<String>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn unrestricted(question: impl Into<String>) -> Self {
         Self::new(
             Question::new(question),
             crate::access::fakes::tester(),
@@ -203,7 +222,8 @@ pub struct Run<TCategory, TState> {
 
 impl Run<Unclassified, Asked> {
     /// A run with an empty trace, for an `ask` whose access is already decided. `clock` stamps each trace entry.
-    pub fn new(id: RunId, ask: Ask, clock: Arc<dyn Clock>) -> Self {
+    /// Private: every other run starts at [`Run::authorize`], so its trace opens with the authorize entry.
+    fn new(id: RunId, ask: Ask, clock: Arc<dyn Clock>) -> Self {
         Self {
             id,
             ask,
@@ -490,7 +510,7 @@ pub enum Halt {
 }
 
 impl<TCategory: Category, TState: Send> Run<TCategory, TState> {
-    /// The run's id, fixed at [`Run::new`].
+    /// The run's id, fixed at [`Run::authorize`].
     pub fn id(&self) -> RunId {
         self.id
     }
